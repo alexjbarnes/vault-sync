@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/joho/godotenv"
@@ -41,6 +42,16 @@ func Load() (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)
 	}
+
+	// Resolve SyncDir to an absolute path at startup. Downstream code uses
+	// it for path traversal checks (ensuring decrypted server paths stay
+	// within the sync directory). Those checks rely on string prefix
+	// comparison, which only works reliably with absolute paths.
+	absDir, err := filepath.Abs(cfg.SyncDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving sync dir to absolute path: %w", err)
+	}
+	cfg.SyncDir = absDir
 
 	return cfg, nil
 }

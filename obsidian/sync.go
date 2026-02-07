@@ -301,7 +301,19 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 		return fmt.Errorf("decrypting path: %w", err)
 	}
 
+	// filepath.Join resolves ".." segments, so a malicious path like
+	// "../../etc/passwd" becomes "/etc/passwd" rather than staying inside
+	// syncDir. We check the resolved path has syncDir as a prefix to
+	// prevent writes outside the sync directory. This is defense in depth:
+	// the path comes from AES-GCM decryption so it can only be crafted by
+	// someone with the vault encryption key, but we guard against bugs in
+	// decryption or a compromised server. syncDir is resolved to an
+	// absolute path at startup (in config.Load) so this prefix check is
+	// reliable.
 	fullPath := filepath.Join(s.syncDir, path)
+	if !strings.HasPrefix(fullPath, s.syncDir+string(os.PathSeparator)) {
+		return fmt.Errorf("path traversal blocked: %q resolves outside sync dir", path)
+	}
 
 	if push.Deleted {
 		s.logger.Info("delete", slog.String("path", path))
