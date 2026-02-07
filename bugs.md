@@ -52,11 +52,9 @@ All three `responseCh` reads in `Push` now have a 30s timeout. On timeout, `writ
 `perFileMax` from the init response is stored on SyncClient. `pull()` rejects responses where Size exceeds 2x perFileMax (headroom for encryption overhead) or where Pieces exceeds the expected count for the given Size. Falls back to 10MB if the server didn't send perFileMax.
 
 ### 10. Watcher ignores dotfiles including .obsidian
-**File:** `obsidian/watcher.go:191`
+**Status:** Fixed in `obsidian/watcher.go`
 
-The `shouldIgnore` filter drops all paths starting with `.`. Obsidian Sync syncs `.obsidian/` (workspace, plugins, config). The scanner handles `.obsidian` correctly during reconciliation, but the live watcher skips it, so local config changes won't push.
-
-Fix: exempt `.obsidian` from the dotfile filter, matching what the scanner already does.
+`shouldIgnore` now exempts `.obsidian` from the dotfile filter, matching the scanner.
 
 ### 11. Watcher returns nil on fsnotify channel close
 **File:** `obsidian/watcher.go:69,97`
