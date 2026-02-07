@@ -228,7 +228,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 	// Get base version (previous server state).
 	baseText := ""
 	if hasPrev && !prev.Deleted && prev.UID > 0 {
-		baseEnc, err := r.client.pull(ctx, prev.UID)
+		baseEnc, err := r.client.pullDirect(ctx, prev.UID)
 		if err != nil {
 			r.logger.Warn("reconcile: failed to pull base for merge, server wins",
 				slog.String("path", path),
@@ -250,7 +250,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 	}
 
 	// Get new server version.
-	serverEnc, err := r.client.pull(ctx, push.UID)
+	serverEnc, err := r.client.pullDirect(ctx, push.UID)
 	if err != nil {
 		return fmt.Errorf("pulling server version for merge: %w", err)
 	}
@@ -318,7 +318,7 @@ func (r *Reconciler) jsonMerge(ctx context.Context, path string, push PushMessag
 	}
 
 	// Pull server content.
-	serverEnc, err := r.client.pull(ctx, push.UID)
+	serverEnc, err := r.client.pullDirect(ctx, push.UID)
 	if err != nil {
 		return fmt.Errorf("pulling server config for merge: %w", err)
 	}
@@ -402,7 +402,7 @@ func (r *Reconciler) downloadServerFile(ctx context.Context, path string, push P
 		return nil
 	}
 
-	content, err := r.client.pull(ctx, push.UID)
+	content, err := r.client.pullDirect(ctx, push.UID)
 	if err != nil {
 		return fmt.Errorf("pulling %s (uid %d): %w", path, push.UID, err)
 	}

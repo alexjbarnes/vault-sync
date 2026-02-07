@@ -3,24 +3,24 @@
 ## High
 
 ### 1. Deadlock between readLoop and Push via writeMu + responseCh
-**File:** `obsidian/sync.go`
+**Status:** Fixed in `obsidian/sync.go`
 
-If the server pushes a file from another device while the watcher is mid-Push, `processPush` calls `pull()` which tries to acquire `writeMu`. Push holds `writeMu` waiting on `responseCh`, which only the read loop can feed. The hash cache dedup only prevents echoes of our own pushes. A push from another device passes the hash check, `processPush` is called, and the application deadlocks.
+Replaced the read loop + writeMu + responseCh architecture with a single event loop. A reader goroutine feeds `inboundCh`. The event loop selects on `inboundCh` (server messages), `opCh` (watcher push operations), and a heartbeat ticker. All writes happen from the event loop, eliminating `writeMu` and the deadlock. Server pushes arriving mid-operation are handled inline (folders/deletes/hash-matches) or deferred to `pendingPulls` and processed after the current operation completes.
 
 ### 2. s.conn replaced without synchronization during reconnect
-**File:** `obsidian/sync.go:157`
+**Status:** Fixed in `obsidian/sync.go`
 
-`Connect` assigns `s.conn` with no lock. The heartbeat goroutine accesses `s.conn` concurrently. During reconnect, `connCancel()` is called but there is a window before the heartbeat actually exits. The heartbeat could call `s.conn.Close()` after `s.conn` has been reassigned to the new connection, closing the fresh connection. The watcher goroutine running Push could also be mid-write when `s.conn` changes.
+The heartbeat is now a ticker case in the event loop, not a separate goroutine. Only the reader goroutine and the event loop touch the connection. On reconnect, `connCancel` stops the reader, then `Connect` replaces `s.conn`, and a new reader is started. No concurrent access to `s.conn`.
 
 ### 3. TOCTOU on Connected() check in watcher
-**File:** `obsidian/watcher.go:127,183`
+**Status:** Mitigated
 
-`handleWrite` checks `Connected()` then proceeds to `Push()`. Between those points the connection can drop and `s.conn` can be replaced by `reconnect`. The watcher may write to a stale/closed connection. `requeueIfDisconnected` partially mitigates this on failure, but the write to the old connection is still attempted.
+The watcher still checks `Connected()` before pushing, but `Push()` now submits an op to `opCh` and blocks for the result. If the connection drops mid-push, the event loop returns an error, the op gets an error result, and `requeueIfDisconnected` queues it. The watcher never writes to the connection directly.
 
 ### 4. Race condition on s.version and s.initial
-**File:** `obsidian/sync.go:166-167,234-237,255-256,377-378`
+**Status:** Fixed in `obsidian/sync.go`
 
-`s.version` and `s.initial` are written by `WaitForReady` and `readLoop`, and read by `Connect` when constructing the `InitMessage`. No mutex protects these fields. In the current flow reads happen before reconnect starts so there is no actual concurrent access today, but the design is fragile.
+`s.version` and `s.initial` are now only written by the event loop goroutine (via `handleInbound` and `processPush`) and by `WaitForReady` which runs before the event loop starts. `Connect` reads them to build the init message, but only during reconnect which happens in the event loop goroutine after the reader has been stopped. No concurrent access.
 
 ## Medium
 
@@ -55,9 +55,9 @@ If the server pushes a file from another device while the watcher is mid-Push, `
 `dmp.PatchApply(patches, serverText)` returns `(string, []bool)`. The second return value indicates which patches were successfully applied. The code discards it. Failed patches mean the user's local edits silently disappear from the merge result.
 
 ### 11. Heartbeat closes connection without holding writeMu
-**File:** `obsidian/sync.go:1009`
+**Status:** Fixed in `obsidian/sync.go`
 
-When the heartbeat detects a timeout, it calls `s.conn.Close()` without holding `writeMu`. The watcher goroutine might be mid-push with `writeMu` held, writing binary chunks. The close races with the active write.
+The heartbeat is now a ticker case in the event loop select. All writes happen from the event loop goroutine. There is no separate heartbeat goroutine and no writeMu. No concurrent access to the connection.
 
 ### 12. drainQueue modifies map while iterating and callees add entries back
 **File:** `obsidian/watcher.go:224-238`

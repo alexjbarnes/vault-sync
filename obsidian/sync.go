@@ -32,16 +32,31 @@ const (
 
 var errResponseTimeout = fmt.Errorf("timed out waiting for server response")
 
+// inboundMsg wraps a message read from the WebSocket by the reader goroutine.
+type inboundMsg struct {
+	typ  websocket.MessageType
+	data []byte
+	err  error
+}
+
+// syncOp is an operation submitted to the event loop by the watcher.
+type syncOp struct {
+	path      string
+	content   []byte
+	mtime     int64
+	ctime     int64
+	isFolder  bool
+	isDeleted bool
+	result    chan error
+}
+
 // SyncClient manages a WebSocket connection to an Obsidian Sync server.
 //
-// Architecture: the WebSocket is full-duplex, so reads and writes happen
-// independently. A single goroutine (Listen) owns all conn.Read calls.
-// Writes come from the watcher (Push) and heartbeat goroutines, serialized
-// by writeMu to preserve multi-message protocol sequences.
-//
-// The only cross-goroutine communication is responseCh, which delivers
-// server responses (push acks, chunk acks) from the read loop to the
-// watcher goroutine that sent the request.
+// Architecture: a reader goroutine feeds inboundCh with raw WebSocket
+// messages. A single event loop goroutine (Listen) processes inbound
+// messages, watcher operations (opCh), and heartbeat ticks. All writes
+// to the connection happen from the event loop, eliminating the need
+// for a write mutex and preventing deadlocks between push and pull.
 type SyncClient struct {
 	conn   *websocket.Conn
 	logger *slog.Logger
@@ -62,18 +77,12 @@ type SyncClient struct {
 
 	onReady func(version int64)
 
-	// writeMu serializes all conn.Write calls. Required because a client
-	// push is a multi-message sequence (metadata JSON + binary chunks)
-	// that must be atomic from the server's perspective. Without this,
-	// a heartbeat ping could land between push metadata and a binary
-	// chunk, breaking the protocol.
-	writeMu sync.Mutex
+	// opCh receives push operations from the watcher goroutine.
+	// The event loop processes them one at a time.
+	opCh chan syncOp
 
-	// responseCh delivers server responses to the watcher goroutine.
-	// The read loop sends push acks and chunk acks here. The watcher's
-	// Push method receives from it. Buffered at 1 since at most one
-	// request/response exchange is in flight (writeMu ensures this).
-	responseCh chan json.RawMessage
+	// inboundCh receives messages from the reader goroutine.
+	inboundCh chan inboundMsg
 
 	// Hash cache for deduplication. Keyed by relative path.
 	// encHash: encrypted hash from the wire (for outbound echo comparison).
@@ -85,13 +94,20 @@ type SyncClient struct {
 	lastMsgMu   sync.Mutex
 
 	// connCancel cancels the per-connection context. Used to stop the
-	// heartbeat goroutine when the connection drops before reconnecting.
+	// reader goroutine when the connection drops before reconnecting.
 	connCancel context.CancelFunc
 
 	// connected signals whether the WebSocket is live. The watcher checks
 	// this to decide whether to push or queue.
 	connected   bool
 	connectedMu sync.RWMutex
+
+	// pendingPulls holds server pushes that need content but arrived while
+	// the event loop was busy with another operation. Only accessed from
+	// the event loop goroutine, but the mutex is here because
+	// handlePushWhileBusy is called from readResponse during operations.
+	pendingPulls   []pendingPull
+	pendingPullsMu sync.Mutex
 }
 
 type hashEntry struct {
@@ -130,14 +146,14 @@ func NewSyncClient(cfg SyncConfig, logger *slog.Logger) *SyncClient {
 		vault:             cfg.Vault,
 		state:             cfg.State,
 		onReady:           cfg.OnReady,
-		responseCh:        make(chan json.RawMessage, 1),
+		opCh:              make(chan syncOp, 64),
 		hashCache:         make(map[string]hashEntry),
 	}
 }
 
 // Connect dials the WebSocket, sends init, and waits for auth confirmation.
 func (s *SyncClient) Connect(ctx context.Context) error {
-	// Cancel any previous heartbeat goroutine from a prior connection.
+	// Cancel any previous reader goroutine from a prior connection.
 	if s.connCancel != nil {
 		s.connCancel()
 	}
@@ -175,7 +191,7 @@ func (s *SyncClient) Connect(ctx context.Context) error {
 	}
 
 	// Read auth response. This happens before Listen starts, so we read
-	// directly without going through the read loop.
+	// directly without going through the event loop.
 	var initResp InitResponse
 	if err := s.readJSON(ctx, &initResp); err != nil {
 		s.conn.Close(websocket.StatusInternalError, "auth read failed")
@@ -200,9 +216,42 @@ func (s *SyncClient) Connect(ctx context.Context) error {
 // serverPushes. After ready returns, no goroutine is reading the
 // connection, so the caller can use pull() directly for reconciliation.
 func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPush) error {
-	connCtx, connCancel := context.WithCancel(ctx)
-	s.connCancel = connCancel
-	go s.heartbeat(connCtx)
+	// Send pings during the catch-up window so the server doesn't
+	// timeout our connection while replaying missed pushes.
+	pingTicker := time.NewTicker(heartbeatCheckAt)
+	pingDone := make(chan struct{})
+	var pingWg sync.WaitGroup
+	pingWg.Add(1)
+	defer func() {
+		pingTicker.Stop()
+		close(pingDone)
+		pingWg.Wait()
+	}()
+	go func() {
+		defer pingWg.Done()
+		for {
+			select {
+			case <-pingDone:
+				return
+			case <-ctx.Done():
+				return
+			case <-pingTicker.C:
+				// Re-check pingDone before writing so we don't race
+				// with the caller after WaitForReady returns.
+				select {
+				case <-pingDone:
+					return
+				default:
+				}
+				s.lastMsgMu.Lock()
+				elapsed := time.Since(s.lastMessage)
+				s.lastMsgMu.Unlock()
+				if elapsed > pingAfter {
+					s.writeJSON(ctx, map[string]string{"op": "ping"})
+				}
+			}
+		}
+	}()
 
 	for {
 		typ, data, err := s.conn.Read(ctx)
@@ -271,41 +320,55 @@ func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPus
 	}
 }
 
-// Listen is the live read loop with automatic reconnection. It owns all
-// conn.Read calls exclusively. On disconnect, it reconnects with
-// exponential backoff, re-runs WaitForReady to pick up missed server
-// pushes, then resumes. Returns only on permanent errors or context
-// cancellation.
+// startReader launches a goroutine that reads from the WebSocket and
+// feeds inboundCh. Exits when connCtx is cancelled or a read error
+// occurs. The error is delivered as the final message on inboundCh.
+// The goroutine captures ch by value so that if startReader is called
+// again for a new connection, the old goroutine cannot send stale
+// messages into the new channel.
+func (s *SyncClient) startReader(connCtx context.Context) {
+	ch := make(chan inboundMsg, 64)
+	s.inboundCh = ch
+	go func() {
+		for {
+			typ, data, err := s.conn.Read(connCtx)
+			select {
+			case ch <- inboundMsg{typ: typ, data: data, err: err}:
+			case <-connCtx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+}
+
+// Listen is the event loop with automatic reconnection. It owns all
+// writes to the connection. Processes inbound messages (server pushes,
+// acks), watcher operations (pushes), and heartbeat ticks. Returns only
+// on permanent errors or context cancellation.
 func (s *SyncClient) Listen(ctx context.Context) error {
 	backoff := reconnectMin
 
+	connCtx, connCancel := context.WithCancel(ctx)
+	s.connCancel = connCancel
+	s.startReader(connCtx)
+
 	for {
-		err := s.readLoop(ctx)
+		err := s.eventLoop(ctx, connCtx)
 		if err == nil {
 			return nil
 		}
 
-		// Mark disconnected so the watcher queues instead of pushing.
 		s.setConnected(false)
-
-		// Stop the heartbeat for the dead connection.
-		if s.connCancel != nil {
-			s.connCancel()
-		}
+		connCancel()
 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-
 		if isPermanentError(err) {
 			return fmt.Errorf("permanent error: %w", err)
-		}
-
-		// Drain responseCh so the watcher doesn't read a stale response
-		// from the old connection after we reconnect.
-		select {
-		case <-s.responseCh:
-		default:
 		}
 
 		s.logger.Warn("connection lost, reconnecting",
@@ -337,103 +400,408 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 			continue
 		}
 
-		// Connected again, reset backoff.
+		// Fresh connection context and reader for the new connection.
+		connCtx, connCancel = context.WithCancel(ctx)
+		s.connCancel = connCancel
+		s.startReader(connCtx)
+
 		backoff = reconnectMin
 		s.logger.Info("reconnected")
 	}
 }
 
-// readLoop is the inner read loop for a single connection. Returns on any
-// read error, which triggers reconnection in Listen.
-func (s *SyncClient) readLoop(ctx context.Context) error {
+// eventLoop is the single event loop for one connection. It selects on
+// inbound messages, watcher operations, and the heartbeat ticker. All
+// writes happen here, so no mutex is needed. Returns on read error or
+// context cancellation.
+func (s *SyncClient) eventLoop(ctx context.Context, connCtx context.Context) error {
+	ticker := time.NewTicker(heartbeatCheckAt)
+	defer ticker.Stop()
+
 	for {
-		typ, data, err := s.conn.Read(ctx)
-		if err != nil {
-			return fmt.Errorf("reading message: %w", err)
-		}
-		s.touchLastMessage()
+		select {
+		case msg := <-s.inboundCh:
+			if msg.err != nil {
+				return fmt.Errorf("reading message: %w", msg.err)
+			}
+			s.touchLastMessage()
 
-		if typ == websocket.MessageBinary {
-			s.logger.Debug("unexpected binary frame in read loop", slog.Int("bytes", len(data)))
-			continue
-		}
-
-		var msg GenericMessage
-		if err := json.Unmarshal(data, &msg); err != nil {
-			s.logger.Debug("unparseable text frame", slog.Int("bytes", len(data)))
-			continue
-		}
-
-		switch msg.Op {
-		case "pong":
-			continue
-
-		case "push":
-			var push PushMessage
-			if err := json.Unmarshal(data, &push); err != nil {
-				s.logger.Warn("failed to decode push", slog.String("error", err.Error()))
+			if msg.typ == websocket.MessageBinary {
+				s.logger.Debug("unexpected binary frame in event loop", slog.Int("bytes", len(msg.data)))
 				continue
 			}
-			if push.UID > s.version {
-				s.version = push.UID
+
+			if err := s.handleInbound(ctx, msg.data); err != nil {
+				return err
 			}
-			if err := s.processPush(ctx, push); err != nil {
-				s.logger.Warn("processing push",
-					slog.Int64("uid", push.UID),
-					slog.String("error", err.Error()),
-				)
+			s.drainPendingPulls(ctx)
+
+		case op := <-s.opCh:
+			if err := s.handlePushOp(ctx, op); err != nil {
+				// Connection error during push. The op already got
+				// its result. Return to trigger reconnect.
+				return err
+			}
+			s.drainPendingPulls(ctx)
+
+		case <-ticker.C:
+			s.lastMsgMu.Lock()
+			elapsed := time.Since(s.lastMessage)
+			s.lastMsgMu.Unlock()
+
+			if elapsed > disconnectAfter {
+				s.logger.Warn("connection timed out, closing")
+				s.conn.Close(websocket.StatusGoingAway, "timeout")
+				return fmt.Errorf("heartbeat timeout")
 			}
 
-		default:
-			// Response to a watcher Push request.
-			select {
-			case s.responseCh <- json.RawMessage(data):
-			case <-ctx.Done():
-				return ctx.Err()
+			if elapsed > pingAfter {
+				if err := s.writeJSON(ctx, map[string]string{"op": "ping"}); err != nil {
+					return fmt.Errorf("sending ping: %w", err)
+				}
 			}
+
+		case <-ctx.Done():
+			return ctx.Err()
+
+		case <-connCtx.Done():
+			return connCtx.Err()
 		}
 	}
 }
 
-// reconnect dials a fresh WebSocket, re-authenticates, and processes any
-// server pushes we missed while disconnected. The server replays all
-// changes since our last version, so no full reconciliation is needed.
-func (s *SyncClient) reconnect(ctx context.Context) error {
-	if err := s.Connect(ctx); err != nil {
+// handleInbound processes a single inbound text message from the server.
+func (s *SyncClient) handleInbound(ctx context.Context, data []byte) error {
+	var msg GenericMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		s.logger.Debug("unparseable text frame", slog.Int("bytes", len(data)))
+		return nil
+	}
+
+	switch msg.Op {
+	case "pong":
+		return nil
+
+	case "push":
+		var push PushMessage
+		if err := json.Unmarshal(data, &push); err != nil {
+			s.logger.Warn("failed to decode push", slog.String("error", err.Error()))
+			return nil
+		}
+		if push.UID > s.version {
+			s.version = push.UID
+		}
+		if err := s.processPush(ctx, push); err != nil {
+			s.logger.Warn("processing push",
+				slog.Int64("uid", push.UID),
+				slog.String("error", err.Error()),
+			)
+		}
+		return nil
+
+	default:
+		// Unexpected message outside of a push/pull operation.
+		s.logger.Debug("unexpected message in event loop", slog.String("op", msg.Op))
+		return nil
+	}
+}
+
+// handlePushOp executes a watcher push operation from the event loop.
+// All writes and reads happen inline. Returns a connection-level error
+// if the write fails (triggers reconnect). Operation-level errors are
+// sent to op.result.
+func (s *SyncClient) handlePushOp(ctx context.Context, op syncOp) error {
+	err := s.executePush(ctx, op)
+	op.result <- err
+	// Distinguish connection errors from operation errors. If the
+	// connection is dead, return the error to trigger reconnect.
+	if err != nil && !s.isOperationError(err) {
+		return err
+	}
+	return nil
+}
+
+// executePush does the actual push protocol sequence from the event loop.
+func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
+	encPath, err := s.cipher.EncryptPath(op.path)
+	if err != nil {
+		return fmt.Errorf("encrypting path: %w", err)
+	}
+
+	ext := ""
+	if !op.isFolder {
+		if idx := strings.LastIndex(op.path, "."); idx >= 0 {
+			ext = op.path[idx+1:]
+		}
+	}
+
+	// Folders and deletions: metadata only, single request/response.
+	if op.isFolder || op.isDeleted {
+		msg := ClientPushMessage{
+			Op:        "push",
+			Path:      encPath,
+			Extension: ext,
+			Hash:      "",
+			CTime:     0,
+			MTime:     0,
+			Folder:    op.isFolder,
+			Deleted:   op.isDeleted,
+		}
+
+		if err := s.writeJSON(ctx, msg); err != nil {
+			return fmt.Errorf("sending push metadata: %w", err)
+		}
+
+		if _, err := s.readResponse(ctx); err != nil {
+			return err
+		}
+
+		if op.isDeleted {
+			s.hashCacheMu.Lock()
+			delete(s.hashCache, op.path)
+			s.hashCacheMu.Unlock()
+			s.persistPushedDelete(op.path)
+		} else if op.isFolder {
+			s.persistPushedFolder(op.path)
+		}
+
+		s.logger.Info("pushed",
+			slog.String("path", op.path),
+			slog.Bool("folder", op.isFolder),
+			slog.Bool("deleted", op.isDeleted),
+		)
+		return nil
+	}
+
+	// File with content.
+	var encContent []byte
+	if len(op.content) > 0 {
+		encContent, err = s.cipher.EncryptContent(op.content)
+		if err != nil {
+			return fmt.Errorf("encrypting content: %w", err)
+		}
+	} else {
+		encContent = []byte{}
+	}
+
+	h := sha256.Sum256(op.content)
+	hashHex := hex.EncodeToString(h[:])
+	encHash, err := s.cipher.EncryptPath(hashHex)
+	if err != nil {
+		return fmt.Errorf("encrypting hash: %w", err)
+	}
+
+	pieces := 0
+	if len(encContent) > 0 {
+		pieces = int(math.Ceil(float64(len(encContent)) / float64(chunkSize)))
+	}
+
+	msg := ClientPushMessage{
+		Op:        "push",
+		Path:      encPath,
+		Extension: ext,
+		Hash:      encHash,
+		CTime:     op.ctime,
+		MTime:     op.mtime,
+		Folder:    false,
+		Deleted:   false,
+		Size:      len(encContent),
+		Pieces:    pieces,
+	}
+
+	// Populate hash cache before sending so server echoes are filtered.
+	s.hashCacheMu.Lock()
+	s.hashCache[op.path] = hashEntry{encHash: encHash, contentHash: hashHex}
+	s.hashCacheMu.Unlock()
+
+	if err := s.writeJSON(ctx, msg); err != nil {
+		s.removeHashCache(op.path)
+		return fmt.Errorf("sending push metadata: %w", err)
+	}
+
+	rawResp, err := s.readResponse(ctx)
+	if err != nil {
+		s.removeHashCache(op.path)
 		return err
 	}
 
-	var serverPushes []ServerPush
-	if err := s.WaitForReady(ctx, &serverPushes); err != nil {
-		return err
+	var resp GenericMessage
+	if err := json.Unmarshal(rawResp, &resp); err != nil {
+		s.removeHashCache(op.path)
+		return fmt.Errorf("decoding push response: %w", err)
 	}
 
-	// Process any pushes the server sent during the catch-up window.
-	// WaitForReady already started a new heartbeat, and we're still
-	// the only goroutine reading, so processPush can call pull inline.
-	for _, sp := range serverPushes {
-		if err := s.processPush(ctx, sp.Msg); err != nil {
-			s.logger.Warn("processing reconnect push",
-				slog.String("path", sp.Path),
+	// "ok" means file is unchanged on server, skip upload.
+	if resp.Res == "ok" || resp.Op == "ok" {
+		s.logger.Debug("push skipped, unchanged", slog.String("path", op.path))
+		return nil
+	}
+
+	// Send binary chunks, waiting for ack after each.
+	for i := 0; i < pieces; i++ {
+		start := i * chunkSize
+		end := start + chunkSize
+		if end > len(encContent) {
+			end = len(encContent)
+		}
+
+		if err := s.conn.Write(ctx, websocket.MessageBinary, encContent[start:end]); err != nil {
+			s.removeHashCache(op.path)
+			return fmt.Errorf("sending chunk %d/%d: %w", i+1, pieces, err)
+		}
+
+		if _, err := s.readResponse(ctx); err != nil {
+			s.removeHashCache(op.path)
+			return err
+		}
+	}
+
+	s.persistPushedFile(op.path, op.content, encHash, op.mtime)
+
+	s.logger.Info("pushed",
+		slog.String("path", op.path),
+		slog.Int("bytes", len(op.content)),
+	)
+	return nil
+}
+
+// readResponse reads from inboundCh until a non-push, non-pong text
+// message arrives (the server's response to our request). Server pushes
+// that arrive while waiting are processed inline. This mirrors
+// Obsidian's onMessage handler which routes pushes and pongs separately
+// from request/response pairs.
+func (s *SyncClient) readResponse(ctx context.Context) (json.RawMessage, error) {
+	timeout := time.NewTimer(responseTimeout)
+	defer timeout.Stop()
+
+	for {
+		select {
+		case msg := <-s.inboundCh:
+			if msg.err != nil {
+				return nil, fmt.Errorf("reading response: %w", msg.err)
+			}
+			s.touchLastMessage()
+
+			if msg.typ == websocket.MessageBinary {
+				// Binary frame during a push ack wait is unexpected.
+				s.logger.Debug("unexpected binary frame waiting for response", slog.Int("bytes", len(msg.data)))
+				continue
+			}
+
+			op := gjson.GetBytes(msg.data, "op").Str
+
+			if op == "pong" {
+				continue
+			}
+
+			// Server push arrived while we're waiting for a response.
+			// Process it inline (folders/deletes don't need pull, and
+			// hash-matched files are skipped). File pushes that need
+			// content are queued for later since we can't pull mid-push.
+			if op == "push" {
+				s.handlePushWhileBusy(ctx, msg.data)
+				continue
+			}
+
+			return json.RawMessage(msg.data), nil
+
+		case <-timeout.C:
+			return nil, errResponseTimeout
+
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// pendingPull tracks a server push that needs content but arrived while
+// the event loop was busy with another operation (push or pull). These
+// are processed after the current operation completes.
+type pendingPull struct {
+	push PushMessage
+	path string
+}
+
+// handlePushWhileBusy processes a server push that arrives while we're
+// in the middle of a push or pull operation. Folders, deletes, and
+// hash-matched files are handled immediately. Files that need content
+// are deferred.
+func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
+	var push PushMessage
+	if err := json.Unmarshal(data, &push); err != nil {
+		s.logger.Warn("failed to decode push while busy", slog.String("error", err.Error()))
+		return
+	}
+	if push.UID > s.version {
+		s.version = push.UID
+	}
+
+	path, err := s.cipher.DecryptPath(push.Path)
+	if err != nil {
+		s.logger.Warn("decrypting push path while busy", slog.String("error", err.Error()))
+		return
+	}
+
+	// Handle cases that don't need a pull.
+	if push.Deleted {
+		s.logger.Info("delete", slog.String("path", path))
+		if err := s.vault.DeleteFile(path); err != nil {
+			s.logger.Warn("deleting file from push while busy", slog.String("path", path), slog.String("error", err.Error()))
+		}
+		s.removeHashCache(path)
+		s.persistServerFile(path, push, true)
+		s.state.DeleteLocalFile(s.vaultID, path)
+		return
+	}
+
+	if push.Folder {
+		s.logger.Info("mkdir", slog.String("path", path))
+		if err := s.vault.MkdirAll(path); err != nil {
+			s.logger.Warn("mkdir from push while busy", slog.String("path", path), slog.String("error", err.Error()))
+		}
+		s.persistServerFile(path, push, false)
+		s.persistLocalFolder(path)
+		return
+	}
+
+	// Hash cache hit means content is identical.
+	if push.Hash != "" {
+		s.hashCacheMu.Lock()
+		cached, ok := s.hashCache[path]
+		s.hashCacheMu.Unlock()
+		if ok && cached.encHash == push.Hash {
+			s.logger.Debug("skipping push while busy, hash unchanged", slog.String("path", path))
+			s.persistServerFile(path, push, false)
+			return
+		}
+	}
+
+	// Needs content. We can't pull mid-operation, so queue it. The event
+	// loop will process it when the current operation completes. We store
+	// it on a slice that the event loop checks after each operation.
+	s.queuePendingPull(pendingPull{push: push, path: path})
+}
+
+func (s *SyncClient) queuePendingPull(pp pendingPull) {
+	s.pendingPullsMu.Lock()
+	s.pendingPulls = append(s.pendingPulls, pp)
+	s.pendingPullsMu.Unlock()
+}
+
+func (s *SyncClient) drainPendingPulls(ctx context.Context) {
+	s.pendingPullsMu.Lock()
+	pulls := s.pendingPulls
+	s.pendingPulls = nil
+	s.pendingPullsMu.Unlock()
+
+	for _, pp := range pulls {
+		if err := s.processPush(ctx, pp.push); err != nil {
+			s.logger.Warn("processing deferred push",
+				slog.String("path", pp.path),
 				slog.String("error", err.Error()),
 			)
 		}
 	}
-
-	return nil
-}
-
-// isPermanentError returns true for errors that won't resolve on retry.
-func isPermanentError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	// Auth failure from the server's init response.
-	if strings.Contains(msg, "auth failed") {
-		return true
-	}
-	return false
 }
 
 // ServerPush pairs a decoded PushMessage with its decrypted plaintext path.
@@ -444,8 +812,8 @@ type ServerPush struct {
 }
 
 // processPush handles a single server push: decrypts the path, then creates
-// folders, removes deleted files, or pulls and writes file content. After
-// writing, it persists the server and local file state to bbolt.
+// folders, removes deleted files, or pulls and writes file content. Called
+// from the event loop, so pull() reads from inboundCh safely.
 func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 	path, err := s.cipher.DecryptPath(push.Path)
 	if err != nil {
@@ -485,8 +853,7 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 		}
 	}
 
-	// Pull content inline. This is safe because we're in the read loop and
-	// the pull response + binary frames are the next messages on the wire.
+	// Pull content. Called from the event loop so we read from inboundCh.
 	content, err := s.pull(ctx, push.UID)
 	if err != nil {
 		return fmt.Errorf("pulling %s (uid %d): %w", path, push.UID, err)
@@ -510,8 +877,8 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 
-	h := sha256.Sum256(plaintext)
-	contentHash := hex.EncodeToString(h[:])
+	contentH := sha256.Sum256(plaintext)
+	contentHash := hex.EncodeToString(contentH[:])
 	s.hashCacheMu.Lock()
 	s.hashCache[path] = hashEntry{
 		encHash:     push.Hash,
@@ -697,39 +1064,38 @@ func (s *SyncClient) persistPushedDelete(path string) {
 	s.state.DeleteLocalFile(s.vaultID, path)
 }
 
-// Pull sends a pull request and reads the response + binary frames inline.
-// Called from the read loop, so the pull response is the next message on
-// the wire. No channel coordination needed. Public so the reconciler can
-// pull content for base/server versions during three-way merge.
+// Pull sends a pull request and reads the response + binary frames
+// directly from the connection. Used by the reconciler during startup
+// before the reader goroutine is running.
 func (s *SyncClient) Pull(ctx context.Context, uid int64) ([]byte, error) {
-	return s.pull(ctx, uid)
+	return s.pullDirect(ctx, uid)
 }
 
 func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
-	// Acquire writeMu to prevent heartbeat pings from interleaving with
-	// the pull request. The read side is already exclusive to this goroutine.
-	s.writeMu.Lock()
 	req := PullRequest{Op: "pull", UID: uid}
-	err := s.writeJSON(ctx, req)
-	s.writeMu.Unlock()
-	if err != nil {
+	if err := s.writeJSON(ctx, req); err != nil {
 		return nil, fmt.Errorf("sending pull request: %w", err)
 	}
 
-	// Read messages until we get the pull response. Pongs may arrive
-	// if the heartbeat sent a ping just before the pull request.
+	// Read from inboundCh until we get the pull response. Pongs and
+	// server pushes may arrive in between.
 	var resp PullResponse
 	for {
-		_, data, err := s.conn.Read(ctx)
+		raw, err := s.readInbound(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("reading pull response: %w", err)
 		}
-		s.touchLastMessage()
 
-		if gjson.GetBytes(data, "op").Str == "pong" {
+		op := gjson.GetBytes(raw.data, "op").Str
+		if op == "pong" {
 			continue
 		}
-		if err := json.Unmarshal(data, &resp); err != nil {
+		if op == "push" {
+			s.handlePushWhileBusy(ctx, raw.data)
+			continue
+		}
+
+		if err := json.Unmarshal(raw.data, &resp); err != nil {
 			return nil, fmt.Errorf("decoding pull response: %w", err)
 		}
 		break
@@ -739,12 +1105,10 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 		return nil, nil
 	}
 
-	// Guard against a malicious or buggy server sending a huge Size that
-	// would cause an OOM on the make() below. Encrypted content adds
-	// overhead (IV + GCM tag) so we allow 2x perFileMax as headroom.
+	// Guard against a malicious or buggy server sending a huge Size.
 	maxSize := s.perFileMax * 2
 	if maxSize == 0 {
-		maxSize = 10 * 1024 * 1024 // 10MB fallback if server didn't send perFileMax
+		maxSize = 10 * 1024 * 1024
 	}
 	if resp.Size > maxSize {
 		return nil, fmt.Errorf("pull response size %d exceeds limit %d", resp.Size, maxSize)
@@ -757,197 +1121,71 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 	// Read binary frames containing the encrypted content.
 	content := make([]byte, 0, resp.Size)
 	for i := 0; i < resp.Pieces; i++ {
-		_, data, err := s.conn.Read(ctx)
+		raw, err := s.readInbound(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("reading piece %d/%d: %w", i+1, resp.Pieces, err)
 		}
-		s.touchLastMessage()
-		content = append(content, data...)
+		if raw.typ != websocket.MessageBinary {
+			// Text frame during binary transfer. Could be a pong or push.
+			op := gjson.GetBytes(raw.data, "op").Str
+			if op == "pong" {
+				i-- // retry this piece
+				continue
+			}
+			if op == "push" {
+				s.handlePushWhileBusy(ctx, raw.data)
+				i-- // retry this piece
+				continue
+			}
+			return nil, fmt.Errorf("expected binary frame, got text: %s", string(raw.data))
+		}
+		content = append(content, raw.data...)
 	}
 
 	return content, nil
 }
 
-// Push uploads a file change to the server. Called from the watcher
-// goroutine. Writes are serialized by writeMu, and server responses
-// are received via responseCh (delivered by the read loop).
-func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtime int64, ctime int64, isFolder bool, isDeleted bool) error {
-	encPath, err := s.cipher.EncryptPath(path)
-	if err != nil {
-		return fmt.Errorf("encrypting path: %w", err)
-	}
-
-	ext := ""
-	if !isFolder {
-		if idx := strings.LastIndex(path, "."); idx >= 0 {
-			ext = path[idx+1:]
-		}
-	}
-
-	// Folders and deletions: metadata only, single request/response.
-	if isFolder || isDeleted {
-		msg := ClientPushMessage{
-			Op:        "push",
-			Path:      encPath,
-			Extension: ext,
-			Hash:      "",
-			CTime:     0,
-			MTime:     0,
-			Folder:    isFolder,
-			Deleted:   isDeleted,
-		}
-
-		s.writeMu.Lock()
-		err := s.writeJSON(ctx, msg)
-		s.writeMu.Unlock()
-		if err != nil {
-			return fmt.Errorf("sending push metadata: %w", err)
-		}
-
-		select {
-		case <-s.responseCh:
-		case <-time.After(responseTimeout):
-			return errResponseTimeout
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-
-		if isDeleted {
-			s.hashCacheMu.Lock()
-			delete(s.hashCache, path)
-			s.hashCacheMu.Unlock()
-			s.persistPushedDelete(path)
-		} else if isFolder {
-			s.persistPushedFolder(path)
-		}
-
-		s.logger.Info("pushed",
-			slog.String("path", path),
-			slog.Bool("folder", isFolder),
-			slog.Bool("deleted", isDeleted),
-		)
-		return nil
-	}
-
-	// File with content.
-	var encContent []byte
-	if len(content) > 0 {
-		encContent, err = s.cipher.EncryptContent(content)
-		if err != nil {
-			return fmt.Errorf("encrypting content: %w", err)
-		}
-	} else {
-		encContent = []byte{}
-	}
-
-	h := sha256.Sum256(content)
-	hashHex := hex.EncodeToString(h[:])
-	encHash, err := s.cipher.EncryptPath(hashHex)
-	if err != nil {
-		return fmt.Errorf("encrypting hash: %w", err)
-	}
-
-	// Empty files have 0 pieces and no binary frames are sent.
-	// math.Ceil on empty content would give 1 piece, sending a spurious
-	// empty binary frame that the server doesn't expect.
-	pieces := 0
-	if len(encContent) > 0 {
-		pieces = int(math.Ceil(float64(len(encContent)) / float64(chunkSize)))
-	}
-
-	msg := ClientPushMessage{
-		Op:        "push",
-		Path:      encPath,
-		Extension: ext,
-		Hash:      encHash,
-		CTime:     ctime,
-		MTime:     mtime,
-		Folder:    false,
-		Deleted:   false,
-		Size:      len(encContent),
-		Pieces:    pieces,
-	}
-
-	// Populate hash cache before sending so the read loop can filter out
-	// the server's echo of this push. Without this, the echo arrives as a
-	// "push" op, processPush calls pull, pull tries to acquire writeMu,
-	// and we deadlock because Push holds writeMu waiting for responseCh.
-	s.hashCacheMu.Lock()
-	s.hashCache[path] = hashEntry{encHash: encHash, contentHash: hashHex}
-	s.hashCacheMu.Unlock()
-
-	// Hold writeMu for the entire push sequence: metadata + all binary
-	// chunks. This prevents heartbeat pings from breaking the sequence.
-	s.writeMu.Lock()
-	if err := s.writeJSON(ctx, msg); err != nil {
-		s.writeMu.Unlock()
-		s.removeHashCache(path)
-		return fmt.Errorf("sending push metadata: %w", err)
-	}
-
-	// Wait for server response (delivered by read loop via responseCh).
-	var rawResp json.RawMessage
+// readInbound reads the next message from inboundCh with a timeout.
+func (s *SyncClient) readInbound(ctx context.Context) (inboundMsg, error) {
 	select {
-	case rawResp = <-s.responseCh:
+	case msg := <-s.inboundCh:
+		if msg.err != nil {
+			return msg, msg.err
+		}
+		s.touchLastMessage()
+		return msg, nil
 	case <-time.After(responseTimeout):
-		s.writeMu.Unlock()
-		s.removeHashCache(path)
-		return errResponseTimeout
+		return inboundMsg{}, errResponseTimeout
 	case <-ctx.Done():
-		s.writeMu.Unlock()
-		s.removeHashCache(path)
+		return inboundMsg{}, ctx.Err()
+	}
+}
+
+// Push submits a push operation to the event loop and waits for the result.
+// Called from the watcher goroutine.
+func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtime int64, ctime int64, isFolder bool, isDeleted bool) error {
+	op := syncOp{
+		path:      path,
+		content:   content,
+		mtime:     mtime,
+		ctime:     ctime,
+		isFolder:  isFolder,
+		isDeleted: isDeleted,
+		result:    make(chan error, 1),
+	}
+
+	select {
+	case s.opCh <- op:
+	case <-ctx.Done():
 		return ctx.Err()
 	}
 
-	var resp GenericMessage
-	if err := json.Unmarshal(rawResp, &resp); err != nil {
-		s.writeMu.Unlock()
-		s.removeHashCache(path)
-		return fmt.Errorf("decoding push response: %w", err)
+	select {
+	case err := <-op.result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-
-	// "ok" means file is unchanged on server, skip upload.
-	if resp.Res == "ok" || resp.Op == "ok" {
-		s.writeMu.Unlock()
-		s.logger.Debug("push skipped, unchanged", slog.String("path", path))
-		return nil
-	}
-
-	// Send binary chunks, waiting for ack after each.
-	for i := 0; i < pieces; i++ {
-		start := i * chunkSize
-		end := start + chunkSize
-		if end > len(encContent) {
-			end = len(encContent)
-		}
-
-		if err := s.conn.Write(ctx, websocket.MessageBinary, encContent[start:end]); err != nil {
-			s.writeMu.Unlock()
-			s.removeHashCache(path)
-			return fmt.Errorf("sending chunk %d/%d: %w", i+1, pieces, err)
-		}
-
-		select {
-		case <-s.responseCh:
-		case <-time.After(responseTimeout):
-			s.writeMu.Unlock()
-			s.removeHashCache(path)
-			return errResponseTimeout
-		case <-ctx.Done():
-			s.writeMu.Unlock()
-			s.removeHashCache(path)
-			return ctx.Err()
-		}
-	}
-	s.writeMu.Unlock()
-
-	s.persistPushedFile(path, content, encHash, mtime)
-
-	s.logger.Info("pushed",
-		slog.String("path", path),
-		slog.Int("bytes", len(content)),
-	)
-	return nil
 }
 
 // ContentHash returns the cached plaintext content hash for the given
@@ -983,44 +1221,228 @@ func (s *SyncClient) Connected() bool {
 	return v
 }
 
+// isOperationError returns true for errors that are specific to a single
+// push operation (encryption failure, etc.) rather than connection-level.
+func (s *SyncClient) isOperationError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "encrypting path") ||
+		strings.Contains(msg, "encrypting content") ||
+		strings.Contains(msg, "encrypting hash")
+}
+
 // Close cleanly shuts down the WebSocket connection.
 func (s *SyncClient) Close() error {
+	if s.connCancel != nil {
+		s.connCancel()
+	}
 	if s.conn != nil {
 		return s.conn.Close(websocket.StatusNormalClosure, "bye")
 	}
 	return nil
 }
 
-func (s *SyncClient) heartbeat(ctx context.Context) {
-	ticker := time.NewTicker(heartbeatCheckAt)
-	defer ticker.Stop()
+// reconnect dials a fresh WebSocket, re-authenticates, and processes any
+// server pushes we missed while disconnected. The server replays all
+// changes since our last version, so no full reconciliation is needed.
+func (s *SyncClient) reconnect(ctx context.Context) error {
+	if err := s.Connect(ctx); err != nil {
+		return err
+	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.lastMsgMu.Lock()
-			elapsed := time.Since(s.lastMessage)
-			s.lastMsgMu.Unlock()
+	var serverPushes []ServerPush
+	if err := s.WaitForReady(ctx, &serverPushes); err != nil {
+		return err
+	}
 
-			if elapsed > disconnectAfter {
-				s.logger.Warn("connection timed out, closing")
-				s.conn.Close(websocket.StatusGoingAway, "timeout")
-				return
-			}
-
-			if elapsed > pingAfter {
-				s.writeMu.Lock()
-				err := s.writeJSON(ctx, map[string]string{"op": "ping"})
-				s.writeMu.Unlock()
-				if err != nil {
-					s.logger.Warn("failed to send ping", slog.String("error", err.Error()))
-					return
-				}
-			}
+	// Process any pushes the server sent during the catch-up window.
+	// WaitForReady reads directly from conn, no reader goroutine yet.
+	for _, sp := range serverPushes {
+		if err := s.processPushDirect(ctx, sp.Msg); err != nil {
+			s.logger.Warn("processing reconnect push",
+				slog.String("path", sp.Path),
+				slog.String("error", err.Error()),
+			)
 		}
 	}
+
+	return nil
+}
+
+// processPushDirect handles a server push by reading directly from the
+// connection (not inboundCh). Used during initial startup and reconnect
+// before the reader goroutine is running.
+func (s *SyncClient) processPushDirect(ctx context.Context, push PushMessage) error {
+	path, err := s.cipher.DecryptPath(push.Path)
+	if err != nil {
+		return fmt.Errorf("decrypting path: %w", err)
+	}
+
+	if push.Deleted {
+		s.logger.Info("delete", slog.String("path", path))
+		if err := s.vault.DeleteFile(path); err != nil {
+			return fmt.Errorf("deleting %s: %w", path, err)
+		}
+		s.removeHashCache(path)
+		s.persistServerFile(path, push, true)
+		s.state.DeleteLocalFile(s.vaultID, path)
+		return nil
+	}
+
+	if push.Folder {
+		s.logger.Info("mkdir", slog.String("path", path))
+		if err := s.vault.MkdirAll(path); err != nil {
+			return err
+		}
+		s.persistServerFile(path, push, false)
+		s.persistLocalFolder(path)
+		return nil
+	}
+
+	if push.Hash != "" {
+		s.hashCacheMu.Lock()
+		cached, ok := s.hashCache[path]
+		s.hashCacheMu.Unlock()
+		if ok && cached.encHash == push.Hash {
+			s.logger.Debug("skipping push, hash unchanged", slog.String("path", path))
+			s.persistServerFile(path, push, false)
+			return nil
+		}
+	}
+
+	content, err := s.pullDirect(ctx, push.UID)
+	if err != nil {
+		return fmt.Errorf("pulling %s (uid %d): %w", path, push.UID, err)
+	}
+	if content == nil {
+		s.logger.Info("skip deleted content", slog.String("path", path))
+		s.persistServerFile(path, push, true)
+		s.state.DeleteLocalFile(s.vaultID, path)
+		return nil
+	}
+
+	var plaintext []byte
+	if len(content) > 0 {
+		plaintext, err = s.cipher.DecryptContent(content)
+		if err != nil {
+			return fmt.Errorf("decrypting content for %s: %w", path, err)
+		}
+	}
+
+	if err := s.vault.WriteFile(path, plaintext); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+
+	contentH := sha256.Sum256(plaintext)
+	contentHash := hex.EncodeToString(contentH[:])
+	s.hashCacheMu.Lock()
+	s.hashCache[path] = hashEntry{
+		encHash:     push.Hash,
+		contentHash: contentHash,
+	}
+	s.hashCacheMu.Unlock()
+
+	s.persistServerFile(path, push, false)
+	s.persistLocalFileAfterWrite(path, contentHash)
+
+	s.logger.Info("wrote",
+		slog.String("path", path),
+		slog.Int("bytes", len(plaintext)),
+	)
+	return nil
+}
+
+// pullDirect reads directly from the connection (not inboundCh). Used
+// during initial startup and reconnect before the reader goroutine runs.
+// Server pushes that arrive mid-pull are handled inline (folders, deletes,
+// hash matches) or queued to pendingPulls for processing once the event
+// loop starts. This prevents data loss from dropped push notifications.
+func (s *SyncClient) pullDirect(ctx context.Context, uid int64) ([]byte, error) {
+	req := PullRequest{Op: "pull", UID: uid}
+	if err := s.writeJSON(ctx, req); err != nil {
+		return nil, fmt.Errorf("sending pull request: %w", err)
+	}
+
+	var resp PullResponse
+	for {
+		typ, data, err := s.conn.Read(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("reading pull response: %w", err)
+		}
+		s.touchLastMessage()
+
+		if typ == websocket.MessageBinary {
+			s.logger.Debug("unexpected binary frame waiting for pull response", slog.Int("bytes", len(data)))
+			continue
+		}
+
+		op := gjson.GetBytes(data, "op").Str
+		if op == "pong" {
+			continue
+		}
+		if op == "push" {
+			s.handlePushWhileBusy(ctx, data)
+			continue
+		}
+
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return nil, fmt.Errorf("decoding pull response: %w", err)
+		}
+		break
+	}
+
+	if resp.Deleted {
+		return nil, nil
+	}
+
+	maxSize := s.perFileMax * 2
+	if maxSize == 0 {
+		maxSize = 10 * 1024 * 1024
+	}
+	if resp.Size > maxSize {
+		return nil, fmt.Errorf("pull response size %d exceeds limit %d", resp.Size, maxSize)
+	}
+	maxPieces := resp.Size/chunkSize + 1
+	if resp.Pieces > maxPieces {
+		return nil, fmt.Errorf("pull response pieces %d exceeds expected max %d for size %d", resp.Pieces, maxPieces, resp.Size)
+	}
+
+	content := make([]byte, 0, resp.Size)
+	for i := 0; i < resp.Pieces; i++ {
+		typ, data, err := s.conn.Read(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("reading piece %d/%d: %w", i+1, resp.Pieces, err)
+		}
+		s.touchLastMessage()
+
+		if typ != websocket.MessageBinary {
+			op := gjson.GetBytes(data, "op").Str
+			if op == "pong" {
+				i--
+				continue
+			}
+			if op == "push" {
+				s.handlePushWhileBusy(ctx, data)
+				i--
+				continue
+			}
+			return nil, fmt.Errorf("expected binary frame, got text: %s", string(data))
+		}
+		content = append(content, data...)
+	}
+
+	return content, nil
+}
+
+// isPermanentError returns true for errors that won't resolve on retry.
+func isPermanentError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "auth failed") {
+		return true
+	}
+	return false
 }
 
 func (s *SyncClient) touchLastMessage() {
@@ -1030,7 +1452,7 @@ func (s *SyncClient) touchLastMessage() {
 }
 
 // writeJSON marshals v to JSON and writes it as a text frame.
-// Callers must hold writeMu (except during Connect, before Listen starts).
+// Only called from the event loop or during Connect (before Listen starts).
 func (s *SyncClient) writeJSON(ctx context.Context, v interface{}) error {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -1040,7 +1462,7 @@ func (s *SyncClient) writeJSON(ctx context.Context, v interface{}) error {
 }
 
 // readJSON reads a text frame and unmarshals it into v.
-// Only called from the read loop goroutine (Listen) or during Connect.
+// Only called during Connect (before Listen starts).
 func (s *SyncClient) readJSON(ctx context.Context, v interface{}) error {
 	_, data, err := s.conn.Read(ctx)
 	if err != nil {
