@@ -40,6 +40,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("loading state: %w", err)
 	}
+	defer appState.Close()
 
 	client := obsidian.NewClient(nil)
 
@@ -123,12 +124,12 @@ func run() error {
 }
 
 func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Config, appState *state.State, logger *slog.Logger) (string, *obsidian.VaultListResponse, error) {
-	if appState.Token != "" {
+	if token := appState.Token(); token != "" {
 		logger.Debug("trying cached token")
-		vaults, err := client.ListVaults(ctx, appState.Token)
+		vaults, err := client.ListVaults(ctx, token)
 		if err == nil && (len(vaults.Vaults) > 0 || len(vaults.Shared) > 0) {
 			logger.Info("authenticated with cached token")
-			return appState.Token, vaults, nil
+			return token, vaults, nil
 		}
 		logger.Debug("cached token expired, signing in fresh")
 	}
@@ -140,8 +141,7 @@ func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Conf
 	}
 	logger.Info("signed in", slog.String("name", auth.Name), slog.String("email", auth.Email))
 
-	appState.Token = auth.Token
-	if err := appState.Save(); err != nil {
+	if err := appState.SetToken(auth.Token); err != nil {
 		logger.Warn("failed to save token", slog.String("error", err.Error()))
 	}
 

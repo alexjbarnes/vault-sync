@@ -103,6 +103,11 @@ func (c *CipherV0) decrypt(data []byte) ([]byte, error) {
 	if len(data) < nonceSize {
 		return nil, fmt.Errorf("ciphertext too short: %d bytes", len(data))
 	}
+	// The Obsidian app returns empty content when the input is exactly
+	// the nonce size (12 bytes). Valid GCM-encrypted empty content would
+	// be 28 bytes (12 nonce + 16 auth tag), so 12 bytes has no tag to
+	// verify. We match this behavior for compatibility -- empty files
+	// sync as nonce-only payloads with no ciphertext or tag.
 	if len(data) == nonceSize {
 		return []byte{}, nil
 	}

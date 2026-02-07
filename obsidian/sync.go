@@ -459,6 +459,9 @@ func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtim
 		return fmt.Errorf("encrypting hash: %w", err)
 	}
 
+	// Empty files have 0 pieces and no binary frames are sent.
+	// math.Ceil on empty content would give 1 piece, sending a spurious
+	// empty binary frame that the server doesn't expect.
 	pieces := 0
 	if len(encContent) > 0 {
 		pieces = int(math.Ceil(float64(len(encContent)) / float64(chunkSize)))
