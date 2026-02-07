@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alexjbarnes/vault-sync/internal/state"
 	"github.com/coder/websocket"
 	"github.com/tidwall/gjson"
 )
@@ -48,6 +49,7 @@ type SyncClient struct {
 
 	cipher *CipherV0
 	vault  *Vault
+	state  *state.State
 
 	onReady func(version int64)
 
@@ -91,6 +93,7 @@ type SyncConfig struct {
 	Initial           bool
 	Cipher            *CipherV0
 	Vault             *Vault
+	State             *state.State
 	OnReady           func(version int64)
 }
 
@@ -106,6 +109,7 @@ func NewSyncClient(cfg SyncConfig, logger *slog.Logger) *SyncClient {
 		initial:           cfg.Initial,
 		cipher:            cfg.Cipher,
 		vault:             cfg.Vault,
+		state:             cfg.State,
 		onReady:           cfg.OnReady,
 		responseCh:        make(chan json.RawMessage, 1),
 		hashCache:         make(map[string]hashEntry),
@@ -166,15 +170,12 @@ func (s *SyncClient) Connect(ctx context.Context, host string) error {
 	return nil
 }
 
-// Listen is the main read loop. It owns all conn.Read calls exclusively.
-// Server pushes are queued until "ready", then processed inline (including
-// pulling content). After ready, incoming pushes are processed immediately.
-// Blocks until context is cancelled or an error occurs.
-func (s *SyncClient) Listen(ctx context.Context) error {
+// WaitForReady reads from the WebSocket until the server sends "ready".
+// Server pushes received before ready are decrypted and appended to
+// serverPushes. After ready returns, no goroutine is reading the
+// connection, so the caller can use pull() directly for reconciliation.
+func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPush) error {
 	go s.heartbeat(ctx)
-
-	var queued []PushMessage
-	ready := false
 
 	for {
 		typ, data, err := s.conn.Read(ctx)
@@ -183,11 +184,8 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 		}
 		s.touchLastMessage()
 
-		// Binary frames are only expected during an inline pull, which
-		// reads them directly via readBinary. If one arrives here it's
-		// unexpected -- log and skip.
 		if typ == websocket.MessageBinary {
-			s.logger.Debug("unexpected binary frame in read loop", slog.Int("bytes", len(data)))
+			s.logger.Debug("unexpected binary frame before ready", slog.Int("bytes", len(data)))
 			continue
 		}
 
@@ -204,8 +202,7 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 		case "ready":
 			var readyMsg ReadyMessage
 			if err := json.Unmarshal(data, &readyMsg); err != nil {
-				s.logger.Warn("failed to decode ready", slog.String("error", err.Error()))
-				continue
+				return fmt.Errorf("decoding ready message: %w", err)
 			}
 			if readyMsg.Version > s.version {
 				s.version = readyMsg.Version
@@ -213,23 +210,13 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 			s.initial = false
 			s.logger.Info("server ready",
 				slog.Int64("version", readyMsg.Version),
-				slog.Int("queued_pushes", len(queued)),
+				slog.Int("queued_pushes", len(*serverPushes)),
 			)
-
-			for _, push := range queued {
-				if err := s.processPush(ctx, push); err != nil {
-					s.logger.Warn("processing queued push",
-						slog.Int64("uid", push.UID),
-						slog.String("error", err.Error()),
-					)
-				}
-			}
-			queued = nil
-			ready = true
 
 			if s.onReady != nil {
 				s.onReady(s.version)
 			}
+			return nil
 
 		case "push":
 			var push PushMessage
@@ -240,20 +227,66 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 			if push.UID > s.version {
 				s.version = push.UID
 			}
-			if ready {
-				if err := s.processPush(ctx, push); err != nil {
-					s.logger.Warn("processing push",
-						slog.Int64("uid", push.UID),
-						slog.String("error", err.Error()),
-					)
-				}
-			} else {
-				queued = append(queued, push)
+			sp, err := s.decryptPush(push)
+			if err != nil {
+				s.logger.Warn("decrypting queued push",
+					slog.Int64("uid", push.UID),
+					slog.String("error", err.Error()),
+				)
+				continue
+			}
+			*serverPushes = append(*serverPushes, sp)
+
+		default:
+			s.logger.Debug("unexpected message before ready", slog.String("op", msg.Op))
+		}
+	}
+}
+
+// Listen is the live read loop, started after reconciliation completes.
+// It owns all conn.Read calls exclusively. Incoming pushes are processed
+// immediately. Blocks until context is cancelled or an error occurs.
+func (s *SyncClient) Listen(ctx context.Context) error {
+	for {
+		typ, data, err := s.conn.Read(ctx)
+		if err != nil {
+			return fmt.Errorf("reading message: %w", err)
+		}
+		s.touchLastMessage()
+
+		if typ == websocket.MessageBinary {
+			s.logger.Debug("unexpected binary frame in read loop", slog.Int("bytes", len(data)))
+			continue
+		}
+
+		var msg GenericMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			s.logger.Debug("unparseable text frame", slog.Int("bytes", len(data)))
+			continue
+		}
+
+		switch msg.Op {
+		case "pong":
+			continue
+
+		case "push":
+			var push PushMessage
+			if err := json.Unmarshal(data, &push); err != nil {
+				s.logger.Warn("failed to decode push", slog.String("error", err.Error()))
+				continue
+			}
+			if push.UID > s.version {
+				s.version = push.UID
+			}
+			if err := s.processPush(ctx, push); err != nil {
+				s.logger.Warn("processing push",
+					slog.Int64("uid", push.UID),
+					slog.String("error", err.Error()),
+				)
 			}
 
 		default:
-			// Any other message is a response to a watcher Push request.
-			// Route it to the watcher via responseCh.
+			// Response to a watcher Push request.
 			select {
 			case s.responseCh <- json.RawMessage(data):
 			case <-ctx.Done():
@@ -263,8 +296,16 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 	}
 }
 
+// ServerPush pairs a decoded PushMessage with its decrypted plaintext path.
+// Used to queue server pushes during initial pull for reconciliation.
+type ServerPush struct {
+	Msg  PushMessage
+	Path string
+}
+
 // processPush handles a single server push: decrypts the path, then creates
-// folders, removes deleted files, or pulls and writes file content.
+// folders, removes deleted files, or pulls and writes file content. After
+// writing, it persists the server and local file state to bbolt.
 func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 	path, err := s.cipher.DecryptPath(push.Path)
 	if err != nil {
@@ -277,12 +318,19 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 			return fmt.Errorf("deleting %s: %w", path, err)
 		}
 		s.removeHashCache(path)
+		s.persistServerFile(path, push, true)
+		s.state.DeleteLocalFile(s.vaultID, path)
 		return nil
 	}
 
 	if push.Folder {
 		s.logger.Info("mkdir", slog.String("path", path))
-		return s.vault.MkdirAll(path)
+		if err := s.vault.MkdirAll(path); err != nil {
+			return err
+		}
+		s.persistServerFile(path, push, false)
+		s.persistLocalFolder(path)
+		return nil
 	}
 
 	// Check hash cache: if the encrypted hash matches, content is identical.
@@ -292,6 +340,7 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 		s.hashCacheMu.Unlock()
 		if ok && cached.encHash == push.Hash {
 			s.logger.Debug("skipping push, hash unchanged", slog.String("path", path))
+			s.persistServerFile(path, push, false)
 			return nil
 		}
 	}
@@ -304,6 +353,8 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 	}
 	if content == nil {
 		s.logger.Info("skip deleted content", slog.String("path", path))
+		s.persistServerFile(path, push, true)
+		s.state.DeleteLocalFile(s.vaultID, path)
 		return nil
 	}
 
@@ -320,12 +371,16 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 	}
 
 	h := sha256.Sum256(plaintext)
+	contentHash := hex.EncodeToString(h[:])
 	s.hashCacheMu.Lock()
 	s.hashCache[path] = hashEntry{
 		encHash:     push.Hash,
-		contentHash: hex.EncodeToString(h[:]),
+		contentHash: contentHash,
 	}
 	s.hashCacheMu.Unlock()
+
+	s.persistServerFile(path, push, false)
+	s.persistLocalFileAfterWrite(path, contentHash)
 
 	s.logger.Info("wrote",
 		slog.String("path", path),
@@ -334,9 +389,182 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 	return nil
 }
 
-// pull sends a pull request and reads the response + binary frames inline.
+// decryptPush decodes just the path from a PushMessage without processing it.
+func (s *SyncClient) decryptPush(push PushMessage) (ServerPush, error) {
+	path, err := s.cipher.DecryptPath(push.Path)
+	if err != nil {
+		return ServerPush{}, fmt.Errorf("decrypting path: %w", err)
+	}
+	return ServerPush{Msg: push, Path: path}, nil
+}
+
+// persistServerFile saves the server-side file state to bbolt.
+func (s *SyncClient) persistServerFile(path string, push PushMessage, deleted bool) {
+	sf := state.ServerFile{
+		Path:    path,
+		Hash:    push.Hash,
+		UID:     push.UID,
+		MTime:   push.MTime,
+		Size:    push.Size,
+		Folder:  push.Folder,
+		Deleted: deleted,
+		Device:  push.Device,
+	}
+	if err := s.state.SetServerFile(s.vaultID, sf); err != nil {
+		s.logger.Warn("failed to persist server file state",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+// persistLocalFileAfterWrite records the local file state after we wrote
+// a file to disk from a server push. Stat is called to get the actual
+// mtime/size the OS assigned.
+func (s *SyncClient) persistLocalFileAfterWrite(path, contentHash string) {
+	info, err := s.vault.Stat(path)
+	if err != nil {
+		s.logger.Warn("failed to stat after write for local state",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	now := time.Now().UnixMilli()
+	lf := state.LocalFile{
+		Path:     path,
+		MTime:    info.ModTime().UnixMilli(),
+		Size:     info.Size(),
+		Hash:     contentHash,
+		SyncHash: contentHash,
+		SyncTime: now,
+		Folder:   false,
+	}
+	if err := s.state.SetLocalFile(s.vaultID, lf); err != nil {
+		s.logger.Warn("failed to persist local file state",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+// persistLocalFolder records the local state for a directory.
+func (s *SyncClient) persistLocalFolder(path string) {
+	now := time.Now().UnixMilli()
+	lf := state.LocalFile{
+		Path:     path,
+		MTime:    now,
+		Size:     0,
+		Folder:   true,
+		SyncTime: now,
+	}
+	if err := s.state.SetLocalFile(s.vaultID, lf); err != nil {
+		s.logger.Warn("failed to persist local folder state",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+// persistPushedFile records both local and server state after we successfully
+// pushed a file to the server.
+func (s *SyncClient) persistPushedFile(path string, content []byte, encHash string, mtime int64) {
+	h := sha256.Sum256(content)
+	contentHash := hex.EncodeToString(h[:])
+	now := time.Now().UnixMilli()
+
+	info, err := s.vault.Stat(path)
+	var size int64
+	var fileMtime int64
+	if err == nil {
+		size = info.Size()
+		fileMtime = info.ModTime().UnixMilli()
+	} else {
+		size = int64(len(content))
+		fileMtime = mtime
+	}
+
+	lf := state.LocalFile{
+		Path:     path,
+		MTime:    fileMtime,
+		Size:     size,
+		Hash:     contentHash,
+		SyncHash: contentHash,
+		SyncTime: now,
+		Folder:   false,
+	}
+	if err := s.state.SetLocalFile(s.vaultID, lf); err != nil {
+		s.logger.Warn("failed to persist local file after push",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+	}
+
+	sf := state.ServerFile{
+		Path:   path,
+		Hash:   encHash,
+		MTime:  mtime,
+		Size:   size,
+		Folder: false,
+	}
+	if err := s.state.SetServerFile(s.vaultID, sf); err != nil {
+		s.logger.Warn("failed to persist server file after push",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+// persistPushedFolder records state after we successfully pushed a folder.
+func (s *SyncClient) persistPushedFolder(path string) {
+	now := time.Now().UnixMilli()
+	lf := state.LocalFile{
+		Path:     path,
+		Folder:   true,
+		SyncTime: now,
+	}
+	if err := s.state.SetLocalFile(s.vaultID, lf); err != nil {
+		s.logger.Warn("failed to persist local folder after push",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+	}
+
+	sf := state.ServerFile{
+		Path:   path,
+		Folder: true,
+	}
+	if err := s.state.SetServerFile(s.vaultID, sf); err != nil {
+		s.logger.Warn("failed to persist server folder after push",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+// persistPushedDelete records state after we successfully pushed a deletion.
+func (s *SyncClient) persistPushedDelete(path string) {
+	sf := state.ServerFile{
+		Path:    path,
+		Deleted: true,
+	}
+	if err := s.state.SetServerFile(s.vaultID, sf); err != nil {
+		s.logger.Warn("failed to persist server delete after push",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+	}
+	s.state.DeleteLocalFile(s.vaultID, path)
+}
+
+// Pull sends a pull request and reads the response + binary frames inline.
 // Called from the read loop, so the pull response is the next message on
-// the wire. No channel coordination needed.
+// the wire. No channel coordination needed. Public so the reconciler can
+// pull content for base/server versions during three-way merge.
+func (s *SyncClient) Pull(ctx context.Context, uid int64) ([]byte, error) {
+	return s.pull(ctx, uid)
+}
+
 func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 	// Acquire writeMu to prevent heartbeat pings from interleaving with
 	// the pull request. The read side is already exclusive to this goroutine.
@@ -431,6 +659,9 @@ func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtim
 			s.hashCacheMu.Lock()
 			delete(s.hashCache, path)
 			s.hashCacheMu.Unlock()
+			s.persistPushedDelete(path)
+		} else if isFolder {
+			s.persistPushedFolder(path)
 		}
 
 		s.logger.Info("pushed",
@@ -544,6 +775,8 @@ func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtim
 		}
 	}
 	s.writeMu.Unlock()
+
+	s.persistPushedFile(path, content, encHash, mtime)
 
 	s.logger.Info("pushed",
 		slog.String("path", path),

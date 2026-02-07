@@ -83,6 +83,11 @@ func run() error {
 
 	vaultFS := obsidian.NewVault(cfg.SyncDir)
 
+	// Initialize vault buckets for local/server file tracking.
+	if err := appState.InitVaultBuckets(vault.ID); err != nil {
+		return fmt.Errorf("initializing vault buckets: %w", err)
+	}
+
 	// Connect to sync server.
 	syncClient := obsidian.NewSyncClient(obsidian.SyncConfig{
 		Host:              vault.Host,
@@ -95,6 +100,7 @@ func run() error {
 		Initial:           vs.Initial,
 		Cipher:            cipher,
 		Vault:             vaultFS,
+		State:             appState,
 		OnReady: func(version int64) {
 			if err := appState.SetVault(vault.ID, state.VaultState{
 				Version: version,
@@ -111,15 +117,47 @@ func run() error {
 		return fmt.Errorf("connecting to sync server: %w", err)
 	}
 
-	watcher := obsidian.NewWatcher(vaultFS, syncClient, logger)
+	// Read from server until "ready". Pushes are queued for reconciliation.
+	// No read loop goroutine is running, so the reconciler can call pull
+	// directly on the connection.
+	var serverPushes []obsidian.ServerPush
+	if err := syncClient.WaitForReady(ctx, &serverPushes); err != nil {
+		return fmt.Errorf("waiting for server ready: %w", err)
+	}
 
+	// Scan local filesystem.
+	scan, err := obsidian.ScanLocal(vaultFS, appState, vault.ID, logger)
+	if err != nil {
+		return fmt.Errorf("scanning local files: %w", err)
+	}
+
+	// Phase 1: Process server pushes (downloads/merges). This calls pull
+	// directly and must complete before the read loop starts.
+	reconciler := obsidian.NewReconciler(vaultFS, syncClient, appState, vault.ID, cipher, logger)
+	if err := reconciler.Phase1(ctx, serverPushes, scan); err != nil {
+		return fmt.Errorf("reconciliation phase 1 failed: %w", err)
+	}
+	serverPushes = nil
+
+	// Start the read loop. After this, the read loop owns all conn.Read
+	// calls. Phase 2-3 use Push which needs the read loop for acks.
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		return syncClient.Listen(gctx)
 	})
+
+	// Phases 2-3: Delete remote files, upload local changes. These use
+	// Push which requires the read loop to deliver server acks.
+	if err := reconciler.Phase2And3(gctx, scan); err != nil {
+		logger.Warn("reconciliation phases 2-3 failed", slog.String("error", err.Error()))
+	}
+
+	// Start the watcher for live file changes.
+	watcher := obsidian.NewWatcher(vaultFS, syncClient, logger)
 	g.Go(func() error {
 		return watcher.Watch(gctx)
 	})
+
 	return g.Wait()
 }
 
