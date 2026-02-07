@@ -77,7 +77,7 @@ func (w *Watcher) Watch(ctx context.Context) error {
 
 		case event, ok := <-watcher.Events:
 			if !ok {
-				return nil
+				return fmt.Errorf("fsnotify events channel closed unexpectedly")
 			}
 			if w.shouldIgnore(event.Name) {
 				continue
@@ -104,7 +104,7 @@ func (w *Watcher) Watch(ctx context.Context) error {
 
 		case err, ok := <-watcher.Errors:
 			if !ok {
-				return nil
+				return fmt.Errorf("fsnotify errors channel closed unexpectedly")
 			}
 			w.logger.Warn("watcher error", slog.String("error", err.Error()))
 

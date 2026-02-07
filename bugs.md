@@ -57,6 +57,6 @@ All three `responseCh` reads in `Push` now have a 30s timeout. On timeout, `writ
 `shouldIgnore` now exempts `.obsidian` from the dotfile filter, matching the scanner.
 
 ### 11. Watcher returns nil on fsnotify channel close
-**File:** `obsidian/watcher.go:69,97`
+**Status:** Fixed in `obsidian/watcher.go`
 
-When `watcher.Events` or `watcher.Errors` channels close, `Watch` returns `nil`. The errgroup in main sees a clean exit even though the file watcher died unexpectedly. Should return an error so errgroup cancels the context.
+Both channel close cases now return an error so the errgroup cancels the context and the process exits.
