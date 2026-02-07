@@ -43,12 +43,12 @@ func run() error {
 
 	client := obsidian.NewClient(nil)
 
-	token, vaults, err := authenticate(ctx, client, cfg, appState, logger)
+	token, vaultList, err := authenticate(ctx, client, cfg, appState, logger)
 	if err != nil {
 		return err
 	}
 
-	vault, err := selectVault(vaults, cfg.VaultName)
+	vault, err := selectVault(vaultList, cfg.VaultName)
 	if err != nil {
 		return err
 	}
@@ -80,6 +80,8 @@ func run() error {
 		slog.Bool("initial", vs.Initial),
 	)
 
+	vaultFS := obsidian.NewVault(cfg.SyncDir)
+
 	// Connect to sync server.
 	syncClient := obsidian.NewSyncClient(obsidian.SyncConfig{
 		Host:              vault.Host,
@@ -91,7 +93,7 @@ func run() error {
 		Version:           vs.Version,
 		Initial:           vs.Initial,
 		Cipher:            cipher,
-		SyncDir:           cfg.SyncDir,
+		Vault:             vaultFS,
 		OnReady: func(version int64) {
 			if err := appState.SetVault(vault.ID, state.VaultState{
 				Version: version,
@@ -108,7 +110,7 @@ func run() error {
 		return fmt.Errorf("connecting to sync server: %w", err)
 	}
 
-	watcher := obsidian.NewWatcher(cfg.SyncDir, syncClient, logger)
+	watcher := obsidian.NewWatcher(vaultFS, syncClient, logger)
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
@@ -120,16 +122,13 @@ func run() error {
 	return g.Wait()
 }
 
-func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Config, appState *state.State, logger *slog.Logger) (string, []obsidian.Vault, error) {
+func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Config, appState *state.State, logger *slog.Logger) (string, *obsidian.VaultListResponse, error) {
 	if appState.Token != "" {
 		logger.Debug("trying cached token")
 		vaults, err := client.ListVaults(ctx, appState.Token)
-		if err == nil {
-			all := append(vaults.Vaults, vaults.Shared...)
-			if len(all) > 0 {
-				logger.Info("authenticated with cached token")
-				return appState.Token, all, nil
-			}
+		if err == nil && (len(vaults.Vaults) > 0 || len(vaults.Shared) > 0) {
+			logger.Info("authenticated with cached token")
+			return appState.Token, vaults, nil
 		}
 		logger.Debug("cached token expired, signing in fresh")
 	}
@@ -151,38 +150,50 @@ func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Conf
 		return "", nil, fmt.Errorf("listing vaults: %w", err)
 	}
 
-	all := append(vaults.Vaults, vaults.Shared...)
-	if len(all) == 0 {
+	if len(vaults.Vaults) == 0 && len(vaults.Shared) == 0 {
 		return "", nil, fmt.Errorf("no vaults found for this account")
 	}
 
-	return auth.Token, all, nil
+	return auth.Token, vaults, nil
 }
 
-func selectVault(vaults []obsidian.Vault, name string) (*obsidian.Vault, error) {
+func selectVault(vaults *obsidian.VaultListResponse, name string) (*obsidian.VaultInfo, error) {
+	total := len(vaults.Vaults) + len(vaults.Shared)
+
 	if name == "" {
-		if len(vaults) == 1 {
-			return &vaults[0], nil
+		if total == 1 {
+			if len(vaults.Vaults) == 1 {
+				return &vaults.Vaults[0], nil
+			}
+			return &vaults.Shared[0], nil
 		}
 		return nil, fmt.Errorf("multiple vaults found, set OBSIDIAN_VAULT_NAME to pick one: %s", vaultNames(vaults))
 	}
 
-	for i := range vaults {
-		if vaults[i].Name == name {
-			return &vaults[i], nil
+	for i := range vaults.Vaults {
+		if vaults.Vaults[i].Name == name {
+			return &vaults.Vaults[i], nil
+		}
+	}
+	for i := range vaults.Shared {
+		if vaults.Shared[i].Name == name {
+			return &vaults.Shared[i], nil
 		}
 	}
 
 	return nil, fmt.Errorf("vault %q not found, available: %s", name, vaultNames(vaults))
 }
 
-func vaultNames(vaults []obsidian.Vault) string {
+func vaultNames(vaults *obsidian.VaultListResponse) string {
 	names := ""
-	for i, v := range vaults {
+	for i, v := range vaults.Vaults {
 		if i > 0 {
 			names += ", "
 		}
 		names += v.Name
+	}
+	for _, v := range vaults.Shared {
+		names += ", " + v.Name
 	}
 	return names
 }

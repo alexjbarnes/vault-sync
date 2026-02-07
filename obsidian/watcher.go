@@ -17,18 +17,18 @@ import (
 // Watcher monitors the sync directory for file changes and pushes them
 // to the server via the SyncClient.
 type Watcher struct {
-	syncDir string
+	vault   *Vault
 	client  *SyncClient
 	logger  *slog.Logger
 	watcher *fsnotify.Watcher
 }
 
-// NewWatcher creates a file watcher for the given sync directory.
-func NewWatcher(syncDir string, client *SyncClient, logger *slog.Logger) *Watcher {
+// NewWatcher creates a file watcher for the given vault and sync client.
+func NewWatcher(vault *Vault, client *SyncClient, logger *slog.Logger) *Watcher {
 	return &Watcher{
-		syncDir: syncDir,
-		client:  client,
-		logger:  logger,
+		vault:  vault,
+		client: client,
+		logger: logger,
 	}
 }
 
@@ -42,15 +42,17 @@ func (w *Watcher) Watch(ctx context.Context) error {
 	w.watcher = watcher
 	defer watcher.Close()
 
-	if err := os.MkdirAll(w.syncDir, 0755); err != nil {
+	syncDir := w.vault.Dir()
+
+	if err := os.MkdirAll(syncDir, 0755); err != nil {
 		return fmt.Errorf("creating sync dir: %w", err)
 	}
 
-	if err := w.addRecursive(w.syncDir); err != nil {
+	if err := w.addRecursive(syncDir); err != nil {
 		return fmt.Errorf("watching sync dir: %w", err)
 	}
 
-	w.logger.Info("file watcher started", slog.String("dir", w.syncDir))
+	w.logger.Info("file watcher started", slog.String("dir", syncDir))
 
 	// Debounce: batch rapid writes into a single push per file.
 	pending := make(map[string]time.Time)
@@ -109,13 +111,13 @@ func (w *Watcher) Watch(ctx context.Context) error {
 }
 
 func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
-	relPath, err := filepath.Rel(w.syncDir, absPath)
+	relPath, err := filepath.Rel(w.vault.Dir(), absPath)
 	if err != nil {
 		w.logger.Warn("computing relative path", slog.String("error", err.Error()))
 		return
 	}
 
-	info, err := os.Stat(absPath)
+	info, err := w.vault.Stat(relPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return
@@ -134,7 +136,7 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 		return
 	}
 
-	content, err := os.ReadFile(absPath)
+	content, err := w.vault.ReadFile(relPath)
 	if err != nil {
 		w.logger.Warn("reading file", slog.String("path", relPath), slog.String("error", err.Error()))
 		return
@@ -157,7 +159,7 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 }
 
 func (w *Watcher) handleDelete(ctx context.Context, absPath string) {
-	relPath, err := filepath.Rel(w.syncDir, absPath)
+	relPath, err := filepath.Rel(w.vault.Dir(), absPath)
 	if err != nil {
 		w.logger.Warn("computing relative path", slog.String("error", err.Error()))
 		return

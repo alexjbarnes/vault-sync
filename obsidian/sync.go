@@ -9,13 +9,12 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -26,6 +25,15 @@ const (
 )
 
 // SyncClient manages a WebSocket connection to an Obsidian Sync server.
+//
+// Architecture: the WebSocket is full-duplex, so reads and writes happen
+// independently. A single goroutine (Listen) owns all conn.Read calls.
+// Writes come from the watcher (Push) and heartbeat goroutines, serialized
+// by writeMu to preserve multi-message protocol sequences.
+//
+// The only cross-goroutine communication is responseCh, which delivers
+// server responses (push acks, chunk acks) from the read loop to the
+// watcher goroutine that sent the request.
 type SyncClient struct {
 	conn   *websocket.Conn
 	logger *slog.Logger
@@ -38,29 +46,37 @@ type SyncClient struct {
 	version           int64
 	initial           bool
 
-	cipher  *CipherV0
-	syncDir string
+	cipher *CipherV0
+	vault  *Vault
 
 	onReady func(version int64)
 
-	// Channel-based message dispatch.
-	responseCh chan json.RawMessage // JSON responses to request/response calls
-	dataCh     chan []byte          // binary frames for pull content
-	reqMu      sync.Mutex           // serializes request/response exchanges
+	// writeMu serializes all conn.Write calls. Required because a client
+	// push is a multi-message sequence (metadata JSON + binary chunks)
+	// that must be atomic from the server's perspective. Without this,
+	// a heartbeat ping could land between push metadata and a binary
+	// chunk, breaking the protocol.
+	writeMu sync.Mutex
+
+	// responseCh delivers server responses to the watcher goroutine.
+	// The read loop sends push acks and chunk acks here. The watcher's
+	// Push method receives from it. Buffered at 1 since at most one
+	// request/response exchange is in flight (writeMu ensures this).
+	responseCh chan json.RawMessage
 
 	// Hash cache for deduplication. Keyed by relative path.
-	// encHash is the encrypted hash from the server push (for outbound echo).
-	// contentHash is hex(SHA-256(plaintext)) (for inbound echo from watcher).
+	// encHash: encrypted hash from the wire (for outbound echo comparison).
+	// contentHash: hex(SHA-256(plaintext)) (for inbound echo from watcher).
 	hashCache   map[string]hashEntry
 	hashCacheMu sync.Mutex
 
 	lastMessage time.Time
-	mu          sync.Mutex
+	lastMsgMu   sync.Mutex
 }
 
 type hashEntry struct {
-	encHash     string // encrypted hash as sent/received over the wire
-	contentHash string // hex(SHA-256(plaintext content))
+	encHash     string
+	contentHash string
 }
 
 // SyncConfig holds the parameters needed to connect to a sync server.
@@ -74,11 +90,10 @@ type SyncConfig struct {
 	Version           int64
 	Initial           bool
 	Cipher            *CipherV0
-	SyncDir           string
+	Vault             *Vault
 	OnReady           func(version int64)
 }
 
-// NewSyncClient creates a sync client but does not connect.
 func NewSyncClient(cfg SyncConfig, logger *slog.Logger) *SyncClient {
 	return &SyncClient{
 		logger:            logger,
@@ -90,10 +105,9 @@ func NewSyncClient(cfg SyncConfig, logger *slog.Logger) *SyncClient {
 		version:           cfg.Version,
 		initial:           cfg.Initial,
 		cipher:            cfg.Cipher,
-		syncDir:           cfg.SyncDir,
+		vault:             cfg.Vault,
 		onReady:           cfg.OnReady,
 		responseCh:        make(chan json.RawMessage, 1),
-		dataCh:            make(chan []byte, 1),
 		hashCache:         make(map[string]hashEntry),
 	}
 }
@@ -101,7 +115,6 @@ func NewSyncClient(cfg SyncConfig, logger *slog.Logger) *SyncClient {
 // Connect dials the WebSocket, sends init, and waits for auth confirmation.
 func (s *SyncClient) Connect(ctx context.Context, host string) error {
 	url := "wss://" + host
-
 	s.logger.Debug("connecting", slog.String("url", url))
 
 	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
@@ -115,7 +128,7 @@ func (s *SyncClient) Connect(ctx context.Context, host string) error {
 	}
 	s.conn = conn
 	s.conn.SetReadLimit(256 * 1024 * 1024)
-	s.lastMessage = time.Now()
+	s.touchLastMessage()
 
 	init := InitMessage{
 		Op:                "init",
@@ -133,7 +146,8 @@ func (s *SyncClient) Connect(ctx context.Context, host string) error {
 		return fmt.Errorf("sending init: %w", err)
 	}
 
-	// Read auth response directly (before dispatcher is running).
+	// Read auth response. This happens before Listen starts, so we read
+	// directly without going through the read loop.
 	var initResp InitResponse
 	if err := s.readJSON(ctx, &initResp); err != nil {
 		s.conn.Close(websocket.StatusInternalError, "auth read failed")
@@ -149,108 +163,50 @@ func (s *SyncClient) Connect(ctx context.Context, host string) error {
 		slog.Int("user_id", initResp.UserID),
 		slog.Int("per_file_max", initResp.PerFileMax),
 	)
-
 	return nil
 }
 
-// Listen starts the read loop dispatcher goroutine, processes incoming pushes,
-// and blocks until the context is cancelled or an error occurs.
+// Listen is the main read loop. It owns all conn.Read calls exclusively.
+// Server pushes are queued until "ready", then processed inline (including
+// pulling content). After ready, incoming pushes are processed immediately.
+// Blocks until context is cancelled or an error occurs.
 func (s *SyncClient) Listen(ctx context.Context) error {
 	go s.heartbeat(ctx)
 
-	pushCh := make(chan PushMessage, 64)
-	readyCh := make(chan ReadyMessage, 1)
-	errCh := make(chan error, 1)
-
-	// Read loop goroutine: reads from WebSocket, dispatches to channels.
-	go func() {
-		for {
-			typ, data, err := s.conn.Read(ctx)
-			if err != nil {
-				errCh <- fmt.Errorf("reading message: %w", err)
-				return
-			}
-
-			s.mu.Lock()
-			s.lastMessage = time.Now()
-			s.mu.Unlock()
-
-			// Binary frame goes to dataCh for a pending pull.
-			if typ == websocket.MessageBinary {
-				select {
-				case s.dataCh <- data:
-				case <-ctx.Done():
-					return
-				}
-				continue
-			}
-
-			// Try to parse as JSON.
-			var msg GenericMessage
-			if err := json.Unmarshal(data, &msg); err != nil {
-				// Could not parse as JSON text frame. Treat as binary data.
-				select {
-				case s.dataCh <- data:
-				case <-ctx.Done():
-					return
-				}
-				continue
-			}
-
-			switch msg.Op {
-			case "pong":
-				continue
-
-			case "ready":
-				var ready ReadyMessage
-				if err := json.Unmarshal(data, &ready); err != nil {
-					s.logger.Warn("failed to decode ready", slog.String("error", err.Error()))
-					continue
-				}
-				select {
-				case readyCh <- ready:
-				case <-ctx.Done():
-					return
-				}
-
-			case "push":
-				var push PushMessage
-				if err := json.Unmarshal(data, &push); err != nil {
-					s.logger.Warn("failed to decode push", slog.String("error", err.Error()))
-					continue
-				}
-				select {
-				case pushCh <- push:
-				case <-ctx.Done():
-					return
-				}
-
-			default:
-				// Any message that isn't push/ready/pong is a response to a
-				// pending request (pull response, push ack, chunk ack).
-				// Server responses may have "op" or "res" fields.
-				select {
-				case s.responseCh <- json.RawMessage(data):
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
-	}()
-
-	// Queue pushes until ready, then process them. After ready, process inline.
 	var queued []PushMessage
 	ready := false
 
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		typ, data, err := s.conn.Read(ctx)
+		if err != nil {
+			return fmt.Errorf("reading message: %w", err)
+		}
+		s.touchLastMessage()
 
-		case err := <-errCh:
-			return err
+		// Binary frames are only expected during an inline pull, which
+		// reads them directly via readBinary. If one arrives here it's
+		// unexpected -- log and skip.
+		if typ == websocket.MessageBinary {
+			s.logger.Debug("unexpected binary frame in read loop", slog.Int("bytes", len(data)))
+			continue
+		}
 
-		case readyMsg := <-readyCh:
+		var msg GenericMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			s.logger.Debug("unparseable text frame", slog.Int("bytes", len(data)))
+			continue
+		}
+
+		switch msg.Op {
+		case "pong":
+			continue
+
+		case "ready":
+			var readyMsg ReadyMessage
+			if err := json.Unmarshal(data, &readyMsg); err != nil {
+				s.logger.Warn("failed to decode ready", slog.String("error", err.Error()))
+				continue
+			}
 			if readyMsg.Version > s.version {
 				s.version = readyMsg.Version
 			}
@@ -275,7 +231,12 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 				s.onReady(s.version)
 			}
 
-		case push := <-pushCh:
+		case "push":
+			var push PushMessage
+			if err := json.Unmarshal(data, &push); err != nil {
+				s.logger.Warn("failed to decode push", slog.String("error", err.Error()))
+				continue
+			}
 			if push.UID > s.version {
 				s.version = push.UID
 			}
@@ -289,6 +250,15 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 			} else {
 				queued = append(queued, push)
 			}
+
+		default:
+			// Any other message is a response to a watcher Push request.
+			// Route it to the watcher via responseCh.
+			select {
+			case s.responseCh <- json.RawMessage(data):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 	}
 }
@@ -301,35 +271,18 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 		return fmt.Errorf("decrypting path: %w", err)
 	}
 
-	// filepath.Join resolves ".." segments, so a malicious path like
-	// "../../etc/passwd" becomes "/etc/passwd" rather than staying inside
-	// syncDir. We check the resolved path has syncDir as a prefix to
-	// prevent writes outside the sync directory. This is defense in depth:
-	// the path comes from AES-GCM decryption so it can only be crafted by
-	// someone with the vault encryption key, but we guard against bugs in
-	// decryption or a compromised server. syncDir is resolved to an
-	// absolute path at startup (in config.Load) so this prefix check is
-	// reliable.
-	fullPath := filepath.Join(s.syncDir, path)
-	if !strings.HasPrefix(fullPath, s.syncDir+string(os.PathSeparator)) {
-		return fmt.Errorf("path traversal blocked: %q resolves outside sync dir", path)
-	}
-
 	if push.Deleted {
 		s.logger.Info("delete", slog.String("path", path))
-		err := os.Remove(fullPath)
-		if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("removing %s: %w", path, err)
+		if err := s.vault.DeleteFile(path); err != nil {
+			return fmt.Errorf("deleting %s: %w", path, err)
 		}
-		s.hashCacheMu.Lock()
-		delete(s.hashCache, path)
-		s.hashCacheMu.Unlock()
+		s.removeHashCache(path)
 		return nil
 	}
 
 	if push.Folder {
 		s.logger.Info("mkdir", slog.String("path", path))
-		return os.MkdirAll(fullPath, 0755)
+		return s.vault.MkdirAll(path)
 	}
 
 	// Check hash cache: if the encrypted hash matches, content is identical.
@@ -343,6 +296,8 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 		}
 	}
 
+	// Pull content inline. This is safe because we're in the read loop and
+	// the pull response + binary frames are the next messages on the wire.
 	content, err := s.pull(ctx, push.UID)
 	if err != nil {
 		return fmt.Errorf("pulling %s (uid %d): %w", path, push.UID, err)
@@ -360,16 +315,10 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 		}
 	}
 
-	dir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("creating directory for %s: %w", path, err)
-	}
-
-	if err := os.WriteFile(fullPath, plaintext, 0644); err != nil {
+	if err := s.vault.WriteFile(path, plaintext); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 
-	// Update hash cache with both encrypted and plaintext hashes.
 	h := sha256.Sum256(plaintext)
 	s.hashCacheMu.Lock()
 	s.hashCache[path] = hashEntry{
@@ -385,64 +334,60 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 	return nil
 }
 
-// ContentHash returns the cached plaintext content hash for the given
-// relative path, or empty string if not cached. Used by the watcher
-// to skip pushing files whose content hasn't changed.
-func (s *SyncClient) ContentHash(relPath string) string {
-	s.hashCacheMu.Lock()
-	entry, ok := s.hashCache[relPath]
-	s.hashCacheMu.Unlock()
-	if !ok {
-		return ""
-	}
-	return entry.contentHash
-}
-
-// pull sends a pull request for the given uid and reads the response JSON
-// followed by binary content frames. Returns nil if the file was deleted.
-// Must hold reqMu or be called from a context where no other requests are active.
+// pull sends a pull request and reads the response + binary frames inline.
+// Called from the read loop, so the pull response is the next message on
+// the wire. No channel coordination needed.
 func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
-	s.reqMu.Lock()
-	defer s.reqMu.Unlock()
-
+	// Acquire writeMu to prevent heartbeat pings from interleaving with
+	// the pull request. The read side is already exclusive to this goroutine.
+	s.writeMu.Lock()
 	req := PullRequest{Op: "pull", UID: uid}
-	if err := s.writeJSON(ctx, req); err != nil {
+	err := s.writeJSON(ctx, req)
+	s.writeMu.Unlock()
+	if err != nil {
 		return nil, fmt.Errorf("sending pull request: %w", err)
 	}
 
-	// Wait for JSON response from dispatcher.
-	var rawResp json.RawMessage
-	select {
-	case rawResp = <-s.responseCh:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
+	// Read messages until we get the pull response. Pongs may arrive
+	// if the heartbeat sent a ping just before the pull request.
 	var resp PullResponse
-	if err := json.Unmarshal(rawResp, &resp); err != nil {
-		return nil, fmt.Errorf("decoding pull response: %w", err)
+	for {
+		_, data, err := s.conn.Read(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("reading pull response: %w", err)
+		}
+		s.touchLastMessage()
+
+		if gjson.GetBytes(data, "op").Str == "pong" {
+			continue
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return nil, fmt.Errorf("decoding pull response: %w", err)
+		}
+		break
 	}
 
 	if resp.Deleted {
 		return nil, nil
 	}
 
+	// Read binary frames containing the encrypted content.
 	content := make([]byte, 0, resp.Size)
 	for i := 0; i < resp.Pieces; i++ {
-		select {
-		case chunk := <-s.dataCh:
-			content = append(content, chunk...)
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		_, data, err := s.conn.Read(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("reading piece %d/%d: %w", i+1, resp.Pieces, err)
 		}
+		s.touchLastMessage()
+		content = append(content, data...)
 	}
 
 	return content, nil
 }
 
-// Push uploads a file change to the server. For files, it encrypts the
-// content and path, sends the metadata, and streams binary chunks if the
-// server requests them. For folders and deletions, only metadata is sent.
+// Push uploads a file change to the server. Called from the watcher
+// goroutine. Writes are serialized by writeMu, and server responses
+// are received via responseCh (delivered by the read loop).
 func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtime int64, ctime int64, isFolder bool, isDeleted bool) error {
 	encPath, err := s.cipher.EncryptPath(path)
 	if err != nil {
@@ -456,11 +401,8 @@ func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtim
 		}
 	}
 
-	// Folders and deletions: metadata only.
+	// Folders and deletions: metadata only, single request/response.
 	if isFolder || isDeleted {
-		s.reqMu.Lock()
-		defer s.reqMu.Unlock()
-
 		msg := ClientPushMessage{
 			Op:        "push",
 			Path:      encPath,
@@ -471,11 +413,14 @@ func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtim
 			Folder:    isFolder,
 			Deleted:   isDeleted,
 		}
-		if err := s.writeJSON(ctx, msg); err != nil {
+
+		s.writeMu.Lock()
+		err := s.writeJSON(ctx, msg)
+		s.writeMu.Unlock()
+		if err != nil {
 			return fmt.Errorf("sending push metadata: %w", err)
 		}
 
-		// Wait for server ack.
 		select {
 		case <-s.responseCh:
 		case <-ctx.Done():
@@ -507,7 +452,6 @@ func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtim
 		encContent = []byte{}
 	}
 
-	// Compute and encrypt content hash.
 	h := sha256.Sum256(content)
 	hashHex := hex.EncodeToString(h[:])
 	encHash, err := s.cipher.EncryptPath(hashHex)
@@ -515,13 +459,10 @@ func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtim
 		return fmt.Errorf("encrypting hash: %w", err)
 	}
 
-	pieces := 1
+	pieces := 0
 	if len(encContent) > 0 {
 		pieces = int(math.Ceil(float64(len(encContent)) / float64(chunkSize)))
 	}
-
-	s.reqMu.Lock()
-	defer s.reqMu.Unlock()
 
 	msg := ClientPushMessage{
 		Op:        "push",
@@ -535,30 +476,45 @@ func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtim
 		Size:      len(encContent),
 		Pieces:    pieces,
 	}
+
+	// Populate hash cache before sending so the read loop can filter out
+	// the server's echo of this push. Without this, the echo arrives as a
+	// "push" op, processPush calls pull, pull tries to acquire writeMu,
+	// and we deadlock because Push holds writeMu waiting for responseCh.
+	s.hashCacheMu.Lock()
+	s.hashCache[path] = hashEntry{encHash: encHash, contentHash: hashHex}
+	s.hashCacheMu.Unlock()
+
+	// Hold writeMu for the entire push sequence: metadata + all binary
+	// chunks. This prevents heartbeat pings from breaking the sequence.
+	s.writeMu.Lock()
 	if err := s.writeJSON(ctx, msg); err != nil {
+		s.writeMu.Unlock()
+		s.removeHashCache(path)
 		return fmt.Errorf("sending push metadata: %w", err)
 	}
 
-	// Wait for server response.
+	// Wait for server response (delivered by read loop via responseCh).
 	var rawResp json.RawMessage
 	select {
 	case rawResp = <-s.responseCh:
 	case <-ctx.Done():
+		s.writeMu.Unlock()
+		s.removeHashCache(path)
 		return ctx.Err()
 	}
 
 	var resp GenericMessage
 	if err := json.Unmarshal(rawResp, &resp); err != nil {
+		s.writeMu.Unlock()
+		s.removeHashCache(path)
 		return fmt.Errorf("decoding push response: %w", err)
 	}
 
 	// "ok" means file is unchanged on server, skip upload.
-	// Server may respond with {"res":"ok"} or {"op":"ok"}.
 	if resp.Res == "ok" || resp.Op == "ok" {
+		s.writeMu.Unlock()
 		s.logger.Debug("push skipped, unchanged", slog.String("path", path))
-		s.hashCacheMu.Lock()
-		s.hashCache[path] = hashEntry{encHash: encHash, contentHash: hashHex}
-		s.hashCacheMu.Unlock()
 		return nil
 	}
 
@@ -569,29 +525,47 @@ func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtim
 		if end > len(encContent) {
 			end = len(encContent)
 		}
-		chunk := encContent[start:end]
 
-		if err := s.conn.Write(ctx, websocket.MessageBinary, chunk); err != nil {
+		if err := s.conn.Write(ctx, websocket.MessageBinary, encContent[start:end]); err != nil {
+			s.writeMu.Unlock()
+			s.removeHashCache(path)
 			return fmt.Errorf("sending chunk %d/%d: %w", i+1, pieces, err)
 		}
 
-		// Wait for server ack after each chunk.
 		select {
 		case <-s.responseCh:
 		case <-ctx.Done():
+			s.writeMu.Unlock()
+			s.removeHashCache(path)
 			return ctx.Err()
 		}
 	}
-
-	s.hashCacheMu.Lock()
-	s.hashCache[path] = hashEntry{encHash: encHash, contentHash: hashHex}
-	s.hashCacheMu.Unlock()
+	s.writeMu.Unlock()
 
 	s.logger.Info("pushed",
 		slog.String("path", path),
 		slog.Int("bytes", len(content)),
 	)
 	return nil
+}
+
+// ContentHash returns the cached plaintext content hash for the given
+// relative path, or empty string if not cached. Used by the watcher
+// to skip pushing files whose content hasn't changed.
+func (s *SyncClient) ContentHash(relPath string) string {
+	s.hashCacheMu.Lock()
+	entry, ok := s.hashCache[relPath]
+	s.hashCacheMu.Unlock()
+	if !ok {
+		return ""
+	}
+	return entry.contentHash
+}
+
+func (s *SyncClient) removeHashCache(path string) {
+	s.hashCacheMu.Lock()
+	delete(s.hashCache, path)
+	s.hashCacheMu.Unlock()
 }
 
 // Close cleanly shuts down the WebSocket connection.
@@ -611,9 +585,9 @@ func (s *SyncClient) heartbeat(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.mu.Lock()
+			s.lastMsgMu.Lock()
 			elapsed := time.Since(s.lastMessage)
-			s.mu.Unlock()
+			s.lastMsgMu.Unlock()
 
 			if elapsed > disconnectAfter {
 				s.logger.Warn("connection timed out, closing")
@@ -622,7 +596,10 @@ func (s *SyncClient) heartbeat(ctx context.Context) {
 			}
 
 			if elapsed > pingAfter {
-				if err := s.writeJSON(ctx, map[string]string{"op": "ping"}); err != nil {
+				s.writeMu.Lock()
+				err := s.writeJSON(ctx, map[string]string{"op": "ping"})
+				s.writeMu.Unlock()
+				if err != nil {
 					s.logger.Warn("failed to send ping", slog.String("error", err.Error()))
 					return
 				}
@@ -631,6 +608,14 @@ func (s *SyncClient) heartbeat(ctx context.Context) {
 	}
 }
 
+func (s *SyncClient) touchLastMessage() {
+	s.lastMsgMu.Lock()
+	s.lastMessage = time.Now()
+	s.lastMsgMu.Unlock()
+}
+
+// writeJSON marshals v to JSON and writes it as a text frame.
+// Callers must hold writeMu (except during Connect, before Listen starts).
 func (s *SyncClient) writeJSON(ctx context.Context, v interface{}) error {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -639,13 +624,13 @@ func (s *SyncClient) writeJSON(ctx context.Context, v interface{}) error {
 	return s.conn.Write(ctx, websocket.MessageText, data)
 }
 
+// readJSON reads a text frame and unmarshals it into v.
+// Only called from the read loop goroutine (Listen) or during Connect.
 func (s *SyncClient) readJSON(ctx context.Context, v interface{}) error {
 	_, data, err := s.conn.Read(ctx)
 	if err != nil {
 		return fmt.Errorf("reading message: %w", err)
 	}
-	s.mu.Lock()
-	s.lastMessage = time.Now()
-	s.mu.Unlock()
+	s.touchLastMessage()
 	return json.Unmarshal(data, v)
 }

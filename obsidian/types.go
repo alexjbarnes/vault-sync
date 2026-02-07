@@ -22,12 +22,12 @@ type VaultListRequest struct {
 
 // VaultListResponse is returned from POST /vault/list.
 type VaultListResponse struct {
-	Vaults []Vault `json:"vaults"`
-	Shared []Vault `json:"shared"`
+	Vaults []VaultInfo `json:"vaults"`
+	Shared []VaultInfo `json:"shared"`
 }
 
-// Vault represents a single vault from the vault list.
-type Vault struct {
+// VaultInfo represents a single vault from the vault list API response.
+type VaultInfo struct {
 	ID                string `json:"id"`
 	Host              string `json:"host"`
 	Salt              string `json:"salt"`
