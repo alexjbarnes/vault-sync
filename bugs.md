@@ -42,9 +42,9 @@ Matches Obsidian app behavior. Empty files sync as nonce-only payloads with no c
 The watcher checks `Connected()` before pushing. While disconnected, events are queued in a map (last event per path wins). The queue drains on the next ticker tick after reconnection.
 
 ### 8. No timeout on response channel reads
-**File:** `obsidian/sync.go`
+**Status:** Fixed in `obsidian/sync.go` and `obsidian/watcher.go`
 
-If the server hangs without closing the connection, `Push` blocks forever on `responseCh`. Only escape is context cancellation. Should add a timeout (e.g. 30s) around the channel read.
+All three `responseCh` reads in `Push` now have a 30s timeout. On timeout, `writeMu` is released and the hash cache is cleaned up. The watcher re-queues failed pushes when the connection is down (via `requeueIfDisconnected`), so files changed during a network blip are retried after reconnect.
 
 ### 9. No bounds check on PullResponse size
 **File:** `obsidian/sync.go:430`

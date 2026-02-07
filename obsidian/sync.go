@@ -25,9 +25,12 @@ const (
 	heartbeatCheckAt = 20 * time.Second
 	chunkSize        = 2097152 // 2MB
 
-	reconnectMin = 1 * time.Second
-	reconnectMax = 60 * time.Second
+	reconnectMin    = 1 * time.Second
+	reconnectMax    = 60 * time.Second
+	responseTimeout = 30 * time.Second
 )
+
+var errResponseTimeout = fmt.Errorf("timed out waiting for server response")
 
 // SyncClient manages a WebSocket connection to an Obsidian Sync server.
 //
@@ -786,6 +789,8 @@ func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtim
 
 		select {
 		case <-s.responseCh:
+		case <-time.After(responseTimeout):
+			return errResponseTimeout
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -867,6 +872,10 @@ func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtim
 	var rawResp json.RawMessage
 	select {
 	case rawResp = <-s.responseCh:
+	case <-time.After(responseTimeout):
+		s.writeMu.Unlock()
+		s.removeHashCache(path)
+		return errResponseTimeout
 	case <-ctx.Done():
 		s.writeMu.Unlock()
 		s.removeHashCache(path)
@@ -903,6 +912,10 @@ func (s *SyncClient) Push(ctx context.Context, path string, content []byte, mtim
 
 		select {
 		case <-s.responseCh:
+		case <-time.After(responseTimeout):
+			s.writeMu.Unlock()
+			s.removeHashCache(path)
+			return errResponseTimeout
 		case <-ctx.Done():
 			s.writeMu.Unlock()
 			s.removeHashCache(path)

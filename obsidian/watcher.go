@@ -151,6 +151,7 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 				slog.String("path", relPath),
 				slog.String("error", err.Error()),
 			)
+			w.requeueIfDisconnected(absPath, false)
 		}
 		return
 	}
@@ -174,6 +175,7 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 			slog.String("path", relPath),
 			slog.String("error", err.Error()),
 		)
+		w.requeueIfDisconnected(absPath, false)
 	}
 }
 
@@ -195,6 +197,17 @@ func (w *Watcher) handleDelete(ctx context.Context, absPath string) {
 			slog.String("path", relPath),
 			slog.String("error", err.Error()),
 		)
+		w.requeueIfDisconnected(absPath, true)
+	}
+}
+
+// requeueIfDisconnected adds a failed push back to the queue if the
+// connection dropped. If still connected, the server rejected the push
+// and retrying won't help.
+func (w *Watcher) requeueIfDisconnected(absPath string, isDelete bool) {
+	if !w.client.Connected() {
+		w.queued[absPath] = pendingEvent{absPath: absPath, isDelete: isDelete}
+		w.logger.Debug("re-queued after push failure", slog.String("path", absPath))
 	}
 }
 
