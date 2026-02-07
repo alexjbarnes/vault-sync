@@ -1,60 +1,64 @@
 # Bugs and Issues
 
-## Bugs
+## Fixed
 
 ### 1. Path traversal on decrypted server paths
-**File:** `obsidian/sync.go:304`
+**Status:** Fixed in `obsidian/vault.go:110`
 
-Decrypted path from server is joined with `syncDir` without validation. A path like `../../etc/passwd` writes outside the sync directory. Needs a check that the resolved path is within `syncDir`.
+`Vault.resolve()` rejects any path that resolves outside the sync directory via prefix check. SyncDir is resolved to absolute at config load time.
 
 ### 2. Deadlock if pushCh fills during pull
-**File:** `obsidian/sync.go:222`
+**Status:** Fixed
 
-`pushCh` is buffered at 64. If `processPush` calls `pull` (holding `reqMu`, waiting on `responseCh`), and the server sends 64+ push messages before the pull response arrives, the dispatcher goroutine blocks on `pushCh` and can never deliver the response. Deadlock. Unlikely during incremental sync, plausible during initial sync of a large vault.
+`pushCh` and the dispatcher goroutine no longer exist. The sync rewrite uses a single read loop with inline pull and `writeMu` for write serialization.
 
 ### 3. Heartbeat ping races with push/pull protocol sequences
-**File:** `obsidian/sync.go:613`
+**Status:** Fixed in `obsidian/sync.go`
 
-Heartbeat sends pings via `writeJSON` without holding `reqMu`. A ping could land between push metadata and binary chunks, corrupting the protocol sequence from the server's perspective.
+All writes go through `writeMu`. Heartbeat acquires it before sending pings. Push holds it for the entire metadata + binary chunk sequence.
 
 ### 4. Append may mutate original vault slice
-**File:** `cmd/vault-sync/main.go:128,154`
+**Status:** Fixed in `cmd/vault-sync/main.go`
 
-`append(vaults.Vaults, vaults.Shared...)` can write into the backing array of `vaults.Vaults` if it has spare capacity. Safe pattern is to allocate a new slice first.
+`selectVault` searches both `Vaults` and `Shared` arrays directly. No append/merge.
 
 ### 5. Empty content sends 1 piece of 0 bytes
-**File:** `obsidian/sync.go:506`
+**Status:** Fixed in `obsidian/sync.go`
 
-When encrypted content is empty, `pieces` is set to 1 and an empty binary frame is sent. Should be 0 pieces with no binary frame sent.
+`pieces = 0` when encrypted content is empty. Comment explains why.
 
 ### 6. decrypt skips GCM auth tag for 12-byte input
-**File:** `obsidian/crypto.go:106`
+**Status:** Not a bug
 
-Returns empty content without GCM verification when input is exactly 12 bytes (nonce size). Valid encrypted empty content is 28 bytes (12 nonce + 16 tag). A 12-byte input is malformed and should be rejected.
+Matches Obsidian app behavior. Empty files sync as nonce-only payloads with no ciphertext or tag. Commented in `obsidian/crypto.go:106`.
 
-## Issues
+## Open
 
 ### 7. No reconnection logic
+**Status:** Fixed in `obsidian/sync.go` and `obsidian/watcher.go`
+
+`Listen` now wraps the read loop with automatic reconnection. On disconnect: cancels the per-connection heartbeat context, waits with exponential backoff (1s to 60s cap, with jitter), reconnects, re-runs WaitForReady to catch up on missed server pushes, then resumes the read loop. Permanent errors (auth failure) exit immediately.
+
+The watcher checks `Connected()` before pushing. While disconnected, events are queued in a map (last event per path wins). The queue drains on the next ticker tick after reconnection.
+
+### 8. No timeout on response channel reads
 **File:** `obsidian/sync.go`
 
-Any network hiccup kills the process. Heartbeat timeout, server close, transient error all cause `Listen` to return an error and the process to exit.
-
-### 8. No timeout on response/data channel reads
-**File:** `obsidian/sync.go`
-
-If the server hangs without closing the connection, `pull` and `Push` block forever on `responseCh`/`dataCh`. Only escape is context cancellation.
+If the server hangs without closing the connection, `Push` blocks forever on `responseCh`. Only escape is context cancellation. Should add a timeout (e.g. 30s) around the channel read.
 
 ### 9. No bounds check on PullResponse size
-**File:** `obsidian/sync.go:418`
+**File:** `obsidian/sync.go:430`
 
-Server-controlled `Size` field is used directly in `make([]byte, 0, resp.Size)`. A malicious or buggy server could send a huge value and cause an out-of-memory panic.
+Server-controlled `Size` field is used directly in `make([]byte, 0, resp.Size)`. A malicious or buggy server could send a huge value and cause an out-of-memory panic. Should cap at `perFileMax` or a reasonable limit.
 
 ### 10. Watcher ignores dotfiles including .obsidian
-**File:** `obsidian/watcher.go:189`
+**File:** `obsidian/watcher.go:191`
 
-The `shouldIgnore` filter drops all paths starting with `.`. Obsidian Sync syncs `.obsidian/` by default (workspace, plugins, config). Our watcher silently skips it.
+The `shouldIgnore` filter drops all paths starting with `.`. Obsidian Sync syncs `.obsidian/` (workspace, plugins, config). The scanner handles `.obsidian` correctly during reconciliation, but the live watcher skips it, so local config changes won't push.
+
+Fix: exempt `.obsidian` from the dotfile filter, matching what the scanner already does.
 
 ### 11. Watcher returns nil on fsnotify channel close
-**File:** `obsidian/watcher.go:66,93`
+**File:** `obsidian/watcher.go:69,97`
 
-When `watcher.Events` or `watcher.Errors` channels close, `Watch` returns `nil`. The errgroup in main sees a clean exit even though the file watcher died unexpectedly.
+When `watcher.Events` or `watcher.Errors` channels close, `Watch` returns `nil`. The errgroup in main sees a clean exit even though the file watcher died unexpectedly. Should return an error so errgroup cancels the context.

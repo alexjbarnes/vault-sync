@@ -113,7 +113,7 @@ func run() error {
 	}, logger)
 	defer syncClient.Close()
 
-	if err := syncClient.Connect(ctx, vault.Host); err != nil {
+	if err := syncClient.Connect(ctx); err != nil {
 		return fmt.Errorf("connecting to sync server: %w", err)
 	}
 

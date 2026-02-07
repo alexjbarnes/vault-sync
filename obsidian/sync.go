@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"sync"
@@ -23,6 +24,9 @@ const (
 	disconnectAfter  = 120 * time.Second
 	heartbeatCheckAt = 20 * time.Second
 	chunkSize        = 2097152 // 2MB
+
+	reconnectMin = 1 * time.Second
+	reconnectMax = 60 * time.Second
 )
 
 // SyncClient manages a WebSocket connection to an Obsidian Sync server.
@@ -39,6 +43,7 @@ type SyncClient struct {
 	conn   *websocket.Conn
 	logger *slog.Logger
 
+	host              string
 	token             string
 	vaultID           string
 	keyHash           string
@@ -74,6 +79,15 @@ type SyncClient struct {
 
 	lastMessage time.Time
 	lastMsgMu   sync.Mutex
+
+	// connCancel cancels the per-connection context. Used to stop the
+	// heartbeat goroutine when the connection drops before reconnecting.
+	connCancel context.CancelFunc
+
+	// connected signals whether the WebSocket is live. The watcher checks
+	// this to decide whether to push or queue.
+	connected   bool
+	connectedMu sync.RWMutex
 }
 
 type hashEntry struct {
@@ -100,6 +114,7 @@ type SyncConfig struct {
 func NewSyncClient(cfg SyncConfig, logger *slog.Logger) *SyncClient {
 	return &SyncClient{
 		logger:            logger,
+		host:              cfg.Host,
 		token:             cfg.Token,
 		vaultID:           cfg.VaultID,
 		keyHash:           cfg.KeyHash,
@@ -117,8 +132,13 @@ func NewSyncClient(cfg SyncConfig, logger *slog.Logger) *SyncClient {
 }
 
 // Connect dials the WebSocket, sends init, and waits for auth confirmation.
-func (s *SyncClient) Connect(ctx context.Context, host string) error {
-	url := "wss://" + host
+func (s *SyncClient) Connect(ctx context.Context) error {
+	// Cancel any previous heartbeat goroutine from a prior connection.
+	if s.connCancel != nil {
+		s.connCancel()
+	}
+
+	url := "wss://" + s.host
 	s.logger.Debug("connecting", slog.String("url", url))
 
 	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
@@ -175,7 +195,9 @@ func (s *SyncClient) Connect(ctx context.Context, host string) error {
 // serverPushes. After ready returns, no goroutine is reading the
 // connection, so the caller can use pull() directly for reconciliation.
 func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPush) error {
-	go s.heartbeat(ctx)
+	connCtx, connCancel := context.WithCancel(ctx)
+	s.connCancel = connCancel
+	go s.heartbeat(connCtx)
 
 	for {
 		typ, data, err := s.conn.Read(ctx)
@@ -208,6 +230,7 @@ func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPus
 				s.version = readyMsg.Version
 			}
 			s.initial = false
+			s.setConnected(true)
 			s.logger.Info("server ready",
 				slog.Int64("version", readyMsg.Version),
 				slog.Int("queued_pushes", len(*serverPushes)),
@@ -243,10 +266,81 @@ func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPus
 	}
 }
 
-// Listen is the live read loop, started after reconciliation completes.
-// It owns all conn.Read calls exclusively. Incoming pushes are processed
-// immediately. Blocks until context is cancelled or an error occurs.
+// Listen is the live read loop with automatic reconnection. It owns all
+// conn.Read calls exclusively. On disconnect, it reconnects with
+// exponential backoff, re-runs WaitForReady to pick up missed server
+// pushes, then resumes. Returns only on permanent errors or context
+// cancellation.
 func (s *SyncClient) Listen(ctx context.Context) error {
+	backoff := reconnectMin
+
+	for {
+		err := s.readLoop(ctx)
+		if err == nil {
+			return nil
+		}
+
+		// Mark disconnected so the watcher queues instead of pushing.
+		s.setConnected(false)
+
+		// Stop the heartbeat for the dead connection.
+		if s.connCancel != nil {
+			s.connCancel()
+		}
+
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		if isPermanentError(err) {
+			return fmt.Errorf("permanent error: %w", err)
+		}
+
+		// Drain responseCh so the watcher doesn't read a stale response
+		// from the old connection after we reconnect.
+		select {
+		case <-s.responseCh:
+		default:
+		}
+
+		s.logger.Warn("connection lost, reconnecting",
+			slog.String("error", err.Error()),
+			slog.Duration("backoff", backoff),
+		)
+
+		jitter := time.Duration(rand.Int64N(int64(backoff) / 2))
+		timer := time.NewTimer(backoff + jitter)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+
+		if err := s.reconnect(ctx); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if isPermanentError(err) {
+				return fmt.Errorf("permanent reconnect error: %w", err)
+			}
+			s.logger.Warn("reconnect failed",
+				slog.String("error", err.Error()),
+				slog.Duration("backoff", backoff),
+			)
+			backoff = min(backoff*2, reconnectMax)
+			continue
+		}
+
+		// Connected again, reset backoff.
+		backoff = reconnectMin
+		s.logger.Info("reconnected")
+	}
+}
+
+// readLoop is the inner read loop for a single connection. Returns on any
+// read error, which triggers reconnection in Listen.
+func (s *SyncClient) readLoop(ctx context.Context) error {
 	for {
 		typ, data, err := s.conn.Read(ctx)
 		if err != nil {
@@ -294,6 +388,47 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// reconnect dials a fresh WebSocket, re-authenticates, and processes any
+// server pushes we missed while disconnected. The server replays all
+// changes since our last version, so no full reconciliation is needed.
+func (s *SyncClient) reconnect(ctx context.Context) error {
+	if err := s.Connect(ctx); err != nil {
+		return err
+	}
+
+	var serverPushes []ServerPush
+	if err := s.WaitForReady(ctx, &serverPushes); err != nil {
+		return err
+	}
+
+	// Process any pushes the server sent during the catch-up window.
+	// WaitForReady already started a new heartbeat, and we're still
+	// the only goroutine reading, so processPush can call pull inline.
+	for _, sp := range serverPushes {
+		if err := s.processPush(ctx, sp.Msg); err != nil {
+			s.logger.Warn("processing reconnect push",
+				slog.String("path", sp.Path),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+
+	return nil
+}
+
+// isPermanentError returns true for errors that won't resolve on retry.
+func isPermanentError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// Auth failure from the server's init response.
+	if strings.Contains(msg, "auth failed") {
+		return true
+	}
+	return false
 }
 
 // ServerPush pairs a decoded PushMessage with its decrypted plaintext path.
@@ -802,6 +937,20 @@ func (s *SyncClient) removeHashCache(path string) {
 	s.hashCacheMu.Lock()
 	delete(s.hashCache, path)
 	s.hashCacheMu.Unlock()
+}
+
+func (s *SyncClient) setConnected(v bool) {
+	s.connectedMu.Lock()
+	s.connected = v
+	s.connectedMu.Unlock()
+}
+
+// Connected reports whether the WebSocket connection is live.
+func (s *SyncClient) Connected() bool {
+	s.connectedMu.RLock()
+	v := s.connected
+	s.connectedMu.RUnlock()
+	return v
 }
 
 // Close cleanly shuts down the WebSocket connection.

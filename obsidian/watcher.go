@@ -14,6 +14,11 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+type pendingEvent struct {
+	absPath  string
+	isDelete bool
+}
+
 // Watcher monitors the sync directory for file changes and pushes them
 // to the server via the SyncClient.
 type Watcher struct {
@@ -21,6 +26,11 @@ type Watcher struct {
 	client  *SyncClient
 	logger  *slog.Logger
 	watcher *fsnotify.Watcher
+
+	// queued holds events that occurred while disconnected. Keyed by
+	// absolute path so later events for the same file overwrite earlier
+	// ones (last event wins).
+	queued map[string]pendingEvent
 }
 
 // NewWatcher creates a file watcher for the given vault and sync client.
@@ -29,6 +39,7 @@ func NewWatcher(vault *Vault, client *SyncClient, logger *slog.Logger) *Watcher 
 		vault:  vault,
 		client: client,
 		logger: logger,
+		queued: make(map[string]pendingEvent),
 	}
 }
 
@@ -98,6 +109,8 @@ func (w *Watcher) Watch(ctx context.Context) error {
 			w.logger.Warn("watcher error", slog.String("error", err.Error()))
 
 		case <-ticker.C:
+			w.drainQueue(ctx)
+
 			now := time.Now()
 			for path, t := range pending {
 				if now.Sub(t) < 300*time.Millisecond {
@@ -111,6 +124,12 @@ func (w *Watcher) Watch(ctx context.Context) error {
 }
 
 func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
+	if !w.client.Connected() {
+		w.queued[absPath] = pendingEvent{absPath: absPath, isDelete: false}
+		w.logger.Debug("queued write (disconnected)", slog.String("path", absPath))
+		return
+	}
+
 	relPath, err := filepath.Rel(w.vault.Dir(), absPath)
 	if err != nil {
 		w.logger.Warn("computing relative path", slog.String("error", err.Error()))
@@ -159,6 +178,12 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 }
 
 func (w *Watcher) handleDelete(ctx context.Context, absPath string) {
+	if !w.client.Connected() {
+		w.queued[absPath] = pendingEvent{absPath: absPath, isDelete: true}
+		w.logger.Debug("queued delete (disconnected)", slog.String("path", absPath))
+		return
+	}
+
 	relPath, err := filepath.Rel(w.vault.Dir(), absPath)
 	if err != nil {
 		w.logger.Warn("computing relative path", slog.String("error", err.Error()))
@@ -170,6 +195,33 @@ func (w *Watcher) handleDelete(ctx context.Context, absPath string) {
 			slog.String("path", relPath),
 			slog.String("error", err.Error()),
 		)
+	}
+}
+
+// drainQueue pushes any events that were queued while disconnected. Only
+// runs when the connection is back up. Re-reads files from disk since
+// content may have changed since the event was queued.
+func (w *Watcher) drainQueue(ctx context.Context) {
+	if len(w.queued) == 0 || !w.client.Connected() {
+		return
+	}
+
+	w.logger.Info("draining queued events", slog.Int("count", len(w.queued)))
+
+	for absPath, ev := range w.queued {
+		delete(w.queued, absPath)
+
+		if ev.isDelete {
+			w.handleDelete(ctx, absPath)
+		} else {
+			w.handleWrite(ctx, absPath)
+		}
+
+		// If we lost connection again while draining, stop and let the
+		// remaining events stay queued for the next reconnect.
+		if !w.client.Connected() {
+			break
+		}
 	}
 }
 
