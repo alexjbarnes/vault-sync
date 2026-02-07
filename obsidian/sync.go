@@ -55,9 +55,10 @@ type SyncClient struct {
 	version           int64
 	initial           bool
 
-	cipher *CipherV0
-	vault  *Vault
-	state  *state.State
+	cipher     *CipherV0
+	vault      *Vault
+	state      *state.State
+	perFileMax int
 
 	onReady func(version int64)
 
@@ -186,6 +187,7 @@ func (s *SyncClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("auth failed: %s", initResp.Res)
 	}
 
+	s.perFileMax = initResp.PerFileMax
 	s.logger.Info("websocket authenticated",
 		slog.Int("user_id", initResp.UserID),
 		slog.Int("per_file_max", initResp.PerFileMax),
@@ -735,6 +737,21 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 
 	if resp.Deleted {
 		return nil, nil
+	}
+
+	// Guard against a malicious or buggy server sending a huge Size that
+	// would cause an OOM on the make() below. Encrypted content adds
+	// overhead (IV + GCM tag) so we allow 2x perFileMax as headroom.
+	maxSize := s.perFileMax * 2
+	if maxSize == 0 {
+		maxSize = 10 * 1024 * 1024 // 10MB fallback if server didn't send perFileMax
+	}
+	if resp.Size > maxSize {
+		return nil, fmt.Errorf("pull response size %d exceeds limit %d", resp.Size, maxSize)
+	}
+	maxPieces := resp.Size/chunkSize + 1
+	if resp.Pieces > maxPieces {
+		return nil, fmt.Errorf("pull response pieces %d exceeds expected max %d for size %d", resp.Pieces, maxPieces, resp.Size)
 	}
 
 	// Read binary frames containing the encrypted content.

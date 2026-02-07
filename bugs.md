@@ -47,9 +47,9 @@ The watcher checks `Connected()` before pushing. While disconnected, events are 
 All three `responseCh` reads in `Push` now have a 30s timeout. On timeout, `writeMu` is released and the hash cache is cleaned up. The watcher re-queues failed pushes when the connection is down (via `requeueIfDisconnected`), so files changed during a network blip are retried after reconnect.
 
 ### 9. No bounds check on PullResponse size
-**File:** `obsidian/sync.go:430`
+**Status:** Fixed in `obsidian/sync.go`
 
-Server-controlled `Size` field is used directly in `make([]byte, 0, resp.Size)`. A malicious or buggy server could send a huge value and cause an out-of-memory panic. Should cap at `perFileMax` or a reasonable limit.
+`perFileMax` from the init response is stored on SyncClient. `pull()` rejects responses where Size exceeds 2x perFileMax (headroom for encryption overhead) or where Pieces exceeds the expected count for the given Size. Falls back to 10MB if the server didn't send perFileMax.
 
 ### 10. Watcher ignores dotfiles including .obsidian
 **File:** `obsidian/watcher.go:191`
