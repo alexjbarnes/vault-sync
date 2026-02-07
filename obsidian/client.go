@@ -49,7 +49,8 @@ func (c *Client) post(ctx context.Context, endpoint string, body, result interfa
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	// Cap response reads at 1MB. API responses are small JSON payloads.
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if err != nil {
 		return fmt.Errorf("reading response from %s: %w", endpoint, err)
 	}

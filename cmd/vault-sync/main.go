@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/alexjbarnes/vault-sync/internal/config"
@@ -75,7 +76,10 @@ func run() error {
 		return fmt.Errorf("creating cipher: %w", err)
 	}
 
-	vs := appState.GetVault(vault.ID)
+	vs, err := appState.GetVault(vault.ID)
+	if err != nil {
+		return fmt.Errorf("reading vault state: %w", err)
+	}
 	logger.Info("sync state",
 		slog.Int64("version", vs.Version),
 		slog.Bool("initial", vs.Initial),
@@ -223,15 +227,12 @@ func selectVault(vaults *obsidian.VaultListResponse, name string) (*obsidian.Vau
 }
 
 func vaultNames(vaults *obsidian.VaultListResponse) string {
-	names := ""
-	for i, v := range vaults.Vaults {
-		if i > 0 {
-			names += ", "
-		}
-		names += v.Name
+	var all []string
+	for _, v := range vaults.Vaults {
+		all = append(all, v.Name)
 	}
 	for _, v := range vaults.Shared {
-		names += ", " + v.Name
+		all = append(all, v.Name+" (shared)")
 	}
-	return names
+	return strings.Join(all, ", ")
 }

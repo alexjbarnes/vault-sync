@@ -99,6 +99,9 @@ func (w *Watcher) Watch(ctx context.Context) error {
 				// For rename, fsnotify fires Remove on the old path.
 				// The new path fires Create separately.
 				delete(pending, event.Name)
+				// Remove watch for deleted directories. On Linux inotify
+				// handles this automatically, but other platforms may leak.
+				_ = watcher.Remove(event.Name)
 				w.handleDelete(ctx, event.Name)
 			}
 
@@ -221,13 +224,24 @@ func (w *Watcher) drainQueue(ctx context.Context) {
 
 	w.logger.Info("draining queued events", slog.Int("count", len(w.queued)))
 
+	// Snapshot keys to avoid iterating a map that callees may modify
+	// (handleWrite/handleDelete can re-queue via requeueIfDisconnected).
+	type queuedItem struct {
+		absPath string
+		ev      pendingEvent
+	}
+	items := make([]queuedItem, 0, len(w.queued))
 	for absPath, ev := range w.queued {
-		delete(w.queued, absPath)
+		items = append(items, queuedItem{absPath: absPath, ev: ev})
+	}
 
-		if ev.isDelete {
-			w.handleDelete(ctx, absPath)
+	for _, item := range items {
+		delete(w.queued, item.absPath)
+
+		if item.ev.isDelete {
+			w.handleDelete(ctx, item.absPath)
 		} else {
-			w.handleWrite(ctx, absPath)
+			w.handleWrite(ctx, item.absPath)
 		}
 
 		// If we lost connection again while draining, stop and let the

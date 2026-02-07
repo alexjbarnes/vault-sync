@@ -102,13 +102,18 @@ func (r *Reconciler) Phase2And3(ctx context.Context, scan *ScanResult) error {
 
 // processServerPushes is Phase 1: handle each queued server push.
 func (r *Reconciler) processServerPushes(ctx context.Context, pushes []ServerPush, scan *ScanResult, serverFiles map[string]state.ServerFile) error {
+	var failures int
 	for _, sp := range pushes {
 		if err := r.processOneServerPush(ctx, sp, scan, serverFiles); err != nil {
+			failures++
 			r.logger.Warn("reconcile server push",
 				slog.String("path", sp.Path),
 				slog.String("error", err.Error()),
 			)
 		}
+	}
+	if failures > 0 {
+		return fmt.Errorf("%d of %d server pushes failed to reconcile", failures, len(pushes))
 	}
 	return nil
 }
@@ -137,7 +142,7 @@ func (r *Reconciler) processOneServerPush(ctx context.Context, sp ServerPush, sc
 			// For simplicity, always accept and let the OS refuse if non-empty.
 			r.vault.DeleteFile(path)
 			r.persistServerPush(path, push, true)
-			r.state.DeleteLocalFile(r.vaultID, path)
+			r.deleteLocalState(path)
 			return nil
 		}
 		// Both folder, not deleted -- no-op.
@@ -163,7 +168,7 @@ func (r *Reconciler) processOneServerPush(ctx context.Context, sp ServerPush, sc
 				r.logger.Info("reconcile: deleting clean local file", slog.String("path", path))
 				r.vault.DeleteFile(path)
 				r.persistServerPush(path, push, true)
-				r.state.DeleteLocalFile(r.vaultID, path)
+				r.deleteLocalState(path)
 				return nil
 			}
 			r.logger.Info("reconcile: downloading over clean local", slog.String("path", path))
@@ -295,9 +300,35 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 		diffs = dmp.DiffCleanupEfficiency(diffs)
 	}
 	patches := dmp.PatchMake(baseText, diffs)
-	merged, _ := dmp.PatchApply(patches, serverText)
+	merged, applied := dmp.PatchApply(patches, serverText)
 
-	r.logger.Info("reconcile: three-way merge", slog.String("path", path))
+	allApplied := true
+	for _, ok := range applied {
+		if !ok {
+			allApplied = false
+			break
+		}
+	}
+
+	if !allApplied {
+		// Some local edits could not be applied to the server version.
+		// Save local content as a conflict copy so the user can recover
+		// their changes manually.
+		r.logger.Warn("reconcile: three-way merge had failed patches, saving conflict copy",
+			slog.String("path", path),
+		)
+		conflictExt := filepath.Ext(path)
+		conflictBase := strings.TrimSuffix(path, conflictExt)
+		conflictPath := r.uniqueConflictPath(conflictBase, conflictExt)
+		if err := r.vault.WriteFile(conflictPath, localContent); err != nil {
+			r.logger.Warn("reconcile: failed to write merge conflict copy",
+				slog.String("path", conflictPath),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+
+	r.logger.Info("reconcile: three-way merge", slog.String("path", path), slog.Bool("clean", allApplied))
 	return r.writeServerContent(path, push, []byte(merged))
 }
 
@@ -360,16 +391,24 @@ func (r *Reconciler) jsonMerge(ctx context.Context, path string, push PushMessag
 // conflict copy, then the server version is applied.
 func (r *Reconciler) handleTypeConflict(ctx context.Context, path string, push PushMessage, local state.LocalFile) error {
 	if local.Folder {
-		// Local is folder, server wants a file. Just download the file
-		// (the folder may have been empty or we let the OS sort it out).
-		r.logger.Info("reconcile: type conflict, downloading file over folder", slog.String("path", path))
+		// Local is folder, server wants a file. Remove the folder first
+		// so WriteFile can create a file at that path.
+		r.logger.Info("reconcile: type conflict, removing folder for file", slog.String("path", path))
+		if err := r.vault.DeleteFile(path); err != nil {
+			r.logger.Warn("reconcile: failed to remove folder for type conflict",
+				slog.String("path", path),
+				slog.String("error", err.Error()),
+			)
+		}
 		return r.downloadServerFile(ctx, path, push)
 	}
 
-	// Local is file, server wants a folder. Rename local to conflict copy.
+	// Local is file, server wants a folder. Save local content to a
+	// conflict copy before removing the original. If the conflict copy
+	// cannot be written, abort to avoid data loss.
 	ext := filepath.Ext(path)
 	base := strings.TrimSuffix(path, ext)
-	conflictPath := base + " (Conflicted copy)" + ext
+	conflictPath := r.uniqueConflictPath(base, ext)
 
 	r.logger.Info("reconcile: type conflict, renaming local",
 		slog.String("from", path),
@@ -377,8 +416,11 @@ func (r *Reconciler) handleTypeConflict(ctx context.Context, path string, push P
 	)
 
 	content, err := r.vault.ReadFile(path)
-	if err == nil {
-		r.vault.WriteFile(conflictPath, content)
+	if err != nil {
+		return fmt.Errorf("reading local file for conflict copy: %w", err)
+	}
+	if err := r.vault.WriteFile(conflictPath, content); err != nil {
+		return fmt.Errorf("writing conflict copy %s: %w", conflictPath, err)
 	}
 	r.vault.DeleteFile(path)
 
@@ -388,6 +430,22 @@ func (r *Reconciler) handleTypeConflict(ctx context.Context, path string, push P
 	}
 
 	return r.downloadServerFile(ctx, path, push)
+}
+
+// uniqueConflictPath returns a conflict copy path that does not already
+// exist on disk. Appends " (1)", " (2)", etc. if needed.
+func (r *Reconciler) uniqueConflictPath(base, ext string) string {
+	candidate := base + " (Conflicted copy)" + ext
+	if _, err := r.vault.Stat(candidate); err != nil {
+		return candidate
+	}
+	for i := 1; i < 100; i++ {
+		candidate = fmt.Sprintf("%s (Conflicted copy %d)%s", base, i, ext)
+		if _, err := r.vault.Stat(candidate); err != nil {
+			return candidate
+		}
+	}
+	return candidate
 }
 
 // downloadServerFile pulls content from the server, decrypts it, and
@@ -408,7 +466,7 @@ func (r *Reconciler) downloadServerFile(ctx context.Context, path string, push P
 	}
 	if content == nil {
 		r.persistServerPush(path, push, true)
-		r.state.DeleteLocalFile(r.vaultID, path)
+		r.deleteLocalState(path)
 		return nil
 	}
 
@@ -455,6 +513,11 @@ func (r *Reconciler) persistServerPush(path string, push PushMessage, deleted bo
 	r.client.persistServerFile(path, push, deleted)
 }
 
+// deleteLocalState removes the local file tracking entry from bbolt.
+func (r *Reconciler) deleteLocalState(path string) {
+	r.client.deleteLocalState(path)
+}
+
 // deleteRemoteFiles is Phase 2: push deletions for files that were
 // deleted locally while offline.
 func (r *Reconciler) deleteRemoteFiles(ctx context.Context, scan *ScanResult, serverFiles map[string]state.ServerFile) error {
@@ -465,7 +528,7 @@ func (r *Reconciler) deleteRemoteFiles(ctx context.Context, scan *ScanResult, se
 		sf, ok := serverFiles[path]
 		if !ok || sf.Deleted {
 			// Already deleted on server or not tracked -- clean up local state.
-			r.state.DeleteLocalFile(r.vaultID, path)
+			r.deleteLocalState(path)
 			continue
 		}
 		remaining[path] = true
@@ -492,7 +555,7 @@ func (r *Reconciler) deleteRemoteFiles(ctx context.Context, scan *ScanResult, se
 			)
 			continue
 		}
-		r.state.DeleteLocalFile(r.vaultID, deepest)
+		r.deleteLocalState(deepest)
 	}
 
 	return nil

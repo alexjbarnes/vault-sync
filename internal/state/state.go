@@ -116,9 +116,9 @@ func (s *State) SetToken(token string) error {
 }
 
 // GetVault returns the sync cursor for a vault, defaulting to initial sync.
-func (s *State) GetVault(vaultID string) VaultState {
+func (s *State) GetVault(vaultID string) (VaultState, error) {
 	vs := VaultState{Version: 0, Initial: true}
-	s.db.View(func(tx *bolt.Tx) error {
+	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(vaultMetaBucket(vaultID))
 		if b == nil {
 			return nil
@@ -127,10 +127,9 @@ func (s *State) GetVault(vaultID string) VaultState {
 		if v == nil {
 			return nil
 		}
-		json.Unmarshal(v, &vs)
-		return nil
+		return json.Unmarshal(v, &vs)
 	})
-	return vs
+	return vs, err
 }
 
 // SetVault updates the sync cursor for a vault.
@@ -161,9 +160,9 @@ func (s *State) InitVaultBuckets(vaultID string) error {
 }
 
 // GetLocalFile returns the local file state for a path, or nil if not found.
-func (s *State) GetLocalFile(vaultID, path string) *LocalFile {
+func (s *State) GetLocalFile(vaultID, path string) (*LocalFile, error) {
 	var lf *LocalFile
-	s.db.View(func(tx *bolt.Tx) error {
+	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(vaultLocalBucket(vaultID))
 		if b == nil {
 			return nil
@@ -173,10 +172,9 @@ func (s *State) GetLocalFile(vaultID, path string) *LocalFile {
 			return nil
 		}
 		lf = &LocalFile{}
-		json.Unmarshal(v, lf)
-		return nil
+		return json.Unmarshal(v, lf)
 	})
-	return lf
+	return lf, err
 }
 
 // SetLocalFile persists the local file state for a path.
@@ -226,9 +224,9 @@ func (s *State) AllLocalFiles(vaultID string) (map[string]LocalFile, error) {
 }
 
 // GetServerFile returns the server file state for a path, or nil if not found.
-func (s *State) GetServerFile(vaultID, path string) *ServerFile {
+func (s *State) GetServerFile(vaultID, path string) (*ServerFile, error) {
 	var sf *ServerFile
-	s.db.View(func(tx *bolt.Tx) error {
+	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(vaultServerBucket(vaultID))
 		if b == nil {
 			return nil
@@ -238,10 +236,9 @@ func (s *State) GetServerFile(vaultID, path string) *ServerFile {
 			return nil
 		}
 		sf = &ServerFile{}
-		json.Unmarshal(v, sf)
-		return nil
+		return json.Unmarshal(v, sf)
 	})
-	return sf
+	return sf, err
 }
 
 // SetServerFile persists the server file state for a path.

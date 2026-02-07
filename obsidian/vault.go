@@ -108,6 +108,9 @@ func (v *Vault) Stat(relPath string) (os.FileInfo, error) {
 // resolve converts a relative path to an absolute path within the vault
 // directory, rejecting path traversal attempts.
 func (v *Vault) resolve(relPath string) (string, error) {
+	if relPath == "" {
+		return "", fmt.Errorf("empty path")
+	}
 	absPath := filepath.Join(v.dir, relPath)
 	if !strings.HasPrefix(absPath, v.dir+string(os.PathSeparator)) {
 		return "", fmt.Errorf("path traversal blocked: %q resolves outside vault dir", relPath)

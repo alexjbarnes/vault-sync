@@ -171,7 +171,10 @@ func (s *SyncClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("dialing websocket: %w", err)
 	}
 	s.conn = conn
-	s.conn.SetReadLimit(256 * 1024 * 1024)
+	// Set a conservative initial read limit. Updated after auth when we
+	// know perFileMax. Encrypted content adds overhead (IV + GCM tag)
+	// so 16MB covers the default 5MB perFileMax with headroom.
+	s.conn.SetReadLimit(16 * 1024 * 1024)
 	s.touchLastMessage()
 
 	init := InitMessage{
@@ -204,6 +207,13 @@ func (s *SyncClient) Connect(ctx context.Context) error {
 	}
 
 	s.perFileMax = initResp.PerFileMax
+	// Tighten read limit now that we know the max file size. Allow 2x
+	// for encryption overhead, minimum 4MB for metadata-heavy responses.
+	readLimit := int64(s.perFileMax * 2)
+	if readLimit < 4*1024*1024 {
+		readLimit = 4 * 1024 * 1024
+	}
+	s.conn.SetReadLimit(readLimit)
 	s.logger.Info("websocket authenticated",
 		slog.Int("user_id", initResp.UserID),
 		slog.Int("per_file_max", initResp.PerFileMax),
@@ -750,7 +760,7 @@ func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 		}
 		s.removeHashCache(path)
 		s.persistServerFile(path, push, true)
-		s.state.DeleteLocalFile(s.vaultID, path)
+		s.deleteLocalState(path)
 		return
 	}
 
@@ -827,7 +837,7 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 		}
 		s.removeHashCache(path)
 		s.persistServerFile(path, push, true)
-		s.state.DeleteLocalFile(s.vaultID, path)
+		s.deleteLocalState(path)
 		return nil
 	}
 
@@ -861,7 +871,7 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 	if content == nil {
 		s.logger.Info("skip deleted content", slog.String("path", path))
 		s.persistServerFile(path, push, true)
-		s.state.DeleteLocalFile(s.vaultID, path)
+		s.deleteLocalState(path)
 		return nil
 	}
 
@@ -1061,7 +1071,18 @@ func (s *SyncClient) persistPushedDelete(path string) {
 			slog.String("error", err.Error()),
 		)
 	}
-	s.state.DeleteLocalFile(s.vaultID, path)
+	s.deleteLocalState(path)
+}
+
+// deleteLocalState removes the local file tracking entry from bbolt.
+// Errors are logged since the state is self-correcting on next scan.
+func (s *SyncClient) deleteLocalState(path string) {
+	if err := s.state.DeleteLocalFile(s.vaultID, path); err != nil {
+		s.logger.Warn("failed to delete local file state",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
 // Pull sends a pull request and reads the response + binary frames
@@ -1284,7 +1305,7 @@ func (s *SyncClient) processPushDirect(ctx context.Context, push PushMessage) er
 		}
 		s.removeHashCache(path)
 		s.persistServerFile(path, push, true)
-		s.state.DeleteLocalFile(s.vaultID, path)
+		s.deleteLocalState(path)
 		return nil
 	}
 
@@ -1316,7 +1337,7 @@ func (s *SyncClient) processPushDirect(ctx context.Context, push PushMessage) er
 	if content == nil {
 		s.logger.Info("skip deleted content", slog.String("path", path))
 		s.persistServerFile(path, push, true)
-		s.state.DeleteLocalFile(s.vaultID, path)
+		s.deleteLocalState(path)
 		return nil
 	}
 
