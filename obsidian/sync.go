@@ -692,6 +692,17 @@ func (s *SyncClient) readResponse(ctx context.Context) (json.RawMessage, error) 
 			}
 			s.touchLastMessage()
 
+			// Any message from the server proves the connection is alive.
+			// Reset the timeout so interleaved pushes don't eat into the
+			// budget meant for detecting a dead connection.
+			if !timeout.Stop() {
+				select {
+				case <-timeout.C:
+				default:
+				}
+			}
+			timeout.Reset(responseTimeout)
+
 			if msg.typ == websocket.MessageBinary {
 				// Binary frame during a push ack wait is unexpected.
 				s.logger.Debug("unexpected binary frame waiting for response", slog.Int("bytes", len(msg.data)))
