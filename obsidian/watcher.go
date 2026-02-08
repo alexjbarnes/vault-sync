@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alexjbarnes/vault-sync/internal/state"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -19,11 +20,20 @@ type pendingEvent struct {
 	isDelete bool
 }
 
+// syncPusher is the subset of SyncClient that Watcher needs to push
+// changes and check connection state. Extracted for testability.
+type syncPusher interface {
+	Connected() bool
+	Push(ctx context.Context, path string, content []byte, mtime int64, ctime int64, isFolder bool, isDeleted bool) error
+	ContentHash(relPath string) string
+	ServerFileState(path string) *state.ServerFile
+}
+
 // Watcher monitors the sync directory for file changes and pushes them
 // to the server via the SyncClient.
 type Watcher struct {
 	vault   *Vault
-	client  *SyncClient
+	pusher  syncPusher
 	logger  *slog.Logger
 	watcher *fsnotify.Watcher
 
@@ -37,7 +47,7 @@ type Watcher struct {
 func NewWatcher(vault *Vault, client *SyncClient, logger *slog.Logger) *Watcher {
 	return &Watcher{
 		vault:  vault,
-		client: client,
+		pusher: client,
 		logger: logger,
 		queued: make(map[string]pendingEvent),
 	}
@@ -127,7 +137,7 @@ func (w *Watcher) Watch(ctx context.Context) error {
 }
 
 func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
-	if !w.client.Connected() {
+	if !w.pusher.Connected() {
 		w.queued[absPath] = pendingEvent{absPath: absPath, isDelete: false}
 		w.logger.Debug("queued write (disconnected)", slog.String("path", absPath))
 		return
@@ -150,7 +160,7 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 	}
 
 	if info.IsDir() {
-		if err := w.client.Push(ctx, relPath, nil, 0, 0, true, false); err != nil {
+		if err := w.pusher.Push(ctx, relPath, nil, 0, 0, true, false); err != nil {
 			w.logger.Warn("push folder failed",
 				slog.String("path", relPath),
 				slog.String("error", err.Error()),
@@ -169,7 +179,7 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 	// Compare against hash cache to avoid pushing content we just received.
 	h := sha256.Sum256(content)
 	contentHash := hex.EncodeToString(h[:])
-	if cached := w.client.ContentHash(relPath); cached == contentHash {
+	if cached := w.pusher.ContentHash(relPath); cached == contentHash {
 		return
 	}
 
@@ -178,13 +188,13 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 
 	// Ctime adoption: preserve the earliest known creation time.
 	// If the server has an older ctime, use that instead of the local one.
-	if sf := w.client.ServerFileState(relPath); sf != nil && sf.CTime > 0 {
+	if sf := w.pusher.ServerFileState(relPath); sf != nil && sf.CTime > 0 {
 		if ctime == 0 || sf.CTime < ctime {
 			ctime = sf.CTime
 		}
 	}
 
-	if err := w.client.Push(ctx, relPath, content, mtime, ctime, false, false); err != nil {
+	if err := w.pusher.Push(ctx, relPath, content, mtime, ctime, false, false); err != nil {
 		w.logger.Warn("push file failed",
 			slog.String("path", relPath),
 			slog.String("error", err.Error()),
@@ -194,7 +204,7 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 }
 
 func (w *Watcher) handleDelete(ctx context.Context, absPath string) {
-	if !w.client.Connected() {
+	if !w.pusher.Connected() {
 		w.queued[absPath] = pendingEvent{absPath: absPath, isDelete: true}
 		w.logger.Debug("queued delete (disconnected)", slog.String("path", absPath))
 		return
@@ -209,12 +219,12 @@ func (w *Watcher) handleDelete(ctx context.Context, absPath string) {
 
 	// Only push the delete if the server knows about this path.
 	// Local-only files that were never synced have no server entry.
-	sf := w.client.ServerFileState(relPath)
+	sf := w.pusher.ServerFileState(relPath)
 	if sf == nil {
 		return
 	}
 
-	if err := w.client.Push(ctx, relPath, nil, 0, 0, sf.Folder, true); err != nil {
+	if err := w.pusher.Push(ctx, relPath, nil, 0, 0, sf.Folder, true); err != nil {
 		w.logger.Warn("push delete failed",
 			slog.String("path", relPath),
 			slog.String("error", err.Error()),
@@ -227,7 +237,7 @@ func (w *Watcher) handleDelete(ctx context.Context, absPath string) {
 // connection dropped. If still connected, the server rejected the push
 // and retrying won't help.
 func (w *Watcher) requeueIfDisconnected(absPath string, isDelete bool) {
-	if !w.client.Connected() {
+	if !w.pusher.Connected() {
 		w.queued[absPath] = pendingEvent{absPath: absPath, isDelete: isDelete}
 		w.logger.Debug("re-queued after push failure", slog.String("path", absPath))
 	}
@@ -237,7 +247,7 @@ func (w *Watcher) requeueIfDisconnected(absPath string, isDelete bool) {
 // runs when the connection is back up. Re-reads files from disk since
 // content may have changed since the event was queued.
 func (w *Watcher) drainQueue(ctx context.Context) {
-	if len(w.queued) == 0 || !w.client.Connected() {
+	if len(w.queued) == 0 || !w.pusher.Connected() {
 		return
 	}
 
@@ -265,7 +275,7 @@ func (w *Watcher) drainQueue(ctx context.Context) {
 
 		// If we lost connection again while draining, stop and let the
 		// remaining events stay queued for the next reconnect.
-		if !w.client.Connected() {
+		if !w.pusher.Connected() {
 			break
 		}
 	}
