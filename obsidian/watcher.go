@@ -195,7 +195,9 @@ func (w *Watcher) handleDelete(ctx context.Context, absPath string) {
 		return
 	}
 
-	if err := w.client.Push(ctx, relPath, nil, 0, 0, false, true); err != nil {
+	isFolder := w.client.IsServerFolder(relPath)
+
+	if err := w.client.Push(ctx, relPath, nil, 0, 0, isFolder, true); err != nil {
 		w.logger.Warn("push delete failed",
 			slog.String("path", relPath),
 			slog.String("error", err.Error()),

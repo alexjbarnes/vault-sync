@@ -1085,6 +1085,20 @@ func (s *SyncClient) deleteLocalState(path string) {
 	}
 }
 
+// IsServerFolder checks whether the given path is recorded as a folder
+// in the server file state. Returns false if the path is not found.
+func (s *SyncClient) IsServerFolder(path string) bool {
+	sf, err := s.state.GetServerFile(s.vaultID, path)
+	if err != nil {
+		s.logger.Warn("failed to look up server file state",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	return sf != nil && sf.Folder
+}
+
 // Pull sends a pull request and reads the response + binary frames
 // directly from the connection. Used by the reconciler during startup
 // before the reader goroutine is running.
