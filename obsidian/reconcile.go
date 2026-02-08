@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -531,43 +532,58 @@ func (r *Reconciler) deleteLocalState(path string) {
 }
 
 // deleteRemoteFiles is Phase 2: push deletions for files that were
-// deleted locally while offline.
+// deleted locally while offline. Matches app.js behavior: delete files
+// first (deepest first), then folders (deepest first) in separate passes.
 func (r *Reconciler) deleteRemoteFiles(ctx context.Context, scan *ScanResult, serverFiles map[string]state.ServerFile) error {
-	// Process deepest paths first (children before parents) by sorting
-	// by path length descending. Simple approach: find the longest first.
-	remaining := make(map[string]bool)
+	// Collect files and folders separately.
+	var filePaths, folderPaths []string
 	for _, path := range scan.Deleted {
-		_, ok := serverFiles[path]
+		sf, ok := serverFiles[path]
 		if !ok {
 			// Not tracked on server -- clean up local state.
 			r.deleteLocalState(path)
 			continue
 		}
-		remaining[path] = true
+		if sf.Folder {
+			folderPaths = append(folderPaths, path)
+		} else {
+			filePaths = append(filePaths, path)
+		}
 	}
 
-	for len(remaining) > 0 {
-		// Find the deepest path (longest string).
-		var deepest string
-		for path := range remaining {
-			if len(path) > len(deepest) {
-				deepest = path
-			}
-		}
-		delete(remaining, deepest)
+	// First pass: delete all files (deepest first).
+	if err := r.deletePaths(ctx, filePaths, serverFiles); err != nil {
+		return err
+	}
 
-		sf := serverFiles[deepest]
-		r.logger.Info("reconcile: deleting remote", slog.String("path", deepest), slog.Bool("folder", sf.Folder))
+	// Second pass: delete all folders (deepest first).
+	if err := r.deletePaths(ctx, folderPaths, serverFiles); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// deletePaths deletes the given paths in order, deepest first.
+func (r *Reconciler) deletePaths(ctx context.Context, paths []string, serverFiles map[string]state.ServerFile) error {
+	// Sort by path length descending (deepest first).
+	sort.Slice(paths, func(i, j int) bool {
+		return len(paths[i]) > len(paths[j])
+	})
+
+	for _, path := range paths {
+		sf := serverFiles[path]
+		r.logger.Info("reconcile: deleting remote", slog.String("path", path), slog.Bool("folder", sf.Folder))
 
 		mtime := time.Now().UnixMilli()
-		if err := r.client.Push(ctx, deepest, nil, mtime, 0, sf.Folder, true); err != nil {
+		if err := r.client.Push(ctx, path, nil, mtime, 0, sf.Folder, true); err != nil {
 			r.logger.Warn("reconcile: failed to push delete",
-				slog.String("path", deepest),
+				slog.String("path", path),
 				slog.String("error", err.Error()),
 			)
 			continue
 		}
-		r.deleteLocalState(deepest)
+		r.deleteLocalState(path)
 	}
 
 	return nil

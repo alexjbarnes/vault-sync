@@ -31,8 +31,9 @@
 ## Bug 44: Delete ordering doesn't separate files from folders
 - **File**: `obsidian/reconcile.go`
 - **Severity**: Medium
-- **Status**: OPEN
-- app.js deletes files first (deepest first), then folders (deepest first) in separate passes. We don't separate them. If we delete a folder before its children, the server may reject it.
+- **Status**: FIXED
+- app.js deletes files first (deepest first), then folders (deepest first) in separate passes. We didn't separate them. If we delete a folder before its children, the server may reject it.
+- Fix: rewrote `deleteRemoteFiles` to do two passes: first all files (sorted by path length descending), then all folders (sorted by path length descending).
 
 ## Bug 45: MFA field missing from signin
 - **File**: `obsidian/client.go`
