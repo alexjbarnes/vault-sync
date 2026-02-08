@@ -198,6 +198,14 @@ func (s *SyncClient) Connect(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("dialing websocket: %w", err)
 	}
+
+	return s.handshake(ctx, conn)
+}
+
+// handshake performs the post-dial init/auth sequence. Extracted from
+// Connect so the auth logic can be tested with a mock wsConn without
+// needing a real network connection.
+func (s *SyncClient) handshake(ctx context.Context, conn wsConn) error {
 	s.conn = conn
 	// Set a conservative initial read limit. Updated after auth when we
 	// know perFileMax. Encrypted content adds overhead (IV + GCM tag)
