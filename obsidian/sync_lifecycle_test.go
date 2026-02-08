@@ -425,7 +425,41 @@ func TestEventLoop_PingWriteError(t *testing.T) {
 	})
 }
 
-// --- Listen ---
+// --- Listen (synctest) ---
+
+func TestListen_CancelledDuringBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		s, mock := withMockConn(t, ctrl)
+		ctx, cancel := context.WithCancel(t.Context())
+
+		// Set lastMessage so the heartbeat ticker doesn't interfere.
+		s.lastMsgMu.Lock()
+		s.lastMessage = time.Now()
+		s.lastMsgMu.Unlock()
+
+		// startReader calls Read. Return a transient error immediately
+		// so eventLoop exits and Listen enters the backoff timer.
+		mock.EXPECT().Read(gomock.Any()).
+			Return(websocket.MessageText, nil, fmt.Errorf("connection reset"))
+
+		// After eventLoop returns, Listen enters backoff (5s + jitter).
+		// Cancel ctx during backoff via a goroutine. The synctest fake
+		// clock does not advance while any goroutine is runnable, so we
+		// schedule the cancel with a small timer that fires before the
+		// reconnect timer.
+		go func() {
+			// Wait for Listen to reach the timer select. synctest.Wait
+			// cannot be called here (not the root goroutine), so use a
+			// short sleep that fires before the reconnect timer.
+			time.Sleep(1 * time.Second)
+			cancel()
+		}()
+
+		err := s.Listen(ctx)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+}
 
 func TestListen_ContextCancelled(t *testing.T) {
 	ctrl := gomock.NewController(t)

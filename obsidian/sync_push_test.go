@@ -241,6 +241,163 @@ func TestExecutePush_WriteError(t *testing.T) {
 	assert.Contains(t, err.Error(), "sending push metadata")
 }
 
+// --- executePush: folder readResponse error ---
+
+func TestExecutePush_FolderReadResponseError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	s, mock := withMockConn(t, ctrl)
+	ctx := context.Background()
+
+	mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil)
+
+	// readResponse times out or gets an error via inboundCh.
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		s.inboundCh <- inboundMsg{err: fmt.Errorf("read failed")}
+	}()
+
+	op := syncOp{path: "folder", isFolder: true}
+	err := s.executePush(ctx, op)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read failed")
+
+	_, inBackoff := s.checkRetryBackoff("folder")
+	assert.True(t, inBackoff)
+}
+
+// --- executePush: content metadata readResponse error ---
+
+func TestExecutePush_ContentMetadataReadResponseError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	s, mock := withMockConn(t, ctrl)
+	ctx := context.Background()
+
+	content := []byte("some file content")
+
+	mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil)
+
+	// readResponse after metadata write fails.
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		s.inboundCh <- inboundMsg{err: fmt.Errorf("connection lost")}
+	}()
+
+	op := syncOp{path: "fail.md", content: content}
+	err := s.executePush(ctx, op)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "connection lost")
+
+	// Hash cache should be cleaned up.
+	assert.Empty(t, s.ContentHash("fail.md"))
+}
+
+// --- executePush: malformed JSON response ---
+
+func TestExecutePush_MalformedResponse(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	s, mock := withMockConn(t, ctrl)
+	ctx := context.Background()
+
+	content := []byte("data")
+
+	mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil)
+
+	feedResponse(s, `not valid json`)
+
+	op := syncOp{path: "bad-resp.md", content: content}
+	err := s.executePush(ctx, op)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decoding push response")
+}
+
+// --- executePush: binary chunk write error ---
+
+func TestExecutePush_BinaryChunkWriteError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	s, mock := withMockConn(t, ctrl)
+	ctx := context.Background()
+
+	content := []byte("chunk data")
+
+	writeCount := 0
+	mock.EXPECT().Write(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, typ websocket.MessageType, data []byte) error {
+			writeCount++
+			if writeCount == 1 {
+				// Metadata write succeeds.
+				return nil
+			}
+			// Binary chunk write fails.
+			return fmt.Errorf("broken pipe")
+		}).Times(2)
+
+	// Response to metadata: "next" (proceed to send chunks).
+	feedResponse(s, `{"res":"next"}`)
+
+	op := syncOp{path: "chunk-fail.md", content: content}
+	err := s.executePush(ctx, op)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sending chunk")
+
+	// Hash cache should be cleaned up.
+	assert.Empty(t, s.ContentHash("chunk-fail.md"))
+}
+
+// --- executePush: chunk ack readResponse error ---
+
+func TestExecutePush_ChunkAckReadResponseError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	s, mock := withMockConn(t, ctrl)
+	ctx := context.Background()
+
+	content := []byte("ack fails")
+
+	writeCount := 0
+	mock.EXPECT().Write(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, typ websocket.MessageType, data []byte) error {
+			writeCount++
+			return nil
+		}).Times(2)
+
+	// Response to metadata: "next". Then chunk ack fails.
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"res":"next"}`)}
+		time.Sleep(5 * time.Millisecond)
+		s.inboundCh <- inboundMsg{err: fmt.Errorf("ack lost")}
+	}()
+
+	op := syncOp{path: "ack-fail.md", content: content}
+	err := s.executePush(ctx, op)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ack lost")
+
+	// Hash cache should be cleaned up.
+	assert.Empty(t, s.ContentHash("ack-fail.md"))
+}
+
+// --- executePush: delete readResponse error ---
+
+func TestExecutePush_DeleteReadResponseError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	s, mock := withMockConn(t, ctrl)
+	ctx := context.Background()
+
+	mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil)
+
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		s.inboundCh <- inboundMsg{err: fmt.Errorf("read failed")}
+	}()
+
+	op := syncOp{path: "del-fail.md", isDeleted: true}
+	err := s.executePush(ctx, op)
+	require.Error(t, err)
+
+	_, inBackoff := s.checkRetryBackoff("del-fail.md")
+	assert.True(t, inBackoff)
+}
+
 // --- executePush: extension extraction ---
 
 func TestExecutePush_ExtensionExtracted(t *testing.T) {
