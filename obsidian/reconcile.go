@@ -121,6 +121,13 @@ func (r *Reconciler) processServerPushes(ctx context.Context, pushes []ServerPus
 func (r *Reconciler) processOneServerPush(ctx context.Context, sp ServerPush, scan *ScanResult, serverFiles map[string]state.ServerFile) error {
 	path := sp.Path
 	push := sp.Msg
+
+	// app.js safety check: during initial sync, deletions are excluded
+	// by the server's compacted snapshot, but we skip them anyway.
+	if r.client.initial && push.Deleted {
+		return nil
+	}
+
 	local, hasLocal := scan.Current[path]
 	prev, hasPrev := serverFiles[path]
 

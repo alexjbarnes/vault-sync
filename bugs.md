@@ -24,9 +24,9 @@
 ## Bug 43: Initial sync processes deletions
 - **File**: `obsidian/reconcile.go`
 - **Severity**: Medium
-- **Status**: OPEN
+- **Status**: FIXED
 - app.js drops deleted pushes during initial sync (`if (this.initial && e.deleted) return`). We process them, potentially deleting local files that the server already excluded.
-- Fix: check `initial` flag in Phase1 and skip deleted entries.
+- Fix: added check at start of `processOneServerPush` to skip deletions when `client.initial` is true.
 
 ## Bug 44: Delete ordering doesn't separate files from folders
 - **File**: `obsidian/reconcile.go`
