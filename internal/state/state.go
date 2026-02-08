@@ -71,12 +71,17 @@ type State struct {
 // Load opens the state database at ~/.vault-sync/state.db, creating it
 // if it does not exist. The app bucket is created on open.
 func Load() (*State, error) {
-	p := dbPath()
-	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+	return LoadAt(dbPath())
+}
+
+// LoadAt opens a state database at the given path, creating it if it
+// does not exist. Useful for tests that need an isolated database.
+func LoadAt(path string) (*State, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, fmt.Errorf("creating state directory: %w", err)
 	}
 
-	db, err := bolt.Open(p, 0600, &bolt.Options{Timeout: 5 * time.Second})
+	db, err := bolt.Open(path, 0600, &bolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("opening state db: %w", err)
 	}
