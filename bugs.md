@@ -72,10 +72,11 @@
 - Added size check in `executePush` before encrypting content. Files exceeding `perFileMax` are logged and silently skipped, matching app.js behavior.
 
 ## Bug 51: No pre-write re-stat guard during download
-- **File**: `obsidian/sync.go:904`
+- **File**: `obsidian/sync.go`
 - **Severity**: Medium
-- **Status**: OPEN
+- **Status**: FIXED
 - app.js re-stats the file after pulling content and before writing. If mtime/size changed (user edited while downloading), app.js aborts. We silently overwrite. Lower risk for a headless daemon but still a race condition.
+- Fix: added `checkFileChangedDuringDownload` helper. Called in both `processPush` and `processPushDirect` after decrypting content, before writing. Aborts with descriptive error if file was modified during download.
 
 ## Bug 52: No per-path retry backoff
 - **File**: `obsidian/sync.go`, `obsidian/watcher.go`

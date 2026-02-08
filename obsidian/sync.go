@@ -10,6 +10,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -919,6 +920,16 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 		}
 	}
 
+	// Check if file was modified during download. If so, abort to avoid
+	// overwriting changes. This can happen with external editors via MCP/API.
+	var expectedMtime time.Time
+	if push.MTime > 0 {
+		expectedMtime = time.UnixMilli(push.MTime)
+	}
+	if err := s.checkFileChangedDuringDownload(path, expectedMtime, int64(len(plaintext))); err != nil {
+		return err
+	}
+
 	var mtime time.Time
 	if push.MTime > 0 {
 		mtime = time.UnixMilli(push.MTime)
@@ -943,6 +954,25 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 		slog.String("path", path),
 		slog.Int("bytes", len(plaintext)),
 	)
+	return nil
+}
+
+// checkFileChangedDuringDownload aborts if the file was modified while we
+// were pulling content. This prevents overwriting concurrent external edits.
+func (s *SyncClient) checkFileChangedDuringDownload(path string, expectedMtime time.Time, expectedSize int64) error {
+	info, err := s.vault.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+
+	// File exists. Check if it was modified during download.
+	if !expectedMtime.IsZero() && !info.ModTime().Equal(expectedMtime) {
+		return fmt.Errorf("download cancelled because %s was changed locally during download", path)
+	}
+
 	return nil
 }
 
@@ -1441,6 +1471,15 @@ func (s *SyncClient) processPushDirect(ctx context.Context, push PushMessage) er
 		if err != nil {
 			return fmt.Errorf("decrypting content for %s: %w", path, err)
 		}
+	}
+
+	// Check if file was modified during download.
+	var expectedMtime time.Time
+	if push.MTime > 0 {
+		expectedMtime = time.UnixMilli(push.MTime)
+	}
+	if err := s.checkFileChangedDuringDownload(path, expectedMtime, int64(len(plaintext))); err != nil {
+		return err
 	}
 
 	var mtime time.Time
