@@ -915,17 +915,32 @@ func (s *SyncClient) decryptPush(push PushMessage) (ServerPush, error) {
 	return ServerPush{Msg: push, Path: path}, nil
 }
 
-// persistServerFile saves the server-side file state to bbolt.
+// persistServerFile saves the server-side file state to bbolt. When a
+// file is deleted, the entry is removed rather than stored with a deleted
+// flag. Keeping deleted entries would cause unbounded growth since nothing
+// cleans them up. Removing them is safe because:
+//   - The reconciler checks !ok when deciding whether to push a remote
+//     delete, so a missing entry behaves identically to a deleted one.
+//   - IsServerFolder returns false for missing entries, which is correct
+//     since the path no longer exists on the server.
 func (s *SyncClient) persistServerFile(path string, push PushMessage, deleted bool) {
+	if deleted {
+		if err := s.state.DeleteServerFile(s.vaultID, path); err != nil {
+			s.logger.Warn("failed to delete server file state",
+				slog.String("path", path),
+				slog.String("error", err.Error()),
+			)
+		}
+		return
+	}
 	sf := state.ServerFile{
-		Path:    path,
-		Hash:    push.Hash,
-		UID:     push.UID,
-		MTime:   push.MTime,
-		Size:    push.Size,
-		Folder:  push.Folder,
-		Deleted: deleted,
-		Device:  push.Device,
+		Path:   path,
+		Hash:   push.Hash,
+		UID:    push.UID,
+		MTime:  push.MTime,
+		Size:   push.Size,
+		Folder: push.Folder,
+		Device: push.Device,
 	}
 	if err := s.state.SetServerFile(s.vaultID, sf); err != nil {
 		s.logger.Warn("failed to persist server file state",
@@ -1059,14 +1074,12 @@ func (s *SyncClient) persistPushedFolder(path string) {
 	}
 }
 
-// persistPushedDelete records state after we successfully pushed a deletion.
+// persistPushedDelete removes the server and local file state after we
+// successfully pushed a deletion. See persistServerFile for why we
+// remove rather than store a deleted entry.
 func (s *SyncClient) persistPushedDelete(path string) {
-	sf := state.ServerFile{
-		Path:    path,
-		Deleted: true,
-	}
-	if err := s.state.SetServerFile(s.vaultID, sf); err != nil {
-		s.logger.Warn("failed to persist server delete after push",
+	if err := s.state.DeleteServerFile(s.vaultID, path); err != nil {
+		s.logger.Warn("failed to delete server file state after push",
 			slog.String("path", path),
 			slog.String("error", err.Error()),
 		)

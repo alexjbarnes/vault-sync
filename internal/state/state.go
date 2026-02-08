@@ -47,16 +47,17 @@ type LocalFile struct {
 
 // ServerFile tracks the last known state of a file on the server.
 // Populated from server push messages and used during reconciliation
-// to detect whether the local copy has diverged.
+// to detect whether the local copy has diverged. When a file is deleted,
+// its entry is removed from bbolt rather than stored with a flag, so
+// the Deleted field no longer exists on this struct.
 type ServerFile struct {
-	Path    string `json:"path"`
-	Hash    string `json:"hash"`
-	UID     int64  `json:"uid"`
-	MTime   int64  `json:"mtime"`
-	Size    int64  `json:"size"`
-	Folder  bool   `json:"folder"`
-	Deleted bool   `json:"deleted"`
-	Device  string `json:"device"`
+	Path   string `json:"path"`
+	Hash   string `json:"hash"`
+	UID    int64  `json:"uid"`
+	MTime  int64  `json:"mtime"`
+	Size   int64  `json:"size"`
+	Folder bool   `json:"folder"`
+	Device string `json:"device"`
 }
 
 // State wraps a bbolt database for all persistent application state.

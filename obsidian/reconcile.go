@@ -232,7 +232,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 
 	// Get base version (previous server state).
 	baseText := ""
-	if hasPrev && !prev.Deleted && prev.UID > 0 {
+	if hasPrev && prev.UID > 0 {
 		baseEnc, err := r.client.pullDirect(ctx, prev.UID)
 		if err != nil {
 			r.logger.Warn("reconcile: failed to pull base for merge, server wins",
@@ -525,9 +525,9 @@ func (r *Reconciler) deleteRemoteFiles(ctx context.Context, scan *ScanResult, se
 	// by path length descending. Simple approach: find the longest first.
 	remaining := make(map[string]bool)
 	for _, path := range scan.Deleted {
-		sf, ok := serverFiles[path]
-		if !ok || sf.Deleted {
-			// Already deleted on server or not tracked -- clean up local state.
+		_, ok := serverFiles[path]
+		if !ok {
+			// Not tracked on server -- clean up local state.
 			r.deleteLocalState(path)
 			continue
 		}
@@ -584,7 +584,7 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 	sortByLengthAsc(folders)
 	for _, path := range folders {
 		sf, hasSF := serverFiles[path]
-		if hasSF && sf.Folder && !sf.Deleted {
+		if hasSF && sf.Folder {
 			// Already exists as folder on server -- skip.
 			continue
 		}
@@ -604,7 +604,7 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 		sf, hasSF := serverFiles[path]
 
 		// Skip if server already has the same content.
-		if hasSF && !sf.Deleted && !sf.Folder && lf.Hash != "" {
+		if hasSF && !sf.Folder && lf.Hash != "" {
 			encHash, err := r.cipher.EncryptPath(lf.Hash)
 			if err == nil && encHash == sf.Hash {
 				continue
@@ -623,7 +623,7 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 		// Recompute hash to be sure.
 		h := sha256.Sum256(content)
 		contentHash := hex.EncodeToString(h[:])
-		if hasSF && !sf.Deleted && !sf.Folder && sf.Hash != "" {
+		if hasSF && !sf.Folder && sf.Hash != "" {
 			encHash, err := r.cipher.EncryptPath(contentHash)
 			if err == nil && encHash == sf.Hash {
 				continue
