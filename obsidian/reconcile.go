@@ -285,10 +285,20 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 		return nil
 	}
 
-	// No base available -- fall back based on timing.
+	// No base available -- server wins, but save local as conflict copy
+	// so the user can recover their changes. Without a base we cannot
+	// merge, and silently discarding local edits is data loss.
 	if baseText == "" {
-		// Server wins when we have no base to merge against.
-		r.logger.Info("reconcile: no base for merge, server wins", slog.String("path", path))
+		r.logger.Warn("reconcile: no base for merge, saving conflict copy", slog.String("path", path))
+		conflictExt := filepath.Ext(path)
+		conflictBase := strings.TrimSuffix(path, conflictExt)
+		conflictPath := r.uniqueConflictPath(conflictBase, conflictExt)
+		if err := r.vault.WriteFile(conflictPath, localContent); err != nil {
+			r.logger.Warn("reconcile: failed to write conflict copy",
+				slog.String("path", conflictPath),
+				slog.String("error", err.Error()),
+			)
+		}
 		return r.writeServerContent(path, push, []byte(serverText))
 	}
 
