@@ -260,6 +260,102 @@ func TestExecuteLiveDecision_KeepLocal(t *testing.T) {
 	assert.Equal(t, []byte("local only"), data)
 }
 
+func TestExecuteLiveDecision_MergeMD(t *testing.T) {
+	s, vault, _, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("merge.md", []byte("local content"), time.Time{}))
+
+	// Server has different content; no prev, so liveMergeMD will fall back
+	// to mtime comparison. Server mtime is newer, so server wins.
+	serverContent := []byte("server content")
+	encContent := encryptContent(t, cipher, serverContent)
+
+	local := &state.LocalFile{Path: "merge.md", MTime: 1000}
+	push := PushMessage{UID: 40, MTime: 2000}
+
+	err := s.executeLiveDecision(ctx, DecisionMergeMD, "merge.md", push, local, nil, fakePull(encContent))
+	require.NoError(t, err)
+
+	data, _ := vault.ReadFile("merge.md")
+	assert.Equal(t, serverContent, data)
+}
+
+func TestExecuteLiveDecision_MergeJSON(t *testing.T) {
+	s, vault, _, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile(".obsidian/app.json", []byte(`{"local":"val"}`), time.Time{}))
+
+	serverJSON := []byte(`{"server":"val"}`)
+	encContent := encryptContent(t, cipher, serverJSON)
+
+	push := PushMessage{UID: 41, MTime: time.Now().UnixMilli()}
+
+	err := s.executeLiveDecision(ctx, DecisionMergeJSON, ".obsidian/app.json", push, nil, nil, fakePull(encContent))
+	require.NoError(t, err)
+
+	data, _ := vault.ReadFile(".obsidian/app.json")
+	assert.Contains(t, string(data), "local")
+	assert.Contains(t, string(data), "server")
+}
+
+func TestExecuteLiveDecision_TypeConflict_LocalFile(t *testing.T) {
+	s, vault, _, _ := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("clash.txt", []byte("local file"), time.Time{}))
+
+	local := &state.LocalFile{Path: "clash.txt", Folder: false}
+	push := PushMessage{UID: 42, Folder: true}
+
+	err := s.executeLiveDecision(ctx, DecisionTypeConflict, "clash.txt", push, local, nil, nil)
+	require.NoError(t, err)
+
+	// Conflict copy should exist.
+	cpData, err := vault.ReadFile("clash (Conflicted copy).txt")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("local file"), cpData)
+
+	// Original path should be a folder.
+	info, err := vault.Stat("clash.txt")
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+}
+
+func TestExecuteLiveDecision_TypeConflict_LocalFolder(t *testing.T) {
+	s, vault, _, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.MkdirAll("fclash"))
+
+	plain := []byte("server file")
+	encContent := encryptContent(t, cipher, plain)
+
+	local := &state.LocalFile{Path: "fclash", Folder: true}
+	push := PushMessage{UID: 43, MTime: time.Now().UnixMilli()}
+
+	err := s.executeLiveDecision(ctx, DecisionTypeConflict, "fclash", push, local, nil, fakePull(encContent))
+	require.NoError(t, err)
+
+	// Conflict copy of folder.
+	_, err = vault.Stat("fclash (Conflicted copy)")
+	assert.NoError(t, err)
+
+	// Server file at original path.
+	data, err := vault.ReadFile("fclash")
+	require.NoError(t, err)
+	assert.Equal(t, plain, data)
+}
+
+func TestExecuteLiveDecision_UnknownDecision(t *testing.T) {
+	s, _, _, _ := fullSyncClient(t)
+	ctx := context.Background()
+
+	err := s.executeLiveDecision(ctx, ReconcileDecision(99), "x.md", PushMessage{}, nil, nil, nil)
+	assert.NoError(t, err)
+}
+
 // --- liveDownload ---
 
 func TestLiveDownload_WritesDecryptedContent(t *testing.T) {
@@ -478,6 +574,70 @@ func TestResolveLocalState_Directory(t *testing.T) {
 	require.NotNil(t, local)
 	assert.True(t, local.Folder)
 	assert.Empty(t, encHash, "directories have no content hash")
+}
+
+func TestResolveLocalState_HashMismatch_ReHashFromDisk(t *testing.T) {
+	s, vault, appState, _ := fullSyncClient(t)
+
+	// Write file, persist with matching mtime but wrong size to trigger re-hash.
+	content := []byte("real content on disk")
+	require.NoError(t, vault.WriteFile("changed.md", content, time.Time{}))
+
+	info, _ := vault.Stat("changed.md")
+	require.NoError(t, appState.SetLocalFile(testSyncVaultID, state.LocalFile{
+		Path:     "changed.md",
+		MTime:    info.ModTime().UnixMilli(),
+		Size:     999, // Different from actual size -> triggers re-hash.
+		Hash:     "stale-hash",
+		SyncHash: "old-sync-hash",
+		SyncTime: 42,
+	}))
+
+	local, encHash := s.resolveLocalState("changed.md")
+	require.NotNil(t, local)
+
+	// Hash should be recomputed from disk.
+	assert.Equal(t, sha256Hex(content), local.Hash)
+	assert.NotEmpty(t, encHash)
+
+	// SyncHash should be carried over from persisted state.
+	assert.Equal(t, "old-sync-hash", local.SyncHash)
+	assert.Equal(t, int64(42), local.SyncTime)
+}
+
+func TestResolveLocalState_HashMismatch_NoPersistedState(t *testing.T) {
+	s, vault, _, _ := fullSyncClient(t)
+
+	// File on disk with no persisted state at all -> hash from disk, no SyncHash.
+	content := []byte("new file")
+	require.NoError(t, vault.WriteFile("fresh.md", content, time.Time{}))
+
+	local, encHash := s.resolveLocalState("fresh.md")
+	require.NotNil(t, local)
+	assert.Equal(t, sha256Hex(content), local.Hash)
+	assert.NotEmpty(t, encHash)
+	assert.Empty(t, local.SyncHash)
+}
+
+func TestResolveLocalState_PersistedEmptyHash(t *testing.T) {
+	s, vault, appState, _ := fullSyncClient(t)
+
+	// Persisted entry with matching mtime/size but empty hash -> re-hash from disk.
+	content := []byte("has content")
+	require.NoError(t, vault.WriteFile("empty-hash.md", content, time.Time{}))
+
+	info, _ := vault.Stat("empty-hash.md")
+	require.NoError(t, appState.SetLocalFile(testSyncVaultID, state.LocalFile{
+		Path:  "empty-hash.md",
+		MTime: info.ModTime().UnixMilli(),
+		Size:  info.Size(),
+		Hash:  "", // Empty hash -> won't reuse, falls through to re-hash.
+	}))
+
+	local, encHash := s.resolveLocalState("empty-hash.md")
+	require.NotNil(t, local)
+	assert.Equal(t, sha256Hex(content), local.Hash)
+	assert.NotEmpty(t, encHash)
 }
 
 // --- retryBackoff ---

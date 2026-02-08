@@ -228,6 +228,43 @@ func TestLiveMergeMD_ServerEmptyString(t *testing.T) {
 	assert.Equal(t, localContent, data)
 }
 
+func TestLiveMergeMD_RecentlyCreatedFileServerWins(t *testing.T) {
+	s, vault, _, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	localContent := []byte("new local file")
+	serverContent := []byte("server content")
+	require.NoError(t, vault.WriteFile("recent.md", localContent, time.Time{}))
+
+	encServer := encryptContent(t, cipher, serverContent)
+	push := PushMessage{UID: 8, MTime: 1000} // Old server mtime (local would normally win).
+
+	// CTime is very recent (within 3 minutes) -- server should win.
+	local := &state.LocalFile{
+		MTime: time.Now().UnixMilli() + 10000,
+		CTime: time.Now().UnixMilli(),
+	}
+
+	err := s.liveMergeMD(ctx, "recent.md", push, local, nil, fakePull(encServer))
+	require.NoError(t, err)
+
+	// Server should win despite local having newer mtime, because ctime is recent.
+	data, _ := vault.ReadFile("recent.md")
+	assert.Equal(t, serverContent, data)
+}
+
+func TestLiveMergeMD_PullServerError(t *testing.T) {
+	s, vault, _, _ := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("pull-err.md", []byte("local"), time.Time{}))
+	push := PushMessage{UID: 9}
+
+	err := s.liveMergeMD(ctx, "pull-err.md", push, nil, nil, fakePullError("server down"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pulling server version for merge")
+}
+
 // --- liveMergeJSON ---
 
 func TestLiveMergeJSON_ShallowMerge(t *testing.T) {
@@ -303,6 +340,34 @@ func TestLiveMergeJSON_InvalidServerJSON_WritesRaw(t *testing.T) {
 	assert.Equal(t, serverContent, data)
 }
 
+func TestLiveMergeJSON_PullError(t *testing.T) {
+	s, vault, _, _ := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile(".obsidian/err.json", []byte(`{"a":"b"}`), time.Time{}))
+
+	push := PushMessage{UID: 45}
+	err := s.liveMergeJSON(ctx, ".obsidian/err.json", push, fakePullError("server down"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pulling server config for merge")
+}
+
+func TestLiveMergeJSON_ReadFileError_FallsBackToDownload(t *testing.T) {
+	s, vault, _, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	// File does not exist -> ReadFile fails -> fallback to liveDownload.
+	serverContent := []byte(`{"server":"data"}`)
+	encServer := encryptContent(t, cipher, serverContent)
+
+	push := PushMessage{UID: 46, MTime: time.Now().UnixMilli()}
+	err := s.liveMergeJSON(ctx, ".obsidian/missing.json", push, fakePull(encServer))
+	require.NoError(t, err)
+
+	data, _ := vault.ReadFile(".obsidian/missing.json")
+	assert.Equal(t, serverContent, data)
+}
+
 // --- liveTypeConflict ---
 
 func TestLiveTypeConflict_LocalFolder(t *testing.T) {
@@ -327,6 +392,25 @@ func TestLiveTypeConflict_LocalFolder(t *testing.T) {
 
 	// A conflict copy directory should exist.
 	// conflictCopyPath for a folder with no extension appends a timestamp suffix.
+}
+
+func TestLiveTypeConflict_LocalFolder_RenameError(t *testing.T) {
+	s, vault, _, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	// Folder doesn't exist -> Rename fails, but should continue to download.
+	serverContent := []byte("server file content")
+	encServer := encryptContent(t, cipher, serverContent)
+
+	local := &state.LocalFile{Path: "no-such-folder", Folder: true}
+	push := PushMessage{UID: 55, MTime: 1000}
+
+	err := s.liveTypeConflict(ctx, "no-such-folder", push, local, fakePull(encServer))
+	require.NoError(t, err)
+
+	// Server content should be written despite rename failing.
+	data, _ := vault.ReadFile("no-such-folder")
+	assert.Equal(t, serverContent, data)
 }
 
 func TestLiveTypeConflict_LocalFile(t *testing.T) {
@@ -556,6 +640,124 @@ func TestHandlePushWhileBusy_UpdatesVersion(t *testing.T) {
 
 	assert.Equal(t, int64(200), s.version)
 	assert.True(t, s.versionDirty)
+}
+
+func TestHandlePushWhileBusy_DeleteLocalFile(t *testing.T) {
+	s, vault, appState, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	// Create a file and persist local+server state so Reconcile step 4 picks
+	// DeleteLocal: local hash matches prev server hash, push is deleted.
+	content := []byte("content")
+	require.NoError(t, vault.WriteFile("busy-del.md", content, time.Time{}))
+	contentHash := sha256Hex(content)
+	encHash := encryptPath(t, cipher, contentHash)
+
+	info, _ := vault.Stat("busy-del.md")
+	require.NoError(t, appState.SetLocalFile(testSyncVaultID, state.LocalFile{
+		Path:  "busy-del.md",
+		Hash:  contentHash,
+		Size:  info.Size(),
+		MTime: info.ModTime().UnixMilli(),
+	}))
+	require.NoError(t, appState.SetServerFile(testSyncVaultID, state.ServerFile{
+		Path: "busy-del.md",
+		Hash: encHash,
+	}))
+
+	encPath := encryptPath(t, cipher, "busy-del.md")
+	push := PushMessage{
+		Op:      "push",
+		UID:     700,
+		Path:    encPath,
+		Deleted: true,
+	}
+	data, _ := json.Marshal(push)
+	s.handlePushWhileBusy(ctx, data)
+
+	// File should be deleted.
+	_, err := vault.ReadFile("busy-del.md")
+	assert.Error(t, err)
+
+	// Local state should be cleaned up.
+	lf, _ := appState.GetLocalFile(testSyncVaultID, "busy-del.md")
+	assert.Nil(t, lf)
+}
+
+func TestHandlePushWhileBusy_DeleteLocalFolder_Empty(t *testing.T) {
+	s, vault, _, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.MkdirAll("busy-folder"))
+
+	encPath := encryptPath(t, cipher, "busy-folder")
+	push := PushMessage{
+		Op:      "push",
+		UID:     710,
+		Path:    encPath,
+		Folder:  true,
+		Deleted: true,
+	}
+	data, _ := json.Marshal(push)
+	s.handlePushWhileBusy(ctx, data)
+
+	// Empty folder should be deleted.
+	_, err := vault.Stat("busy-folder")
+	assert.Error(t, err)
+}
+
+func TestHandlePushWhileBusy_DeleteLocalFolder_NonEmpty(t *testing.T) {
+	s, vault, appState, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("busy-ne/child.md", []byte("x"), time.Time{}))
+
+	encPath := encryptPath(t, cipher, "busy-ne")
+	push := PushMessage{
+		Op:      "push",
+		UID:     720,
+		Path:    encPath,
+		Folder:  true,
+		Deleted: true,
+	}
+	data, _ := json.Marshal(push)
+	s.handlePushWhileBusy(ctx, data)
+
+	// Non-empty folder should still exist.
+	info, err := vault.Stat("busy-ne")
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+
+	// Server state should be persisted as deleted (entry removed).
+	sf, _ := appState.GetServerFile(testSyncVaultID, "busy-ne")
+	assert.Nil(t, sf)
+}
+
+func TestHandlePushWhileBusy_KeepLocal(t *testing.T) {
+	s, vault, appState, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	// Local file exists, server push is deleted. Reconcile should pick KeepLocal.
+	require.NoError(t, vault.WriteFile("busy-keep.md", []byte("keep me"), time.Time{}))
+
+	encPath := encryptPath(t, cipher, "busy-keep.md")
+	push := PushMessage{
+		Op:      "push",
+		UID:     730,
+		Path:    encPath,
+		Deleted: true,
+	}
+	data, _ := json.Marshal(push)
+	s.handlePushWhileBusy(ctx, data)
+
+	// File should still exist.
+	content, err := vault.ReadFile("busy-keep.md")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("keep me"), content)
+
+	// Server state persisted as deleted (entry removed).
+	sf, _ := appState.GetServerFile(testSyncVaultID, "busy-keep.md")
+	assert.Nil(t, sf)
 }
 
 func TestHandlePushWhileBusy_BadJSON(t *testing.T) {

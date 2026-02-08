@@ -157,6 +157,31 @@ func TestHandleWrite_FileDeletedBeforeStat(t *testing.T) {
 	w.handleWrite(context.Background(), absPath)
 }
 
+func TestHandleWrite_FolderPushError_Requeues(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mock := NewMockSyncPusher(ctrl)
+	v := tempVault(t)
+	w := newTestWatcher(t, v, mock)
+
+	require.NoError(t, v.MkdirAll("err-dir"))
+	absPath := filepath.Join(v.Dir(), "err-dir")
+
+	gomock.InOrder(
+		mock.EXPECT().Connected().Return(true),
+		mock.EXPECT().Push(
+			gomock.Any(), "err-dir", []byte(nil),
+			int64(0), int64(0),
+			true, false,
+		).Return(fmt.Errorf("connection lost")),
+		mock.EXPECT().Connected().Return(false),
+	)
+
+	w.handleWrite(context.Background(), absPath)
+
+	_, ok := w.queued[absPath]
+	assert.True(t, ok, "folder should be re-queued after disconnect")
+}
+
 func TestHandleWrite_PushFailureRequeuesIfDisconnected(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mock := NewMockSyncPusher(ctrl)

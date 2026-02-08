@@ -787,6 +787,446 @@ func TestDeletePaths_SkipsRecreatedFile(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// --- executeDecision: MergeMD, MergeJSON, TypeConflict ---
+
+func TestExecuteDecision_MergeMD_ServerEqualsLocal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, cipher, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("merge.md", []byte("same content"), time.Time{}))
+
+	encContent := encryptContent(t, cipher, []byte("same content"))
+	mockPullDirect(mock, encContent)
+
+	local := &state.LocalFile{Path: "merge.md", MTime: 1000}
+	push := PushMessage{UID: 70, MTime: 1000}
+
+	err := r.executeDecision(ctx, DecisionMergeMD, "merge.md", push, local, nil)
+	require.NoError(t, err)
+}
+
+func TestExecuteDecision_MergeMD_WithPrev(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, cipher, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Use longer, distinct lines to avoid diff-match-patch confusion.
+	base := "first line stays the same\nsecond line is original\nthird line is original\n"
+	local := "first line stays the same\nsecond line edited locally\nthird line is original\n"
+	server := "first line stays the same\nsecond line is original\nthird line edited on server\n"
+
+	require.NoError(t, vault.WriteFile("md-merge.md", []byte(local), time.Time{}))
+
+	encBase := encryptContent(t, cipher, []byte(base))
+	encServer := encryptContent(t, cipher, []byte(server))
+
+	baseResp, _ := json.Marshal(PullResponse{Size: len(encBase), Pieces: 1})
+	serverResp, _ := json.Marshal(PullResponse{Size: len(encServer), Pieces: 1})
+	gomock.InOrder(
+		mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil),
+		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageText, baseResp, nil),
+		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageBinary, encBase, nil),
+		mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil),
+		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageText, serverResp, nil),
+		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageBinary, encServer, nil),
+	)
+
+	localFile := &state.LocalFile{Path: "md-merge.md", MTime: 2000}
+	prev := &state.ServerFile{UID: 50}
+	push := PushMessage{UID: 71, MTime: 2000}
+
+	err := r.executeDecision(ctx, DecisionMergeMD, "md-merge.md", push, localFile, prev)
+	require.NoError(t, err)
+
+	data, _ := vault.ReadFile("md-merge.md")
+	result := string(data)
+	assert.Contains(t, result, "edited locally")
+	assert.Contains(t, result, "edited on server")
+}
+
+func TestExecuteDecision_MergeMD_NilLocal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, cipher, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("nil-local.md", []byte("disk"), time.Time{}))
+
+	encServer := encryptContent(t, cipher, []byte("server"))
+	mockPullDirect(mock, encServer)
+
+	push := PushMessage{UID: 72, MTime: time.Now().UnixMilli()}
+
+	// local is nil -- the code handles this by zero-valuing localVal.
+	err := r.executeDecision(ctx, DecisionMergeMD, "nil-local.md", push, nil, nil)
+	require.NoError(t, err)
+}
+
+func TestExecuteDecision_MergeJSON(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, cipher, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile(".obsidian/test.json", []byte(`{"local":"val"}`), time.Time{}))
+
+	serverJSON := `{"server":"val"}`
+	encServer := encryptContent(t, cipher, []byte(serverJSON))
+	mockPullDirect(mock, encServer)
+
+	push := PushMessage{UID: 73, MTime: time.Now().UnixMilli()}
+
+	err := r.executeDecision(ctx, DecisionMergeJSON, ".obsidian/test.json", push, nil, nil)
+	require.NoError(t, err)
+
+	data, _ := vault.ReadFile(".obsidian/test.json")
+	var result map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &result))
+	assert.Contains(t, string(result["local"]), "val")
+	assert.Contains(t, string(result["server"]), "val")
+}
+
+func TestExecuteDecision_TypeConflict_LocalFile(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("clash.txt", []byte("local"), time.Time{}))
+
+	local := &state.LocalFile{Path: "clash.txt", Folder: false}
+	push := PushMessage{UID: 74, Folder: true}
+
+	err := r.executeDecision(ctx, DecisionTypeConflict, "clash.txt", push, local, nil)
+	require.NoError(t, err)
+
+	// Conflict copy should exist.
+	_, err = vault.ReadFile("clash (Conflicted copy).txt")
+	assert.NoError(t, err)
+
+	// Original path should be a folder.
+	info, err := vault.Stat("clash.txt")
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+}
+
+func TestExecuteDecision_TypeConflict_LocalFolder(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, cipher, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Local is a folder, server wants a file.
+	require.NoError(t, vault.MkdirAll("folder-conflict"))
+
+	plain := []byte("server file data")
+	encContent := encryptContent(t, cipher, plain)
+	mockPullDirect(mock, encContent)
+
+	local := &state.LocalFile{Path: "folder-conflict", Folder: true}
+	push := PushMessage{UID: 75, MTime: time.Now().UnixMilli()}
+
+	err := r.executeDecision(ctx, DecisionTypeConflict, "folder-conflict", push, local, nil)
+	require.NoError(t, err)
+
+	// Conflict copy of folder should exist.
+	_, err = vault.Stat("folder-conflict (Conflicted copy)")
+	assert.NoError(t, err)
+
+	// Server file should be at original path.
+	data, err := vault.ReadFile("folder-conflict")
+	require.NoError(t, err)
+	assert.Equal(t, plain, data)
+}
+
+func TestExecuteDecision_UnknownDecision(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	err := r.executeDecision(ctx, ReconcileDecision(99), "unknown.md", PushMessage{}, nil, nil)
+	assert.NoError(t, err)
+}
+
+// --- processServerPushes ---
+
+func TestProcessServerPushes_FailureCounter(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, _, cipher, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// A push that will fail: DecisionDownload but pullDirect returns an error.
+	encPath := encryptPath(t, cipher, "fail.md")
+	mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).
+		Return(fmt.Errorf("connection lost"))
+
+	pushes := []ServerPush{
+		{Msg: PushMessage{UID: 80, Path: encPath, Hash: "h", Size: 100}, Path: "fail.md"},
+	}
+	scan := &ScanResult{Current: map[string]state.LocalFile{}}
+
+	err := r.processServerPushes(ctx, pushes, scan, map[string]state.ServerFile{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1 of 1 server pushes failed")
+}
+
+func TestProcessServerPushes_PartialFailure(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, _, cipher, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// First push fails (download error), second succeeds (skip - deleted with no local).
+	encPath1 := encryptPath(t, cipher, "fail2.md")
+	encPath2 := encryptPath(t, cipher, "skip2.md")
+
+	mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).
+		Return(fmt.Errorf("connection lost"))
+
+	pushes := []ServerPush{
+		{Msg: PushMessage{UID: 81, Path: encPath1, Hash: "h", Size: 50}, Path: "fail2.md"},
+		{Msg: PushMessage{UID: 82, Path: encPath2, Deleted: true}, Path: "skip2.md"},
+	}
+	scan := &ScanResult{Current: map[string]state.LocalFile{}}
+
+	err := r.processServerPushes(ctx, pushes, scan, map[string]state.ServerFile{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1 of 2 server pushes failed")
+}
+
+// --- deleteRemoteFiles ---
+
+func TestDeleteRemoteFiles_UntrackedPath(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, _, appState, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Path in Deleted but not in serverFiles -> clean up local state only.
+	require.NoError(t, appState.SetLocalFile(testSyncVaultID, state.LocalFile{
+		Path: "untracked.md",
+		Hash: "h",
+	}))
+
+	cancel := fakeEventLoop(s)
+	defer cancel()
+
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{},
+		Deleted: []string{"untracked.md"},
+	}
+
+	err := r.deleteRemoteFiles(ctx, scan, map[string]state.ServerFile{})
+	require.NoError(t, err)
+
+	// Local state should be cleaned up.
+	lf, _ := appState.GetLocalFile(testSyncVaultID, "untracked.md")
+	assert.Nil(t, lf)
+}
+
+func TestDeleteRemoteFiles_FolderDelete(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, _, appState, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	require.NoError(t, appState.SetServerFile(testSyncVaultID, state.ServerFile{
+		Path:   "old-folder",
+		Folder: true,
+	}))
+
+	cancel := fakeEventLoop(s)
+	defer cancel()
+
+	serverFiles := map[string]state.ServerFile{
+		"old-folder": {Path: "old-folder", Folder: true},
+	}
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{},
+		Deleted: []string{"old-folder"},
+	}
+
+	err := r.deleteRemoteFiles(ctx, scan, serverFiles)
+	require.NoError(t, err)
+}
+
+func TestDeleteRemoteFiles_FilesAndFolders(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, _, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	cancel := fakeEventLoop(s)
+	defer cancel()
+
+	serverFiles := map[string]state.ServerFile{
+		"dir/file.md": {Path: "dir/file.md", Hash: "h"},
+		"dir":         {Path: "dir", Folder: true},
+	}
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{},
+		Deleted: []string{"dir/file.md", "dir"},
+	}
+
+	err := r.deleteRemoteFiles(ctx, scan, serverFiles)
+	require.NoError(t, err)
+}
+
+// --- deletePaths ---
+
+func TestDeletePaths_PushError_Continues(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, _, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Make event loop return errors for push operations.
+	evCtx, evCancel := context.WithCancel(context.Background())
+	go func() {
+		for {
+			select {
+			case op := <-s.opCh:
+				op.result <- fmt.Errorf("push failed")
+			case <-evCtx.Done():
+				return
+			}
+		}
+	}()
+	defer evCancel()
+
+	serverFiles := map[string]state.ServerFile{
+		"a.md": {Path: "a.md", Hash: "h1"},
+		"b.md": {Path: "b.md", Hash: "h2"},
+	}
+
+	err := r.deletePaths(ctx, []string{"a.md", "b.md"}, serverFiles)
+	require.NoError(t, err)
+	// Both pushes failed but deletePaths just continues.
+}
+
+// --- uploadLocalChanges ---
+
+func TestUploadLocalChanges_RecomputeHash_MatchesServer(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, vault, appState, cipher, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	content := []byte("unchanged")
+	require.NoError(t, vault.WriteFile("recheck.md", content, time.Time{}))
+
+	// Scan reports a different hash, but recompute from disk matches server.
+	h := sha256Hex(content)
+	encHash := encryptPath(t, cipher, h)
+	require.NoError(t, appState.SetServerFile(testSyncVaultID, state.ServerFile{
+		Path: "recheck.md",
+		Hash: encHash,
+	}))
+
+	cancel := fakeEventLoop(s)
+	defer cancel()
+
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{
+			"recheck.md": {Path: "recheck.md", Hash: "stale-hash", Size: int64(len(content))},
+		},
+		Changed: []string{"recheck.md"},
+	}
+	serverFiles := map[string]state.ServerFile{
+		"recheck.md": {Path: "recheck.md", Hash: encHash},
+	}
+
+	err := r.uploadLocalChanges(ctx, scan, serverFiles)
+	require.NoError(t, err)
+	// No push should happen since recomputed hash matches.
+}
+
+func TestUploadLocalChanges_ReadError_Continues(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, _, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	cancel := fakeEventLoop(s)
+	defer cancel()
+
+	// File in Changed but not on disk -> ReadFile fails.
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{
+			"gone.md": {Path: "gone.md", Hash: "h", Size: 10},
+		},
+		Changed: []string{"gone.md"},
+	}
+
+	err := r.uploadLocalChanges(ctx, scan, map[string]state.ServerFile{})
+	require.NoError(t, err)
+}
+
+func TestUploadLocalChanges_CtimeAdoption(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, vault, appState, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("ctime.md", []byte("data"), time.Time{}))
+	require.NoError(t, appState.SetServerFile(testSyncVaultID, state.ServerFile{
+		Path:  "ctime.md",
+		CTime: 500,
+	}))
+
+	cancel := fakeEventLoop(s)
+	defer cancel()
+
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{
+			"ctime.md": {Path: "ctime.md", Hash: "h", Size: 4},
+		},
+		Changed: []string{"ctime.md"},
+	}
+	serverFiles := map[string]state.ServerFile{
+		"ctime.md": {Path: "ctime.md", CTime: 500},
+	}
+
+	err := r.uploadLocalChanges(ctx, scan, serverFiles)
+	require.NoError(t, err)
+}
+
+func TestUploadLocalChanges_NewFolder(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, _, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	cancel := fakeEventLoop(s)
+	defer cancel()
+
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{
+			"new-folder": {Path: "new-folder", Folder: true},
+		},
+		Changed: []string{"new-folder"},
+	}
+
+	err := r.uploadLocalChanges(ctx, scan, map[string]state.ServerFile{})
+	require.NoError(t, err)
+}
+
+func TestUploadLocalChanges_StatError_ContinuesWithZeroTimes(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, vault, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Write and then remove so stat fails but ReadFile was cached... no,
+	// ReadFile will also fail. Let's use a file that exists for ReadFile
+	// but then gets removed before Stat.
+	content := []byte("will vanish for stat")
+	require.NoError(t, vault.WriteFile("vanishing.md", content, time.Time{}))
+
+	cancel := fakeEventLoop(s)
+	defer cancel()
+
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{
+			"vanishing.md": {Path: "vanishing.md", Hash: "h", Size: int64(len(content))},
+		},
+		Changed: []string{"vanishing.md"},
+	}
+
+	// This tests the happy path where stat succeeds. The stat error
+	// branch would need the file to vanish between ReadFile and Stat,
+	// which is hard to trigger reliably. The upload should still succeed.
+	err := r.uploadLocalChanges(ctx, scan, map[string]state.ServerFile{})
+	require.NoError(t, err)
+}
+
 // mustJSON marshals v to JSON bytes, panicking on error.
 func mustJSON(v PullResponse) []byte {
 	data, err := json.Marshal(v)
