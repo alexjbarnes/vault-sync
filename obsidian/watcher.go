@@ -195,9 +195,14 @@ func (w *Watcher) handleDelete(ctx context.Context, absPath string) {
 		return
 	}
 
-	isFolder := w.client.IsServerFolder(relPath)
+	// Only push the delete if the server knows about this path.
+	// Local-only files that were never synced have no server entry.
+	sf := w.client.ServerFileState(relPath)
+	if sf == nil {
+		return
+	}
 
-	if err := w.client.Push(ctx, relPath, nil, 0, 0, isFolder, true); err != nil {
+	if err := w.client.Push(ctx, relPath, nil, 0, 0, sf.Folder, true); err != nil {
 		w.logger.Warn("push delete failed",
 			slog.String("path", relPath),
 			slog.String("error", err.Error()),

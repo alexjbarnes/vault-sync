@@ -1109,18 +1109,20 @@ func (s *SyncClient) deleteLocalState(path string) {
 	}
 }
 
-// IsServerFolder checks whether the given path is recorded as a folder
-// in the server file state. Returns false if the path is not found.
-func (s *SyncClient) IsServerFolder(path string) bool {
+// ServerFileState returns the persisted server file entry for a path,
+// or nil if the server has no record of it. Used by the watcher to
+// check whether a deleted path needs a server push and whether it
+// was a folder.
+func (s *SyncClient) ServerFileState(path string) *state.ServerFile {
 	sf, err := s.state.GetServerFile(s.vaultID, path)
 	if err != nil {
 		s.logger.Warn("failed to look up server file state",
 			slog.String("path", path),
 			slog.String("error", err.Error()),
 		)
-		return false
+		return nil
 	}
-	return sf != nil && sf.Folder
+	return sf
 }
 
 // Pull sends a pull request and reads the response + binary frames
