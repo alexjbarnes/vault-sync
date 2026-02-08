@@ -111,6 +111,7 @@ func run() error {
 				Initial: false,
 			}); err != nil {
 				logger.Warn("failed to save state", slog.String("error", err.Error()))
+				return
 			}
 			logger.Info("state saved", slog.Int64("version", version))
 		},

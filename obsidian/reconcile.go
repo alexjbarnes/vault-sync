@@ -292,7 +292,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 		r.logger.Warn("reconcile: no base for merge, saving conflict copy", slog.String("path", path))
 		conflictExt := filepath.Ext(path)
 		conflictBase := strings.TrimSuffix(path, conflictExt)
-		conflictPath := r.uniqueConflictPath(conflictBase, conflictExt)
+		conflictPath := conflictCopyPath(conflictBase, conflictExt)
 		if err := r.vault.WriteFile(conflictPath, localContent); err != nil {
 			r.logger.Warn("reconcile: failed to write conflict copy",
 				slog.String("path", conflictPath),
@@ -329,7 +329,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 		)
 		conflictExt := filepath.Ext(path)
 		conflictBase := strings.TrimSuffix(path, conflictExt)
-		conflictPath := r.uniqueConflictPath(conflictBase, conflictExt)
+		conflictPath := conflictCopyPath(conflictBase, conflictExt)
 		if err := r.vault.WriteFile(conflictPath, localContent); err != nil {
 			r.logger.Warn("reconcile: failed to write merge conflict copy",
 				slog.String("path", conflictPath),
@@ -418,7 +418,7 @@ func (r *Reconciler) handleTypeConflict(ctx context.Context, path string, push P
 	// cannot be written, abort to avoid data loss.
 	ext := filepath.Ext(path)
 	base := strings.TrimSuffix(path, ext)
-	conflictPath := r.uniqueConflictPath(base, ext)
+	conflictPath := conflictCopyPath(base, ext)
 
 	r.logger.Info("reconcile: type conflict, renaming local",
 		slog.String("from", path),
@@ -442,20 +442,11 @@ func (r *Reconciler) handleTypeConflict(ctx context.Context, path string, push P
 	return r.downloadServerFile(ctx, path, push)
 }
 
-// uniqueConflictPath returns a conflict copy path that does not already
-// exist on disk. Appends " (1)", " (2)", etc. if needed.
-func (r *Reconciler) uniqueConflictPath(base, ext string) string {
-	candidate := base + " (Conflicted copy)" + ext
-	if _, err := r.vault.Stat(candidate); err != nil {
-		return candidate
-	}
-	for i := 1; i < 100; i++ {
-		candidate = fmt.Sprintf("%s (Conflicted copy %d)%s", base, i, ext)
-		if _, err := r.vault.Stat(candidate); err != nil {
-			return candidate
-		}
-	}
-	return candidate
+// conflictCopyPath returns the conflict copy path for a file. Matches
+// the Obsidian app behavior: single fixed name, no deduplication. If a
+// conflict copy already exists at this path it gets overwritten.
+func conflictCopyPath(base, ext string) string {
+	return base + " (Conflicted copy)" + ext
 }
 
 // downloadServerFile pulls content from the server, decrypts it, and

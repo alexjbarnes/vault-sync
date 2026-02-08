@@ -122,4 +122,5 @@ type ClientPushMessage struct {
 type GenericMessage struct {
 	Op  string `json:"op"`
 	Res string `json:"res"`
+	Err string `json:"err"`
 }

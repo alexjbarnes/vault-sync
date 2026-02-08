@@ -641,6 +641,13 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 		return fmt.Errorf("decoding push response: %w", err)
 	}
 
+	// Server error -- abort before sending any binary data.
+	// The Obsidian app's request() checks resp.err and throws on non-empty.
+	if resp.Err != "" {
+		s.removeHashCache(op.path)
+		return fmt.Errorf("server rejected push for %s: %s", op.path, resp.Err)
+	}
+
 	// "ok" means file is unchanged on server, skip upload.
 	if resp.Res == "ok" || resp.Op == "ok" {
 		s.logger.Debug("push skipped, unchanged", slog.String("path", op.path))
@@ -1175,8 +1182,8 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 		return nil, fmt.Errorf("pull response size %d exceeds limit %d", resp.Size, maxSize)
 	}
 	maxPieces := resp.Size/chunkSize + 1
-	if resp.Pieces > maxPieces {
-		return nil, fmt.Errorf("pull response pieces %d exceeds expected max %d for size %d", resp.Pieces, maxPieces, resp.Size)
+	if resp.Pieces < 0 || resp.Pieces > maxPieces {
+		return nil, fmt.Errorf("pull response pieces %d out of range [0, %d] for size %d", resp.Pieces, maxPieces, resp.Size)
 	}
 
 	// Read binary frames containing the encrypted content.
@@ -1488,8 +1495,8 @@ func (s *SyncClient) pullDirect(ctx context.Context, uid int64) ([]byte, error) 
 		return nil, fmt.Errorf("pull response size %d exceeds limit %d", resp.Size, maxSize)
 	}
 	maxPieces := resp.Size/chunkSize + 1
-	if resp.Pieces > maxPieces {
-		return nil, fmt.Errorf("pull response pieces %d exceeds expected max %d for size %d", resp.Pieces, maxPieces, resp.Size)
+	if resp.Pieces < 0 || resp.Pieces > maxPieces {
+		return nil, fmt.Errorf("pull response pieces %d out of range [0, %d] for size %d", resp.Pieces, maxPieces, resp.Size)
 	}
 
 	content := make([]byte, 0, resp.Size)

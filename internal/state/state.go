@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -73,7 +74,7 @@ func Load() (*State, error) {
 		return nil, fmt.Errorf("creating state directory: %w", err)
 	}
 
-	db, err := bolt.Open(p, 0600, nil)
+	db, err := bolt.Open(p, 0600, &bolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("opening state db: %w", err)
 	}
