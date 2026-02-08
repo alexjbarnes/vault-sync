@@ -1324,6 +1324,31 @@ func (s *SyncClient) reconnect(ctx context.Context) error {
 		}
 	}
 
+	// Drain any pending pulls queued by handlePushWhileBusy during the
+	// processPushDirect calls above. Each pull may trigger more
+	// interleaved pushes, so loop until the queue is empty. The reader
+	// goroutine has not started, so processPushDirect reads directly
+	// from the connection.
+	for {
+		s.pendingPullsMu.Lock()
+		pulls := s.pendingPulls
+		s.pendingPulls = nil
+		s.pendingPullsMu.Unlock()
+
+		if len(pulls) == 0 {
+			break
+		}
+
+		for _, pp := range pulls {
+			if err := s.processPushDirect(ctx, pp.push); err != nil {
+				s.logger.Warn("processing deferred reconnect push",
+					slog.String("path", pp.path),
+					slog.String("error", err.Error()),
+				)
+			}
+		}
+	}
+
 	return nil
 }
 
