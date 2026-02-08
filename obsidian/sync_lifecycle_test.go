@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -349,6 +350,79 @@ func TestEventLoop_PongHandled(t *testing.T) {
 
 	err := s.eventLoop(ctx, connCtx)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+// --- eventLoop: heartbeat (synctest) ---
+
+func TestEventLoop_SendsPingAfterIdle(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		s, mock := withMockConn(t, ctrl)
+		ctx, cancel := context.WithCancel(t.Context())
+
+		// Set lastMessage to "now" in the fake clock (midnight 2000-01-01).
+		// After the ticker fires at +20s, elapsed (20s) > pingAfter (10s)
+		// but < disconnectAfter (120s), so a ping is sent.
+		s.lastMsgMu.Lock()
+		s.lastMessage = time.Now()
+		s.lastMsgMu.Unlock()
+
+		pingData, _ := json.Marshal(map[string]string{"op": "ping"})
+		mock.EXPECT().Write(gomock.Any(), websocket.MessageText, pingData).
+			DoAndReturn(func(ctx context.Context, typ websocket.MessageType, data []byte) error {
+				// Ping sent successfully. Cancel to exit the loop.
+				cancel()
+				return nil
+			})
+
+		connCtx, connCancel := context.WithCancel(ctx)
+		t.Cleanup(func() { connCancel() })
+
+		err := s.eventLoop(ctx, connCtx)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+}
+
+func TestEventLoop_HeartbeatTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		s, mock := withMockConn(t, ctrl)
+		ctx := t.Context()
+
+		// lastMessage is zero-valued, so elapsed will be enormous on the
+		// first ticker fire, triggering the disconnect path.
+		mock.EXPECT().Close(websocket.StatusGoingAway, "timeout").Return(nil)
+
+		connCtx, connCancel := context.WithCancel(ctx)
+		t.Cleanup(func() { connCancel() })
+
+		err := s.eventLoop(ctx, connCtx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "heartbeat timeout")
+	})
+}
+
+func TestEventLoop_PingWriteError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		s, mock := withMockConn(t, ctrl)
+		ctx := t.Context()
+
+		// Set lastMessage so elapsed is > pingAfter but < disconnectAfter.
+		s.lastMsgMu.Lock()
+		s.lastMessage = time.Now()
+		s.lastMsgMu.Unlock()
+
+		mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).
+			Return(fmt.Errorf("broken pipe"))
+
+		connCtx, connCancel := context.WithCancel(ctx)
+		t.Cleanup(func() { connCancel() })
+
+		err := s.eventLoop(ctx, connCtx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "sending ping")
+	})
 }
 
 // --- Listen ---
