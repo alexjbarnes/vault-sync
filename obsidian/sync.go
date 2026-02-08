@@ -52,6 +52,15 @@ type syncOp struct {
 	result    chan error
 }
 
+// wsConn abstracts the WebSocket connection so SyncClient can be tested
+// without a real server. *websocket.Conn satisfies this interface.
+type wsConn interface {
+	Read(ctx context.Context) (websocket.MessageType, []byte, error)
+	Write(ctx context.Context, typ websocket.MessageType, p []byte) error
+	Close(code websocket.StatusCode, reason string) error
+	SetReadLimit(n int64)
+}
+
 // SyncClient manages a WebSocket connection to an Obsidian Sync server.
 //
 // Architecture: a reader goroutine feeds inboundCh with raw WebSocket
@@ -60,7 +69,7 @@ type syncOp struct {
 // to the connection happen from the event loop, eliminating the need
 // for a write mutex and preventing deadlocks between push and pull.
 type SyncClient struct {
-	conn   *websocket.Conn
+	conn   wsConn
 	logger *slog.Logger
 
 	host              string
