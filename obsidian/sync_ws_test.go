@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"testing"
+	"testing/synctest"
 
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
@@ -940,4 +941,62 @@ func TestHandleInbound_PushWithBadJSONReturnsNil(t *testing.T) {
 	// fails. Should log a warning but not return an error.
 	err := sc.handleInbound(context.Background(), []byte(`{"op":"push","uid":"bad"}`))
 	assert.NoError(t, err)
+}
+
+// --- readResponse: timeout (synctest) ---
+
+func TestReadResponse_Timeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sc := newTestSyncClient(t, nil)
+		sc.inboundCh = make(chan inboundMsg) // unbuffered, will block
+
+		_, err := sc.readResponse(t.Context())
+		assert.ErrorIs(t, err, errResponseTimeout)
+	})
+}
+
+// --- WaitForReady: onReady callback ---
+
+func TestWaitForReady_CallsOnReady(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mock := NewMockWSConn(ctrl)
+	sc := newTestSyncClient(t, mock)
+	sc.version = 0
+
+	var calledWith int64
+	sc.onReady = func(v int64) { calledWith = v }
+
+	ready := `{"op":"ready","version":42}`
+	mock.EXPECT().Read(gomock.Any()).
+		Return(websocket.MessageText, []byte(ready), nil)
+
+	var pushes []ServerPush
+	err := sc.WaitForReady(context.Background(), &pushes)
+	require.NoError(t, err)
+	assert.Equal(t, int64(42), calledWith)
+}
+
+// --- WaitForReady: decrypt error on push is logged and skipped ---
+
+func TestWaitForReady_DecryptPushError_Skipped(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mock := NewMockWSConn(ctrl)
+	// Use newTestSyncClient which has no cipher, so decryptPush will fail.
+	sc := newTestSyncClient(t, mock)
+
+	// Send a push with valid JSON but undecryptable path, then ready.
+	push := `{"op":"push","uid":10,"path":"validhexbutbadcipher"}`
+	ready := `{"op":"ready","version":10}`
+	gomock.InOrder(
+		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageText, []byte(push), nil),
+		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageText, []byte(ready), nil),
+	)
+
+	var pushes []ServerPush
+	err := sc.WaitForReady(context.Background(), &pushes)
+	require.NoError(t, err)
+	// Push should be skipped (decryption fails), not appended.
+	assert.Empty(t, pushes)
+	// Version should still be updated from the push.
+	assert.Equal(t, int64(10), sc.version)
 }

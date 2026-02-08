@@ -398,6 +398,76 @@ func TestExecutePush_DeleteReadResponseError(t *testing.T) {
 	assert.True(t, inBackoff)
 }
 
+// --- executePush: multi-piece upload ---
+
+func TestExecutePush_MultiPieceUpload(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	s, mock := withMockConn(t, ctrl)
+	ctx := context.Background()
+
+	// Create content larger than chunkSize (2MB) to force multi-piece.
+	// Use 2*chunkSize + 100 so we get 3 pieces.
+	bigContent := make([]byte, 2*chunkSize+100)
+	for i := range bigContent {
+		bigContent[i] = byte(i % 256)
+	}
+
+	var writeCount int
+	mock.EXPECT().Write(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, typ websocket.MessageType, data []byte) error {
+			writeCount++
+			return nil
+		}).Times(4) // 1 metadata + 3 binary chunks
+
+	// Feed responses: 1 for metadata "ready" + 3 chunk acks.
+	feedResponses(s,
+		`{"res":"next"}`,
+		`{"res":"next"}`,
+		`{"res":"next"}`,
+		`{"res":"next"}`,
+	)
+
+	op := syncOp{
+		path:    "big-file.bin",
+		content: bigContent,
+		mtime:   1000,
+		ctime:   500,
+	}
+	err := s.executePush(ctx, op)
+	require.NoError(t, err)
+
+	// 4 writes: 1 JSON metadata + 3 binary chunks.
+	assert.Equal(t, 4, writeCount)
+}
+
+// --- executePush: empty content file ---
+
+func TestExecutePush_EmptyContentFile(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	s, mock := withMockConn(t, ctrl)
+	ctx := context.Background()
+
+	// Empty content: pieces=0, so no binary chunks are sent.
+	mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).
+		DoAndReturn(func(ctx context.Context, typ websocket.MessageType, data []byte) error {
+			var msg ClientPushMessage
+			require.NoError(t, json.Unmarshal(data, &msg))
+			assert.Equal(t, 0, msg.Size)
+			assert.Equal(t, 0, msg.Pieces)
+			return nil
+		})
+
+	// Server returns "ok" (file unchanged).
+	feedResponse(s, `{"res":"ok"}`)
+
+	op := syncOp{
+		path:    "empty.md",
+		content: []byte{},
+	}
+	err := s.executePush(ctx, op)
+	require.NoError(t, err)
+}
+
 // --- executePush: extension extraction ---
 
 func TestExecutePush_ExtensionExtracted(t *testing.T) {

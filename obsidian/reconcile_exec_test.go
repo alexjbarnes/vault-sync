@@ -1227,6 +1227,231 @@ func TestUploadLocalChanges_StatError_ContinuesWithZeroTimes(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// --- Phase1: AllServerFiles error ---
+
+func TestPhase1_AllServerFilesError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, appState, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Close the DB to force AllServerFiles to fail.
+	appState.Close()
+
+	err := r.Phase1(ctx, nil, &ScanResult{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "loading server files")
+}
+
+// --- Phase2And3: AllServerFiles error ---
+
+func TestPhase2And3_AllServerFilesError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, appState, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Close the DB to force AllServerFiles to fail.
+	appState.Close()
+
+	err := r.Phase2And3(ctx, &ScanResult{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "loading server files")
+}
+
+// --- threeWayMerge: decrypt base error, server wins ---
+
+func TestThreeWayMerge_DecryptBaseError_ServerWins(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, cipher, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	localContent := []byte("local text")
+	require.NoError(t, vault.WriteFile("merge.md", localContent, time.Time{}))
+
+	serverText := "server text"
+	encServer := encryptContent(t, cipher, []byte(serverText))
+
+	// First pullDirect (for base): return garbage that won't decrypt.
+	badContent := []byte{0x01, 0x02, 0x03}
+	mockPullDirect(mock, badContent)
+	// After decrypt failure, falls back to downloadServerFile which calls
+	// pullDirect again for the server version.
+	mockPullDirect(mock, encServer)
+
+	push := PushMessage{UID: 100, Hash: "serverhash", MTime: 5000}
+	local := state.LocalFile{Path: "merge.md", MTime: 1000, Hash: "localhash"}
+	prev := state.ServerFile{Path: "merge.md", UID: 50}
+
+	err := r.threeWayMerge(ctx, "merge.md", push, local, prev, true)
+	require.NoError(t, err)
+
+	// Server content should have been written (fallback to download).
+	got, err := vault.ReadFile("merge.md")
+	require.NoError(t, err)
+	assert.Equal(t, serverText, string(got))
+}
+
+// --- threeWayMerge: server returns empty string ---
+
+func TestThreeWayMerge_EmptyServerContent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, cipher, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	localContent := []byte("local text")
+	require.NoError(t, vault.WriteFile("merge2.md", localContent, time.Time{}))
+
+	// hasPrev=true with UID > 0 so base pull happens. Base returns
+	// some real content so baseText != "".
+	encBase := encryptContent(t, cipher, []byte("base text"))
+	mockPullDirect(mock, encBase)
+	// Server pull returns empty content (zero bytes encrypted).
+	// DecryptContent of encrypted empty bytes yields []byte{},
+	// so serverText = "".
+	encEmpty := encryptContent(t, cipher, []byte{})
+	mockPullDirect(mock, encEmpty)
+
+	push := PushMessage{UID: 101, Hash: "h", MTime: 5000}
+	local := state.LocalFile{Path: "merge2.md", MTime: 1000, Hash: "lh"}
+	prev := state.ServerFile{Path: "merge2.md", UID: 90}
+
+	err := r.threeWayMerge(ctx, "merge2.md", push, local, prev, true)
+	require.NoError(t, err)
+
+	// Empty server text should trigger the "empty server" shortcut:
+	// keep local, persist server push.
+	got, err := vault.ReadFile("merge2.md")
+	require.NoError(t, err)
+	assert.Equal(t, "local text", string(got))
+}
+
+// --- threeWayMerge: base == server, skip ---
+
+func TestThreeWayMerge_BaseEqualsServer_NoMergeNeeded(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, cipher, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	localContent := []byte("local differs")
+	require.NoError(t, vault.WriteFile("same.md", localContent, time.Time{}))
+
+	commonText := "identical content"
+	encCommon := encryptContent(t, cipher, []byte(commonText))
+
+	// Base pull returns the same content as server.
+	mockPullDirect(mock, encCommon)
+	// Server pull returns same content.
+	mockPullDirect(mock, encCommon)
+
+	push := PushMessage{UID: 102, Hash: "h", MTime: 3000}
+	local := state.LocalFile{Path: "same.md", MTime: 2000, Hash: "localhash"}
+	prev := state.ServerFile{Path: "same.md", UID: 80}
+
+	err := r.threeWayMerge(ctx, "same.md", push, local, prev, true)
+	require.NoError(t, err)
+
+	// base == server means no server-side changes. Local file untouched.
+	got, err := vault.ReadFile("same.md")
+	require.NoError(t, err)
+	assert.Equal(t, "local differs", string(got))
+}
+
+// --- threeWayMerge: server pull error ---
+
+func TestThreeWayMerge_ServerPullError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, _, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("err.md", []byte("local"), time.Time{}))
+
+	// hasPrev=false (no base), so the base pull is skipped. The server
+	// pull is the first conn interaction and it fails.
+	gomock.InOrder(
+		mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil),
+		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageType(0), nil, fmt.Errorf("server error")),
+	)
+
+	push := PushMessage{UID: 103, Hash: "h", MTime: 3000}
+	local := state.LocalFile{Path: "err.md", MTime: 1000, Hash: "lh"}
+
+	err := r.threeWayMerge(ctx, "err.md", push, local, state.ServerFile{}, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pulling server version")
+}
+
+// --- downloadServerFile: decrypt error ---
+
+func TestDownloadServerFile_DecryptError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, _, _, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Return garbage content that fails to decrypt.
+	badContent := []byte{0xFF, 0xFE, 0xFD, 0xFC}
+	mockPullDirect(mock, badContent)
+
+	push := PushMessage{UID: 200, Hash: "h"}
+	err := r.downloadServerFile(ctx, "broken.md", push)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decrypting")
+}
+
+// --- handleTypeConflict: local file, rename error ---
+
+func TestHandleTypeConflict_LocalFile_ServerIsFolder(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Local is a file, server wants a folder at the same path.
+	require.NoError(t, vault.WriteFile("conflict.md", []byte("local"), time.Time{}))
+
+	// push.Folder=true so downloadServerFile takes the MkdirAll branch
+	// (no pullDirect needed).
+	push := PushMessage{UID: 300, Hash: "h", Folder: true}
+	local := state.LocalFile{Path: "conflict.md", Folder: false, MTime: 1000}
+
+	err := r.handleTypeConflict(ctx, "conflict.md", push, local)
+	require.NoError(t, err)
+
+	// Original path should now be a directory (server wins).
+	info, err := vault.Stat("conflict.md")
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+
+	// Conflict copy should exist.
+	conflictContent, err := vault.ReadFile("conflict (Conflicted copy).md")
+	require.NoError(t, err)
+	assert.Equal(t, "local", string(conflictContent))
+}
+
+// --- processOneServerPush: exercises the full decision flow ---
+
+func TestProcessOneServerPush_SkipsDeletedNoLocal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, appState, cipher, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	encPath := encryptPath(t, cipher, "gone.md")
+	push := PushMessage{
+		Op:      "push",
+		UID:     50,
+		Path:    encPath,
+		Deleted: true,
+	}
+
+	sp := ServerPush{Path: "gone.md", Msg: push}
+	scan := &ScanResult{Current: map[string]state.LocalFile{}}
+
+	err := r.processOneServerPush(ctx, sp, scan, map[string]state.ServerFile{})
+	require.NoError(t, err)
+
+	// Server file should be deleted (not stored).
+	sf, err := appState.GetServerFile(testSyncVaultID, "gone.md")
+	require.NoError(t, err)
+	assert.Nil(t, sf)
+}
+
 // mustJSON marshals v to JSON bytes, panicking on error.
 func mustJSON(v PullResponse) []byte {
 	data, err := json.Marshal(v)

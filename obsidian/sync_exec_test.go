@@ -752,6 +752,104 @@ func TestRemoveHashCache(t *testing.T) {
 	assert.Empty(t, s.ContentHash("remove-me.md"))
 }
 
+// --- resolveLocalState: additional branches ---
+
+func TestResolveLocalState_StatError_NonENOENT(t *testing.T) {
+	s, vault, _, _ := fullSyncClient(t)
+	// Create a file then remove the parent directory to cause a non-ENOENT
+	// stat error (ENOTDIR when the parent is gone).
+	require.NoError(t, vault.WriteFile("sub/file.md", []byte("x"), time.Time{}))
+	// Remove the directory out from under the vault by manipulating the
+	// filesystem directly. Stat on "sub/file.md" will fail because "sub"
+	// is gone, but the error is not os.IsNotExist on the file itself.
+	require.NoError(t, os.RemoveAll(filepath.Join(vault.Dir(), "sub")))
+
+	lf, enc := s.resolveLocalState("sub/file.md")
+	// Non-ENOENT stat error should return nil, "".
+	assert.Nil(t, lf)
+	assert.Empty(t, enc)
+}
+
+func TestResolveLocalState_ReadFileError_WithPersistedState(t *testing.T) {
+	s, vault, appState, _ := fullSyncClient(t)
+	// Write a real file so Stat succeeds.
+	require.NoError(t, vault.WriteFile("readable.md", []byte("hello"), time.Time{}))
+
+	// Persist a local file state.
+	persisted := state.LocalFile{
+		Path:     "readable.md",
+		MTime:    1,   // mtime won't match the real file, forcing re-hash
+		Size:     999, // size won't match either
+		Hash:     "oldhash",
+		SyncHash: "synchash",
+		SyncTime: 42,
+	}
+	require.NoError(t, appState.SetLocalFile(testSyncVaultID, persisted))
+
+	// Make the file unreadable so ReadFile fails after Stat succeeds.
+	realPath := filepath.Join(vault.Dir(), "readable.md")
+	require.NoError(t, os.Chmod(realPath, 0o000))
+	t.Cleanup(func() { os.Chmod(realPath, 0o644) })
+
+	lf, enc := s.resolveLocalState("readable.md")
+	require.NotNil(t, lf)
+	// Should return the persisted state as fallback.
+	assert.Equal(t, "oldhash", lf.Hash)
+	assert.Empty(t, enc)
+}
+
+func TestResolveLocalState_ReadFileError_NoPersistedState(t *testing.T) {
+	s, vault, _, _ := fullSyncClient(t)
+	// Write a real file so Stat succeeds.
+	require.NoError(t, vault.WriteFile("nostate.md", []byte("data"), time.Time{}))
+
+	// Make the file unreadable so ReadFile fails.
+	realPath := filepath.Join(vault.Dir(), "nostate.md")
+	require.NoError(t, os.Chmod(realPath, 0o000))
+	t.Cleanup(func() { os.Chmod(realPath, 0o644) })
+
+	lf, enc := s.resolveLocalState("nostate.md")
+	require.NotNil(t, lf)
+	// No persisted state: returns a barebones LocalFile with mtime/size from stat.
+	assert.Equal(t, "nostate.md", lf.Path)
+	assert.Empty(t, lf.Hash, "hash should be empty when ReadFile fails")
+	assert.Empty(t, enc)
+}
+
+// --- persistPushedFile: stat error fallback ---
+
+func TestPersistPushedFile_StatError_UsesFallbackValues(t *testing.T) {
+	s, _, appState, _ := fullSyncClient(t)
+	// Don't create the file on disk, so Stat will fail.
+	// persistPushedFile should fall back to len(content) and mtime arg.
+	content := []byte("orphan-content")
+	s.persistPushedFile("gone.md", content, "enchash", 5000, 3000)
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "gone.md")
+	require.NoError(t, err)
+	require.NotNil(t, lf)
+	assert.Equal(t, int64(len(content)), lf.Size)
+	assert.Equal(t, int64(5000), lf.MTime)
+	// CTime should be zero when stat fails (no fileCt assignment).
+	assert.Equal(t, int64(0), lf.CTime)
+}
+
+// --- persistVersionIfDirty: SetVault error ---
+
+func TestPersistVersionIfDirty_SetVaultError(t *testing.T) {
+	s, _, appState, _ := fullSyncClient(t)
+	s.versionDirty = true
+	s.version = 999
+
+	// Close the state DB to force SetVault to fail.
+	appState.Close()
+
+	// Should not panic; logs a warning and returns.
+	s.persistVersionIfDirty()
+	// versionDirty was reset to false before the error check.
+	assert.False(t, s.versionDirty)
+}
+
 // --- Connected ---
 
 func TestConnected_FalseByDefault(t *testing.T) {
