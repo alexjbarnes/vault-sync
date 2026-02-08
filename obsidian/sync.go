@@ -109,11 +109,21 @@ type SyncClient struct {
 	// handlePushWhileBusy is called from readResponse during operations.
 	pendingPulls   []pendingPull
 	pendingPullsMu sync.Mutex
+
+	// retryBackoff tracks per-path retry state for failed operations.
+	// app.js uses: delay = 5s * 2^count, capped at 5 minutes.
+	retryBackoff   map[string]retryEntry
+	retryBackoffMu sync.Mutex
 }
 
 type hashEntry struct {
 	encHash     string
 	contentHash string
+}
+
+type retryEntry struct {
+	count       int
+	lastFailure time.Time
 }
 
 // SyncConfig holds the parameters needed to connect to a sync server.
@@ -150,6 +160,7 @@ func NewSyncClient(cfg SyncConfig, logger *slog.Logger) *SyncClient {
 		perFileMax:        208_666_624, // ~199MB, matches Obsidian client default
 		opCh:              make(chan syncOp, 64),
 		hashCache:         make(map[string]hashEntry),
+		retryBackoff:      make(map[string]retryEntry),
 	}
 }
 
@@ -539,8 +550,18 @@ func (s *SyncClient) handlePushOp(ctx context.Context, op syncOp) error {
 
 // executePush does the actual push protocol sequence from the event loop.
 func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
+	// Check per-path retry backoff.
+	if backoff, ok := s.checkRetryBackoff(op.path); ok {
+		s.logger.Debug("skipping push in retry backoff",
+			slog.String("path", op.path),
+			slog.Duration("wait", time.Until(backoff)),
+		)
+		return nil
+	}
+
 	encPath, err := s.cipher.EncryptPath(op.path)
 	if err != nil {
+		s.recordRetryBackoff(op.path)
 		return fmt.Errorf("encrypting path: %w", err)
 	}
 
@@ -569,10 +590,12 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 		}
 
 		if err := s.writeJSON(ctx, msg); err != nil {
+			s.recordRetryBackoff(op.path)
 			return fmt.Errorf("sending push metadata: %w", err)
 		}
 
 		if _, err := s.readResponse(ctx); err != nil {
+			s.recordRetryBackoff(op.path)
 			return err
 		}
 
@@ -590,6 +613,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 			slog.Bool("folder", op.isFolder),
 			slog.Bool("deleted", op.isDeleted),
 		)
+		s.clearRetryBackoff(op.path)
 		return nil
 	}
 
@@ -600,6 +624,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 			slog.Int("size", len(op.content)),
 			slog.Int("limit", s.perFileMax),
 		)
+		s.clearRetryBackoff(op.path)
 		return nil
 	}
 
@@ -607,6 +632,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	if len(op.content) > 0 {
 		encContent, err = s.cipher.EncryptContent(op.content)
 		if err != nil {
+			s.recordRetryBackoff(op.path)
 			return fmt.Errorf("encrypting content: %w", err)
 		}
 	} else {
@@ -617,6 +643,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	hashHex := hex.EncodeToString(h[:])
 	encHash, err := s.cipher.EncryptPath(hashHex)
 	if err != nil {
+		s.recordRetryBackoff(op.path)
 		return fmt.Errorf("encrypting hash: %w", err)
 	}
 
@@ -644,18 +671,21 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	s.hashCacheMu.Unlock()
 
 	if err := s.writeJSON(ctx, msg); err != nil {
+		s.recordRetryBackoff(op.path)
 		s.removeHashCache(op.path)
 		return fmt.Errorf("sending push metadata: %w", err)
 	}
 
 	rawResp, err := s.readResponse(ctx)
 	if err != nil {
+		s.recordRetryBackoff(op.path)
 		s.removeHashCache(op.path)
 		return err
 	}
 
 	var resp GenericMessage
 	if err := json.Unmarshal(rawResp, &resp); err != nil {
+		s.recordRetryBackoff(op.path)
 		s.removeHashCache(op.path)
 		return fmt.Errorf("decoding push response: %w", err)
 	}
@@ -663,6 +693,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	// Server error -- abort before sending any binary data.
 	// The Obsidian app's request() checks resp.err and throws on non-empty.
 	if resp.Err != "" {
+		s.recordRetryBackoff(op.path)
 		s.removeHashCache(op.path)
 		return fmt.Errorf("server rejected push for %s: %s", op.path, resp.Err)
 	}
@@ -670,6 +701,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	// "ok" means file is unchanged on server, skip upload.
 	if resp.Res == "ok" || resp.Op == "ok" {
 		s.logger.Debug("push skipped, unchanged", slog.String("path", op.path))
+		s.clearRetryBackoff(op.path)
 		return nil
 	}
 
@@ -682,11 +714,13 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 		}
 
 		if err := s.conn.Write(ctx, websocket.MessageBinary, encContent[start:end]); err != nil {
+			s.recordRetryBackoff(op.path)
 			s.removeHashCache(op.path)
 			return fmt.Errorf("sending chunk %d/%d: %w", i+1, pieces, err)
 		}
 
 		if _, err := s.readResponse(ctx); err != nil {
+			s.recordRetryBackoff(op.path)
 			s.removeHashCache(op.path)
 			return err
 		}
@@ -698,6 +732,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 		slog.String("path", op.path),
 		slog.Int("bytes", len(op.content)),
 	)
+	s.clearRetryBackoff(op.path)
 	return nil
 }
 
@@ -1606,6 +1641,47 @@ func (s *SyncClient) touchLastMessage() {
 	s.lastMsgMu.Lock()
 	s.lastMessage = time.Now()
 	s.lastMsgMu.Unlock()
+}
+
+// checkRetryBackoff returns (waitUntil, true) if path is in backoff,
+// or (zeroTime, false) if not. Matches app.js: 5s * 2^count, capped at 5min.
+func (s *SyncClient) checkRetryBackoff(path string) (time.Time, bool) {
+	s.retryBackoffMu.Lock()
+	defer s.retryBackoffMu.Unlock()
+
+	entry, ok := s.retryBackoff[path]
+	if !ok {
+		return time.Time{}, false
+	}
+
+	delay := 5 * time.Second * time.Duration(1<<entry.count)
+	if delay > 5*time.Minute {
+		delay = 5 * time.Minute
+	}
+	waitUntil := entry.lastFailure.Add(delay)
+
+	if time.Now().Before(waitUntil) {
+		return waitUntil, true
+	}
+	return time.Time{}, false
+}
+
+// recordRetryBackoff records a failure for path, incrementing its retry count.
+func (s *SyncClient) recordRetryBackoff(path string) {
+	s.retryBackoffMu.Lock()
+	defer s.retryBackoffMu.Unlock()
+
+	entry := s.retryBackoff[path]
+	entry.count++
+	entry.lastFailure = time.Now()
+	s.retryBackoff[path] = entry
+}
+
+// clearRetryBackoff removes path from the backoff map on successful operation.
+func (s *SyncClient) clearRetryBackoff(path string) {
+	s.retryBackoffMu.Lock()
+	defer s.retryBackoffMu.Unlock()
+	delete(s.retryBackoff, path)
 }
 
 // writeJSON marshals v to JSON and writes it as a text frame.

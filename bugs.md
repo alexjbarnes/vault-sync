@@ -79,10 +79,11 @@
 - Fix: added `checkFileChangedDuringDownload` helper. Called in both `processPush` and `processPushDirect` after decrypting content, before writing. Aborts with descriptive error if file was modified during download.
 
 ## Bug 52: No per-path retry backoff
-- **File**: `obsidian/sync.go`, `obsidian/watcher.go`
+- **File**: `obsidian/sync.go`
 - **Severity**: Medium
-- **Status**: OPEN
+- **Status**: FIXED
 - app.js tracks `{count, error, ts}` per path with `5s * 2^count` backoff capped at 5 minutes. If a file fails repeatedly, we retry on every watcher event with no delay. Could cause log spam and server load.
+- Fix: added `retryBackoff` map with mutex protection. `checkRetryBackoff` called at start of `executePush`. On failure, `recordRetryBackoff` increments count. On success, `clearRetryBackoff` removes the entry. Formula: 5s * 2^count, capped at 5 minutes.
 
 ## Bug 53: Extension not lowercased
 - **File**: `obsidian/sync.go:543`
