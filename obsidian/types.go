@@ -120,8 +120,8 @@ type ClientPushMessage struct {
 	MTime       int64   `json:"mtime"`
 	Folder      bool    `json:"folder"`
 	Deleted     bool    `json:"deleted"`
-	Size        int     `json:"size,omitempty"`
-	Pieces      int     `json:"pieces,omitempty"`
+	Size        int     `json:"size"`
+	Pieces      int     `json:"pieces"`
 }
 
 // GenericMessage is used to decode the "op" field before dispatching.

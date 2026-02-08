@@ -39,6 +39,7 @@ type VaultState struct {
 type LocalFile struct {
 	Path     string `json:"path"`
 	MTime    int64  `json:"mtime"`
+	CTime    int64  `json:"ctime"`
 	Size     int64  `json:"size"`
 	Hash     string `json:"hash"`
 	SyncHash string `json:"synchash"`
@@ -56,6 +57,7 @@ type ServerFile struct {
 	Hash   string `json:"hash"`
 	UID    int64  `json:"uid"`
 	MTime  int64  `json:"mtime"`
+	CTime  int64  `json:"ctime"`
 	Size   int64  `json:"size"`
 	Folder bool   `json:"folder"`
 	Device string `json:"device"`

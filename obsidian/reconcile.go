@@ -18,6 +18,137 @@ import (
 
 const configDir = ".obsidian"
 
+// ReconcileDecision is the outcome of comparing local state against an
+// incoming server push. The caller performs I/O based on the decision.
+type ReconcileDecision int
+
+const (
+	// DecisionSkip means no disk I/O is needed. The caller should persist
+	// the server push record (using push.Deleted to decide whether to
+	// store or remove the entry).
+	DecisionSkip ReconcileDecision = iota
+
+	// DecisionDownload means the server version should be pulled and
+	// written to disk, replacing the local file.
+	DecisionDownload
+
+	// DecisionDeleteLocal means the local file should be deleted because
+	// it is clean (unchanged since last sync) and the server says deleted.
+	DecisionDeleteLocal
+
+	// DecisionKeepLocal means the local file has unpushed changes and the
+	// server says deleted. Keep the local file; persist the server record
+	// as deleted so the next upload cycle pushes local back up.
+	DecisionKeepLocal
+
+	// DecisionMergeMD means both sides changed a .md file. The caller
+	// should attempt a three-way merge using the previous server version
+	// as the common ancestor.
+	DecisionMergeMD
+
+	// DecisionMergeJSON means both sides changed a .obsidian/*.json file.
+	// The caller should perform a shallow JSON key merge.
+	DecisionMergeJSON
+
+	// DecisionTypeConflict means one side has a file and the other has a
+	// folder at the same path. The caller should rename the local entry
+	// to a conflict copy and then apply the server version.
+	DecisionTypeConflict
+)
+
+// Reconcile decides what to do with an incoming server push by comparing
+// it against the local file state and previous server record. This is a
+// pure decision function with no I/O. Both startup reconciliation and
+// live push handling call this to get a consistent decision.
+//
+// Parameters:
+//   - local: current local file state, or nil if the file does not exist locally
+//   - prev: previous server record from bbolt, or nil if none
+//   - push: the incoming server push message
+//   - encLocalHash: the local file's hash encrypted with the path cipher,
+//     or empty if local is nil or hash is unavailable
+//   - initial: true during initial sync (first connection, version 0)
+func Reconcile(local *state.LocalFile, prev *state.ServerFile, push PushMessage, encLocalHash string, initial bool) ReconcileDecision {
+	// Step 0: initial sync safety net -- drop deletions.
+	if initial && push.Deleted {
+		return DecisionSkip
+	}
+
+	// Step 1: no local file.
+	if local == nil {
+		if push.Deleted {
+			return DecisionSkip
+		}
+		return DecisionDownload
+	}
+
+	// Step 2: both are folders.
+	if local.Folder && push.Folder {
+		if push.Deleted {
+			return DecisionDeleteLocal
+		}
+		return DecisionSkip
+	}
+
+	// Step 3: hashes match -- files are identical.
+	if !local.Folder && !push.Folder && !push.Deleted && encLocalHash != "" {
+		if encLocalHash == push.Hash {
+			return DecisionSkip
+		}
+	}
+
+	// Step 4: clean local check. Local hash matches previous server hash,
+	// meaning the user made no changes since last sync. Server wins.
+	if prev != nil && !local.Folder && !prev.Folder && encLocalHash != "" && prev.Hash != "" {
+		if encLocalHash == prev.Hash {
+			if push.Deleted {
+				return DecisionDeleteLocal
+			}
+			return DecisionDownload
+		}
+	}
+
+	// Step 5: type conflict (file vs folder). If the server is deleting
+	// the mismatched type, just skip -- no reason to rename a local folder
+	// because the server deleted a file at the same path (or vice versa).
+	if local.Folder != push.Folder {
+		if push.Deleted {
+			return DecisionSkip
+		}
+		return DecisionTypeConflict
+	}
+
+	// Step 6: server deleted but local is dirty. Keep local.
+	if push.Deleted {
+		return DecisionKeepLocal
+	}
+
+	// Step 7: initial sync -- use mtime comparison, never merge.
+	// app.js tags initial-sync records so they bypass merge logic entirely.
+	// Server wins if its mtime is strictly newer; otherwise local wins.
+	if initial {
+		if push.MTime > local.MTime {
+			return DecisionDownload
+		}
+		return DecisionSkip
+	}
+
+	// Step 8: both changed, both are files. Decide merge strategy.
+	path := local.Path
+	ext := extractExtension(path)
+
+	if ext == "md" {
+		return DecisionMergeMD
+	}
+
+	if ext == "json" && strings.HasPrefix(path, configDir+"/") {
+		return DecisionMergeJSON
+	}
+
+	// Step 9: all other file types -- server wins.
+	return DecisionDownload
+}
+
 // Reconciler runs the three-phase reconciliation between local state,
 // server pushes, and persisted state. It mirrors the logic in Obsidian's
 // app.js _sync function.
@@ -123,95 +254,96 @@ func (r *Reconciler) processOneServerPush(ctx context.Context, sp ServerPush, sc
 	path := sp.Path
 	push := sp.Msg
 
-	// app.js safety check: during initial sync, deletions are excluded
-	// by the server's compacted snapshot, but we skip them anyway.
-	if r.client.initial && push.Deleted {
-		return nil
-	}
-
 	local, hasLocal := scan.Current[path]
 	prev, hasPrev := serverFiles[path]
 
-	// No local file exists.
-	if !hasLocal {
-		if push.Deleted {
-			// Deleted on server, not present locally -- nothing to do.
-			r.persistServerPush(path, push, true)
-			return nil
-		}
-		// Download from server.
-		return r.downloadServerFile(ctx, path, push)
+	var localPtr *state.LocalFile
+	if hasLocal {
+		localPtr = &local
+	}
+	var prevPtr *state.ServerFile
+	if hasPrev {
+		prevPtr = &prev
 	}
 
-	// Both are folders.
-	if local.Folder && push.Folder {
-		if push.Deleted {
-			// Server wants to delete folder. Accept only if empty on disk.
-			// For simplicity, always accept and let the OS refuse if non-empty.
-			r.vault.DeleteFile(path)
-			r.persistServerPush(path, push, true)
-			r.deleteLocalState(path)
-			return nil
-		}
-		// Both folder, not deleted -- no-op.
-		r.persistServerPush(path, push, false)
+	encLocalHash := r.encryptLocalHash(localPtr)
+	decision := Reconcile(localPtr, prevPtr, push, encLocalHash, r.client.initial)
+
+	return r.executeDecision(ctx, decision, path, push, localPtr, prevPtr)
+}
+
+// encryptLocalHash returns the encrypted form of the local file's hash,
+// or empty string if the local file is nil or has no hash.
+func (r *Reconciler) encryptLocalHash(local *state.LocalFile) string {
+	if local == nil || local.Hash == "" || local.Folder {
+		return ""
+	}
+	enc, err := r.cipher.EncryptPath(local.Hash)
+	if err != nil {
+		return ""
+	}
+	return enc
+}
+
+// executeDecision performs the I/O action determined by Reconcile().
+// Used by startup reconciliation (Phase 1). The reconciler calls
+// pullDirect for downloads since the reader goroutine isn't running yet.
+func (r *Reconciler) executeDecision(ctx context.Context, decision ReconcileDecision, path string, push PushMessage, local *state.LocalFile, prev *state.ServerFile) error {
+	switch decision {
+	case DecisionSkip:
+		r.persistServerPush(path, push, push.Deleted)
 		return nil
-	}
 
-	// Hashes match -- file is identical, accept.
-	if !local.Folder && !push.Folder && !push.Deleted && local.Hash != "" {
-		encLocalHash, err := r.cipher.EncryptPath(local.Hash)
-		if err == nil && encLocalHash == push.Hash {
-			r.persistServerPush(path, push, false)
-			return nil
-		}
-	}
+	case DecisionDownload:
+		r.logger.Info("reconcile: downloading", slog.String("path", path))
+		return r.downloadServerFile(ctx, path, push)
 
-	// "Clean local" check: local hash matches previous server hash.
-	// This means the user made no local changes -- server wins.
-	if hasPrev && !local.Folder && !prev.Folder && local.Hash != "" && prev.Hash != "" {
-		encLocalHash, err := r.cipher.EncryptPath(local.Hash)
-		if err == nil && encLocalHash == prev.Hash {
-			if push.Deleted {
-				r.logger.Info("reconcile: deleting clean local file", slog.String("path", path))
-				r.vault.DeleteFile(path)
+	case DecisionDeleteLocal:
+		r.logger.Info("reconcile: deleting local", slog.String("path", path))
+		if push.Folder {
+			if err := r.vault.DeleteEmptyDir(path); err != nil {
+				r.logger.Info("reconcile: folder not empty, skipping delete", slog.String("path", path))
 				r.persistServerPush(path, push, true)
-				r.deleteLocalState(path)
 				return nil
 			}
-			r.logger.Info("reconcile: downloading over clean local", slog.String("path", path))
-			return r.downloadServerFile(ctx, path, push)
+		} else {
+			r.vault.DeleteFile(path)
 		}
-	}
+		r.persistServerPush(path, push, true)
+		r.deleteLocalState(path)
+		return nil
 
-	// Type conflict: local is file, server is folder (or vice versa).
-	if local.Folder != push.Folder {
-		return r.handleTypeConflict(ctx, path, push, local)
-	}
-
-	// Both changed. Server is deleted -- keep local (local wins).
-	if push.Deleted {
+	case DecisionKeepLocal:
 		r.logger.Info("reconcile: keeping local, server deleted", slog.String("path", path))
 		r.persistServerPush(path, push, true)
 		return nil
-	}
 
-	// Both changed, both are files. Try to merge.
-	ext := strings.ToLower(filepath.Ext(path))
+	case DecisionMergeMD:
+		hasPrev := prev != nil
+		var prevVal state.ServerFile
+		if hasPrev {
+			prevVal = *prev
+		}
+		var localVal state.LocalFile
+		if local != nil {
+			localVal = *local
+		}
+		return r.threeWayMerge(ctx, path, push, localVal, prevVal, hasPrev)
 
-	// Three-way merge for .md files.
-	if ext == ".md" {
-		return r.threeWayMerge(ctx, path, push, local, prev, hasPrev)
-	}
-
-	// JSON shallow merge for .obsidian/ config files.
-	if ext == ".json" && strings.HasPrefix(path, configDir+"/") {
+	case DecisionMergeJSON:
 		return r.jsonMerge(ctx, path, push)
-	}
 
-	// All other files: server wins.
-	r.logger.Info("reconcile: server wins (non-mergeable)", slog.String("path", path))
-	return r.downloadServerFile(ctx, path, push)
+	case DecisionTypeConflict:
+		var localVal state.LocalFile
+		if local != nil {
+			localVal = *local
+		}
+		return r.handleTypeConflict(ctx, path, push, localVal)
+
+	default:
+		r.logger.Warn("reconcile: unknown decision", slog.String("path", path), slog.Int("decision", int(decision)))
+		return nil
+	}
 }
 
 // threeWayMerge performs a diff-match-patch merge for .md files.
@@ -293,21 +425,28 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 		return nil
 	}
 
-	// No base available -- server wins, but save local as conflict copy
-	// so the user can recover their changes. Without a base we cannot
-	// merge, and silently discarding local edits is data loss.
+	// No base available -- check ctime then use mtime comparison per
+	// app.js behavior. Obsidian does NOT create conflict copies in this case.
 	if baseText == "" {
-		r.logger.Warn("reconcile: no base for merge, saving conflict copy", slog.String("path", path))
-		conflictExt := filepath.Ext(path)
-		conflictBase := strings.TrimSuffix(path, conflictExt)
-		conflictPath := conflictCopyPath(conflictBase, conflictExt)
-		if err := r.vault.WriteFile(conflictPath, localContent, time.Time{}); err != nil {
-			r.logger.Warn("reconcile: failed to write conflict copy",
-				slog.String("path", conflictPath),
-				slog.String("error", err.Error()),
-			)
+		// Files created less than 3 minutes ago: server wins unconditionally.
+		if local.CTime > 0 {
+			age := time.Now().UnixMilli() - local.CTime
+			if age < 0 {
+				age = -age
+			}
+			if age < 180_000 {
+				r.logger.Info("reconcile: no base, recently created, server wins", slog.String("path", path))
+				return r.writeServerContent(path, push, []byte(serverText))
+			}
 		}
-		return r.writeServerContent(path, push, []byte(serverText))
+
+		if push.MTime > local.MTime {
+			r.logger.Info("reconcile: no base, server wins by mtime", slog.String("path", path))
+			return r.writeServerContent(path, push, []byte(serverText))
+		}
+		r.logger.Info("reconcile: no base, local wins by mtime", slog.String("path", path))
+		r.persistServerPush(path, push, false)
+		return nil
 	}
 
 	// Full three-way merge: compute patch(base->local), apply onto server.
@@ -318,35 +457,11 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 		diffs = dmp.DiffCleanupEfficiency(diffs)
 	}
 	patches := dmp.PatchMake(baseText, diffs)
-	merged, applied := dmp.PatchApply(patches, serverText)
+	// Obsidian discards the applied-status array and writes the result
+	// regardless. Failed patches are silently lost. We match this behavior.
+	merged, _ := dmp.PatchApply(patches, serverText)
 
-	allApplied := true
-	for _, ok := range applied {
-		if !ok {
-			allApplied = false
-			break
-		}
-	}
-
-	if !allApplied {
-		// Some local edits could not be applied to the server version.
-		// Save local content as a conflict copy so the user can recover
-		// their changes manually.
-		r.logger.Warn("reconcile: three-way merge had failed patches, saving conflict copy",
-			slog.String("path", path),
-		)
-		conflictExt := filepath.Ext(path)
-		conflictBase := strings.TrimSuffix(path, conflictExt)
-		conflictPath := conflictCopyPath(conflictBase, conflictExt)
-		if err := r.vault.WriteFile(conflictPath, localContent, time.Time{}); err != nil {
-			r.logger.Warn("reconcile: failed to write merge conflict copy",
-				slog.String("path", conflictPath),
-				slog.String("error", err.Error()),
-			)
-		}
-	}
-
-	r.logger.Info("reconcile: three-way merge", slog.String("path", path), slog.Bool("clean", allApplied))
+	r.logger.Info("reconcile: three-way merge", slog.String("path", path))
 	return r.writeServerContent(path, push, []byte(merged))
 }
 
@@ -409,11 +524,15 @@ func (r *Reconciler) jsonMerge(ctx context.Context, path string, push PushMessag
 // conflict copy, then the server version is applied.
 func (r *Reconciler) handleTypeConflict(ctx context.Context, path string, push PushMessage, local state.LocalFile) error {
 	if local.Folder {
-		// Local is folder, server wants a file. Remove the folder first
-		// so WriteFile can create a file at that path.
-		r.logger.Info("reconcile: type conflict, removing folder for file", slog.String("path", path))
-		if err := r.vault.DeleteFile(path); err != nil {
-			r.logger.Warn("reconcile: failed to remove folder for type conflict",
+		// Local is folder, server wants a file. Rename the folder to a
+		// conflict copy so it works for non-empty directories too.
+		cp := conflictCopyPath(path, "")
+		r.logger.Info("reconcile: type conflict, renaming folder",
+			slog.String("from", path),
+			slog.String("to", cp),
+		)
+		if err := r.vault.Rename(path, cp); err != nil {
+			r.logger.Warn("reconcile: failed to rename folder for type conflict",
 				slog.String("path", path),
 				slog.String("error", err.Error()),
 			)
@@ -572,6 +691,15 @@ func (r *Reconciler) deletePaths(ctx context.Context, paths []string, serverFile
 	})
 
 	for _, path := range paths {
+		// Phase 1 may have re-created this file by downloading a server
+		// push. Check whether the file now exists on disk before pushing
+		// a delete. The Obsidian app checks its live localFiles dict
+		// which is updated during Phase 1 (protocol doc line 767).
+		if _, err := r.vault.Stat(path); err == nil {
+			r.logger.Info("reconcile: skipping delete, file re-created by phase 1", slog.String("path", path))
+			continue
+		}
+
 		sf := serverFiles[path]
 		r.logger.Info("reconcile: deleting remote", slog.String("path", path), slog.Bool("folder", sf.Folder))
 
@@ -660,8 +788,17 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 
 		info, err := r.vault.Stat(path)
 		var mtime int64
+		var ctime int64
 		if err == nil {
 			mtime = info.ModTime().UnixMilli()
+			ctime = fileCtime(info)
+		}
+
+		// Ctime adoption: preserve the earliest known creation time.
+		if hasSF && sf.CTime > 0 {
+			if ctime == 0 || sf.CTime < ctime {
+				ctime = sf.CTime
+			}
 		}
 
 		r.logger.Info("reconcile: uploading file",
@@ -669,7 +806,7 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 			slog.Int("bytes", len(content)),
 		)
 
-		if err := r.client.Push(ctx, path, content, mtime, 0, false, false); err != nil {
+		if err := r.client.Push(ctx, path, content, mtime, ctime, false, false); err != nil {
 			r.logger.Warn("reconcile: failed to push file",
 				slog.String("path", path),
 				slog.String("error", err.Error()),
@@ -696,4 +833,12 @@ func sortByFileSize(paths []string, current map[string]state.LocalFile) {
 			paths[j], paths[j-1] = paths[j-1], paths[j]
 		}
 	}
+}
+
+func extractExtension(path string) string {
+	base := filepath.Base(path)
+	if dotIdx := strings.LastIndex(base, "."); dotIdx > 0 && dotIdx < len(base)-1 {
+		return strings.ToLower(base[dotIdx+1:])
+	}
+	return ""
 }

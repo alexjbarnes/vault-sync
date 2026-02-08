@@ -58,6 +58,8 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 			return nil
 		}
 
+		relPath = normalizePath(relPath)
+
 		// Skip hidden files/dirs at any level (like .git), but NOT .obsidian
 		// which is part of the vault config that gets synced.
 		base := filepath.Base(absPath)
@@ -66,6 +68,9 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		if base == "node_modules" && d.IsDir() {
+			return filepath.SkipDir
 		}
 		// Obsidian never syncs workspace state files.
 		if base == "workspace.json" || base == "workspace-mobile.json" {
@@ -102,6 +107,8 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 		size := info.Size()
 
 		prev, exists := persisted[relPath]
+		ctime := fileCtime(info)
+
 		if !exists {
 			// New file not in persisted state. Hash it now.
 			hash, hashErr := hashFile(vault, relPath)
@@ -112,6 +119,7 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 			lf := state.LocalFile{
 				Path:  relPath,
 				MTime: mtime,
+				CTime: ctime,
 				Size:  size,
 				Hash:  hash,
 			}
@@ -131,6 +139,7 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 			lf := state.LocalFile{
 				Path:     relPath,
 				MTime:    mtime,
+				CTime:    ctime,
 				Size:     size,
 				Hash:     hash,
 				SyncHash: prev.SyncHash,

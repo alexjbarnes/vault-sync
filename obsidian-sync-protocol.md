@@ -20,7 +20,9 @@ WebSocket (wss://sync-{N}.obsidian.md)  →  Real-time file sync
 Base URL: `https://api.obsidian.md`
 All requests: `POST` with `Content-Type: application/json`
 
-The Obsidian app does NOT set an `Origin` header on REST API calls. The app uses plain `fetch()` with only `Content-Type: application/json`. The `Origin: app://obsidian.md` header is only set on WebSocket connections (automatically by the Electron shell). The API returns errors as HTTP 200 with an `error` field in the JSON body, not as HTTP error status codes.
+The Obsidian app does NOT set an `Origin` header on REST API calls. The app uses plain `fetch()` with only `Content-Type: application/json`. The `Origin: app://obsidian.md` header is only set on WebSocket connections (automatically by the Electron shell). Our implementation sets this header on REST calls as well; testing shows it works fine and doesn't cause issues.
+
+The API returns errors as HTTP 200 with an `error` field in the JSON body, not as HTTP error status codes.
 
 ### Authentication
 

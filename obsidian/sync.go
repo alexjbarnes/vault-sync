@@ -17,6 +17,7 @@ import (
 
 	"github.com/alexjbarnes/vault-sync/internal/state"
 	"github.com/coder/websocket"
+	"github.com/sergi/go-diff/diffmatchpatch"
 	"github.com/tidwall/gjson"
 )
 
@@ -114,6 +115,11 @@ type SyncClient struct {
 	// app.js uses: delay = 5s * 2^count, capped at 5 minutes.
 	retryBackoff   map[string]retryEntry
 	retryBackoffMu sync.Mutex
+
+	// versionDirty tracks whether s.version was updated since the last
+	// persist. The event loop persists periodically (matching the
+	// Obsidian app's debounced saveData behavior).
+	versionDirty bool
 }
 
 type hashEntry struct {
@@ -223,7 +229,12 @@ func (s *SyncClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("auth failed: %s", msg)
 	}
 
-	s.perFileMax = initResp.PerFileMax
+	// Only update perFileMax if the server sent a positive value.
+	// If the server omits the field, Go defaults to 0 and we keep the
+	// client default (208MB) rather than disabling the size limit.
+	if initResp.PerFileMax > 0 {
+		s.perFileMax = initResp.PerFileMax
+	}
 	// Tighten read limit now that we know the max file size. Allow 2x
 	// for encryption overhead, minimum 4MB for metadata-heavy responses.
 	readLimit := int64(s.perFileMax * 2)
@@ -477,6 +488,7 @@ func (s *SyncClient) eventLoop(ctx context.Context, connCtx context.Context) err
 			s.lastMsgMu.Unlock()
 
 			if elapsed > disconnectAfter {
+				s.persistVersionIfDirty()
 				s.logger.Warn("connection timed out, closing")
 				s.conn.Close(websocket.StatusGoingAway, "timeout")
 				return fmt.Errorf("heartbeat timeout")
@@ -488,10 +500,14 @@ func (s *SyncClient) eventLoop(ctx context.Context, connCtx context.Context) err
 				}
 			}
 
+			s.persistVersionIfDirty()
+
 		case <-ctx.Done():
+			s.persistVersionIfDirty()
 			return ctx.Err()
 
 		case <-connCtx.Done():
+			s.persistVersionIfDirty()
 			return connCtx.Err()
 		}
 	}
@@ -517,6 +533,7 @@ func (s *SyncClient) handleInbound(ctx context.Context, data []byte) error {
 		}
 		if push.UID > s.version {
 			s.version = push.UID
+			s.versionDirty = true
 		}
 		if err := s.processPush(ctx, push); err != nil {
 			s.logger.Warn("processing push",
@@ -726,7 +743,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 		}
 	}
 
-	s.persistPushedFile(op.path, op.content, encHash, op.mtime)
+	s.persistPushedFile(op.path, op.content, encHash, op.mtime, op.ctime)
 
 	s.logger.Info("pushed",
 		slog.String("path", op.path),
@@ -805,9 +822,11 @@ type pendingPull struct {
 }
 
 // handlePushWhileBusy processes a server push that arrives while we're
-// in the middle of a push or pull operation. Folders, deletes, and
-// hash-matched files are handled immediately. Files that need content
-// are deferred.
+// in the middle of a push or pull operation. Uses Reconcile() to decide
+// what to do. Decisions that don't need a pull (Skip, DeleteLocal,
+// KeepLocal) are handled inline. Decisions that need content (Download,
+// MergeMD, MergeJSON, TypeConflict) are queued for processing after the
+// current operation completes.
 func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 	var push PushMessage
 	if err := json.Unmarshal(data, &push); err != nil {
@@ -816,6 +835,7 @@ func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 	}
 	if push.UID > s.version {
 		s.version = push.UID
+		s.versionDirty = true
 	}
 
 	path, err := s.cipher.DecryptPath(push.Path)
@@ -823,45 +843,40 @@ func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 		s.logger.Warn("decrypting push path while busy", slog.String("error", err.Error()))
 		return
 	}
+	path = normalizePath(path)
 
-	// Handle cases that don't need a pull.
-	if push.Deleted {
-		s.logger.Info("delete", slog.String("path", path))
-		if err := s.vault.DeleteFile(path); err != nil {
-			s.logger.Warn("deleting file from push while busy", slog.String("path", path), slog.String("error", err.Error()))
+	local, encLocalHash := s.resolveLocalState(path)
+	prev := s.ServerFileState(path)
+	decision := Reconcile(local, prev, push, encLocalHash, s.initial)
+
+	switch decision {
+	case DecisionSkip:
+		s.persistServerFile(path, push, push.Deleted)
+
+	case DecisionDeleteLocal:
+		s.logger.Info("delete (while busy)", slog.String("path", path))
+		if push.Folder {
+			if err := s.vault.DeleteEmptyDir(path); err != nil {
+				s.logger.Info("folder not empty, skipping delete (while busy)", slog.String("path", path))
+				s.persistServerFile(path, push, true)
+				return
+			}
+		} else {
+			s.vault.DeleteFile(path)
 		}
 		s.removeHashCache(path)
 		s.persistServerFile(path, push, true)
 		s.deleteLocalState(path)
-		return
-	}
 
-	if push.Folder {
-		s.logger.Info("mkdir", slog.String("path", path))
-		if err := s.vault.MkdirAll(path); err != nil {
-			s.logger.Warn("mkdir from push while busy", slog.String("path", path), slog.String("error", err.Error()))
-		}
-		s.persistServerFile(path, push, false)
-		s.persistLocalFolder(path)
-		return
-	}
+	case DecisionKeepLocal:
+		s.logger.Info("keeping local (while busy)", slog.String("path", path))
+		s.persistServerFile(path, push, true)
 
-	// Hash cache hit means content is identical.
-	if push.Hash != "" {
-		s.hashCacheMu.Lock()
-		cached, ok := s.hashCache[path]
-		s.hashCacheMu.Unlock()
-		if ok && cached.encHash == push.Hash {
-			s.logger.Debug("skipping push while busy, hash unchanged", slog.String("path", path))
-			s.persistServerFile(path, push, false)
-			return
-		}
+	default:
+		// Download, MergeMD, MergeJSON, TypeConflict all need content
+		// from the server. We can't pull mid-operation, so queue it.
+		s.queuePendingPull(pendingPull{push: push, path: path})
 	}
-
-	// Needs content. We can't pull mid-operation, so queue it. The event
-	// loop will process it when the current operation completes. We store
-	// it on a slice that the event loop checks after each operation.
-	s.queuePendingPull(pendingPull{push: push, path: path})
 }
 
 func (s *SyncClient) queuePendingPull(pp pendingPull) {
@@ -893,26 +908,79 @@ type ServerPush struct {
 	Path string
 }
 
-// processPush handles a single server push: decrypts the path, then creates
-// folders, removes deleted files, or pulls and writes file content. Called
-// from the event loop, so pull() reads from inboundCh safely.
+// processPush handles a single server push using the reconciliation
+// decision tree. Called from the event loop, so pull() reads from
+// inboundCh safely.
 func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 	path, err := s.cipher.DecryptPath(push.Path)
 	if err != nil {
 		return fmt.Errorf("decrypting path: %w", err)
 	}
+	path = normalizePath(path)
 
-	if push.Deleted {
+	local, encLocalHash := s.resolveLocalState(path)
+	prev := s.ServerFileState(path)
+	decision := Reconcile(local, prev, push, encLocalHash, s.initial)
+
+	return s.executeLiveDecision(ctx, decision, path, push, local, prev, s.pull)
+}
+
+// pullFunc abstracts the two pull variants so executeLiveDecision works
+// both from the event loop (pull via inboundCh) and during reconnect
+// (pullDirect from the raw connection).
+type pullFunc func(ctx context.Context, uid int64) ([]byte, error)
+
+// executeLiveDecision performs the I/O action from a Reconcile() decision
+// during live sync (event loop or reconnect). Unlike the startup reconciler
+// which uses pullDirect, this accepts a pullFunc so the caller can provide
+// the right pull method for the current connection state.
+func (s *SyncClient) executeLiveDecision(ctx context.Context, decision ReconcileDecision, path string, push PushMessage, local *state.LocalFile, prev *state.ServerFile, pull pullFunc) error {
+	switch decision {
+	case DecisionSkip:
+		s.persistServerFile(path, push, push.Deleted)
+		return nil
+
+	case DecisionDownload:
+		return s.liveDownload(ctx, path, push, pull)
+
+	case DecisionDeleteLocal:
 		s.logger.Info("delete", slog.String("path", path))
-		if err := s.vault.DeleteFile(path); err != nil {
-			return fmt.Errorf("deleting %s: %w", path, err)
+		if push.Folder {
+			if err := s.vault.DeleteEmptyDir(path); err != nil {
+				s.logger.Info("folder not empty, skipping delete", slog.String("path", path))
+				s.persistServerFile(path, push, true)
+				return nil
+			}
+		} else {
+			s.vault.DeleteFile(path)
 		}
 		s.removeHashCache(path)
 		s.persistServerFile(path, push, true)
 		s.deleteLocalState(path)
 		return nil
-	}
 
+	case DecisionKeepLocal:
+		s.logger.Info("keeping local, server deleted", slog.String("path", path))
+		s.persistServerFile(path, push, true)
+		return nil
+
+	case DecisionMergeMD:
+		return s.liveMergeMD(ctx, path, push, local, prev, pull)
+
+	case DecisionMergeJSON:
+		return s.liveMergeJSON(ctx, path, push, pull)
+
+	case DecisionTypeConflict:
+		return s.liveTypeConflict(ctx, path, push, local, pull)
+
+	default:
+		s.logger.Warn("unknown decision", slog.String("path", path), slog.Int("decision", int(decision)))
+		return nil
+	}
+}
+
+// liveDownload pulls and writes a file during live sync.
+func (s *SyncClient) liveDownload(ctx context.Context, path string, push PushMessage, pull pullFunc) error {
 	if push.Folder {
 		s.logger.Info("mkdir", slog.String("path", path))
 		if err := s.vault.MkdirAll(path); err != nil {
@@ -923,20 +991,10 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 		return nil
 	}
 
-	// Check hash cache: if the encrypted hash matches, content is identical.
-	if push.Hash != "" {
-		s.hashCacheMu.Lock()
-		cached, ok := s.hashCache[path]
-		s.hashCacheMu.Unlock()
-		if ok && cached.encHash == push.Hash {
-			s.logger.Debug("skipping push, hash unchanged", slog.String("path", path))
-			s.persistServerFile(path, push, false)
-			return nil
-		}
-	}
+	// Stat before pull so we can detect concurrent modifications.
+	prePullInfo, _ := s.vault.Stat(path)
 
-	// Pull content. Called from the event loop so we read from inboundCh.
-	content, err := s.pull(ctx, push.UID)
+	content, err := pull(ctx, push.UID)
 	if err != nil {
 		return fmt.Errorf("pulling %s (uid %d): %w", path, push.UID, err)
 	}
@@ -955,13 +1013,9 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 		}
 	}
 
-	// Check if file was modified during download. If so, abort to avoid
-	// overwriting changes. This can happen with external editors via MCP/API.
-	var expectedMtime time.Time
-	if push.MTime > 0 {
-		expectedMtime = time.UnixMilli(push.MTime)
-	}
-	if err := s.checkFileChangedDuringDownload(path, expectedMtime, int64(len(plaintext))); err != nil {
+	// Check if file was modified during download by comparing against
+	// the pre-pull stat, not the server mtime.
+	if err := s.checkFileChangedDuringDownload(path, prePullInfo); err != nil {
 		return err
 	}
 
@@ -992,22 +1046,266 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 	return nil
 }
 
+// liveMergeMD performs a three-way merge for .md files during live sync.
+func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMessage, local *state.LocalFile, prev *state.ServerFile, pull pullFunc) error {
+	// Check if server hash matches our last upload hash -- echo of our own push.
+	if local != nil && local.SyncHash != "" {
+		encSyncHash, err := s.cipher.EncryptPath(local.SyncHash)
+		if err == nil && encSyncHash == push.Hash {
+			s.logger.Debug("server matches last push, skip merge", slog.String("path", path))
+			s.persistServerFile(path, push, false)
+			return nil
+		}
+	}
+
+	localContent, err := s.vault.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading local file for merge: %w", err)
+	}
+	localText := string(localContent)
+
+	// Get base version (previous server state).
+	baseText := ""
+	if prev != nil && prev.UID > 0 {
+		baseEnc, err := pull(ctx, prev.UID)
+		if err != nil {
+			s.logger.Warn("failed to pull base for merge, falling back",
+				slog.String("path", path),
+				slog.String("error", err.Error()),
+			)
+			return s.liveDownload(ctx, path, push, pull)
+		}
+		if baseEnc != nil && len(baseEnc) > 0 {
+			basePlain, err := s.cipher.DecryptContent(baseEnc)
+			if err != nil {
+				s.logger.Warn("failed to decrypt base, falling back",
+					slog.String("path", path),
+					slog.String("error", err.Error()),
+				)
+				return s.liveDownload(ctx, path, push, pull)
+			}
+			baseText = string(basePlain)
+		}
+	}
+
+	// Get new server version.
+	serverEnc, err := pull(ctx, push.UID)
+	if err != nil {
+		return fmt.Errorf("pulling server version for merge: %w", err)
+	}
+	if serverEnc == nil {
+		s.persistServerFile(path, push, true)
+		s.deleteLocalState(path)
+		return nil
+	}
+
+	var serverText string
+	if len(serverEnc) > 0 {
+		serverPlain, err := s.cipher.DecryptContent(serverEnc)
+		if err != nil {
+			return fmt.Errorf("decrypting server version for merge: %w", err)
+		}
+		serverText = string(serverPlain)
+	}
+
+	// Trivial cases.
+	if baseText == serverText || localText == serverText {
+		s.persistServerFile(path, push, false)
+		return nil
+	}
+	if serverText == "" {
+		s.persistServerFile(path, push, false)
+		return nil
+	}
+
+	// No base available -- check ctime then use mtime comparison per
+	// app.js behavior. No conflict copy created, matching Obsidian exactly.
+	if baseText == "" {
+		// Files created less than 3 minutes ago: server wins unconditionally.
+		// This prevents newly-created files from shadowing existing server
+		// content when no merge base exists to detect divergence.
+		if local != nil && local.CTime > 0 {
+			age := time.Now().UnixMilli() - local.CTime
+			if age < 0 {
+				age = -age
+			}
+			if age < 180_000 {
+				s.logger.Info("merge: no base, recently created, server wins", slog.String("path", path))
+				return s.liveWriteContent(path, push, []byte(serverText))
+			}
+		}
+
+		localMtime := int64(0)
+		if local != nil {
+			localMtime = local.MTime
+		}
+		if push.MTime > localMtime {
+			s.logger.Info("merge: no base, server wins by mtime", slog.String("path", path))
+			return s.liveWriteContent(path, push, []byte(serverText))
+		}
+		s.logger.Info("merge: no base, local wins by mtime", slog.String("path", path))
+		s.persistServerFile(path, push, false)
+		return nil
+	}
+
+	// Full three-way merge.
+	dmp := diffmatchpatch.New()
+	diffs := dmp.DiffMain(baseText, localText, true)
+	if len(diffs) > 2 {
+		diffs = dmp.DiffCleanupSemantic(diffs)
+		diffs = dmp.DiffCleanupEfficiency(diffs)
+	}
+	patches := dmp.PatchMake(baseText, diffs)
+	merged, _ := dmp.PatchApply(patches, serverText)
+
+	s.logger.Info("merge: three-way", slog.String("path", path))
+	return s.liveWriteContent(path, push, []byte(merged))
+}
+
+// liveMergeJSON performs a shallow JSON merge during live sync.
+func (s *SyncClient) liveMergeJSON(ctx context.Context, path string, push PushMessage, pull pullFunc) error {
+	localContent, err := s.vault.ReadFile(path)
+	if err != nil {
+		return s.liveDownload(ctx, path, push, pull)
+	}
+
+	var localObj map[string]json.RawMessage
+	if err := json.Unmarshal(localContent, &localObj); err != nil {
+		return s.liveDownload(ctx, path, push, pull)
+	}
+
+	serverEnc, err := pull(ctx, push.UID)
+	if err != nil {
+		return fmt.Errorf("pulling server config for merge: %w", err)
+	}
+	if serverEnc == nil {
+		s.persistServerFile(path, push, true)
+		s.deleteLocalState(path)
+		return nil
+	}
+
+	var serverPlain []byte
+	if len(serverEnc) > 0 {
+		serverPlain, err = s.cipher.DecryptContent(serverEnc)
+		if err != nil {
+			return fmt.Errorf("decrypting server config: %w", err)
+		}
+	}
+
+	var serverObj map[string]json.RawMessage
+	if err := json.Unmarshal(serverPlain, &serverObj); err != nil {
+		return s.liveWriteContent(path, push, serverPlain)
+	}
+
+	for k, v := range serverObj {
+		localObj[k] = v
+	}
+
+	merged, err := json.MarshalIndent(localObj, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshalling merged config: %w", err)
+	}
+
+	s.logger.Info("merge: JSON", slog.String("path", path))
+	return s.liveWriteContent(path, push, merged)
+}
+
+// liveTypeConflict handles file/folder type conflicts during live sync.
+func (s *SyncClient) liveTypeConflict(ctx context.Context, path string, push PushMessage, local *state.LocalFile, pull pullFunc) error {
+	if local != nil && local.Folder {
+		cp := conflictCopyPath(path, "")
+		s.logger.Info("type conflict: renaming folder",
+			slog.String("from", path),
+			slog.String("to", cp),
+		)
+		if err := s.vault.Rename(path, cp); err != nil {
+			s.logger.Warn("failed to rename folder for type conflict",
+				slog.String("path", path),
+				slog.String("error", err.Error()),
+			)
+		}
+		return s.liveDownload(ctx, path, push, pull)
+	}
+
+	// Local is file, server wants a folder. Save local to conflict copy.
+	ext := extractExtension(path)
+	dotExt := ""
+	if ext != "" {
+		dotExt = "." + ext
+	}
+	base := strings.TrimSuffix(path, dotExt)
+	cp := conflictCopyPath(base, dotExt)
+
+	s.logger.Info("type conflict: renaming local",
+		slog.String("from", path),
+		slog.String("to", cp),
+	)
+
+	content, err := s.vault.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading local file for conflict copy: %w", err)
+	}
+	if err := s.vault.WriteFile(cp, content, time.Time{}); err != nil {
+		return fmt.Errorf("writing conflict copy %s: %w", cp, err)
+	}
+	s.vault.DeleteFile(path)
+
+	if push.Deleted {
+		s.persistServerFile(path, push, true)
+		return nil
+	}
+
+	return s.liveDownload(ctx, path, push, pull)
+}
+
+// liveWriteContent writes plaintext to disk and persists state during live sync.
+func (s *SyncClient) liveWriteContent(path string, push PushMessage, plaintext []byte) error {
+	var mtime time.Time
+	if push.MTime > 0 {
+		mtime = time.UnixMilli(push.MTime)
+	}
+	if err := s.vault.WriteFile(path, plaintext, mtime); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+
+	h := sha256.Sum256(plaintext)
+	contentHash := hex.EncodeToString(h[:])
+
+	s.hashCacheMu.Lock()
+	s.hashCache[path] = hashEntry{
+		encHash:     push.Hash,
+		contentHash: contentHash,
+	}
+	s.hashCacheMu.Unlock()
+
+	s.persistServerFile(path, push, false)
+	s.persistLocalFileAfterWrite(path, contentHash)
+
+	s.logger.Info("wrote",
+		slog.String("path", path),
+		slog.Int("bytes", len(plaintext)),
+	)
+	return nil
+}
+
 // checkFileChangedDuringDownload aborts if the file was modified while we
-// were pulling content. This prevents overwriting concurrent external edits.
-func (s *SyncClient) checkFileChangedDuringDownload(path string, expectedMtime time.Time, expectedSize int64) error {
+// were pulling content. prePullInfo is the os.FileInfo from before the pull
+// started. If nil (file didn't exist before), the check is skipped.
+func (s *SyncClient) checkFileChangedDuringDownload(path string, prePullInfo os.FileInfo) error {
+	if prePullInfo == nil {
+		return nil
+	}
 	info, err := s.vault.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// File was deleted during download. Let the write recreate it.
 			return nil
 		}
 		return fmt.Errorf("stat %s: %w", path, err)
 	}
-
-	// File exists. Check if it was modified during download.
-	if !expectedMtime.IsZero() && !info.ModTime().Equal(expectedMtime) {
+	if !info.ModTime().Equal(prePullInfo.ModTime()) || info.Size() != prePullInfo.Size() {
 		return fmt.Errorf("download cancelled because %s was changed locally during download", path)
 	}
-
 	return nil
 }
 
@@ -1017,6 +1315,7 @@ func (s *SyncClient) decryptPush(push PushMessage) (ServerPush, error) {
 	if err != nil {
 		return ServerPush{}, fmt.Errorf("decrypting path: %w", err)
 	}
+	path = normalizePath(path)
 	return ServerPush{Msg: push, Path: path}, nil
 }
 
@@ -1043,6 +1342,7 @@ func (s *SyncClient) persistServerFile(path string, push PushMessage, deleted bo
 		Hash:   push.Hash,
 		UID:    push.UID,
 		MTime:  push.MTime,
+		CTime:  push.CTime,
 		Size:   push.Size,
 		Folder: push.Folder,
 		Device: push.Device,
@@ -1071,6 +1371,7 @@ func (s *SyncClient) persistLocalFileAfterWrite(path, contentHash string) {
 	lf := state.LocalFile{
 		Path:     path,
 		MTime:    info.ModTime().UnixMilli(),
+		CTime:    fileCtime(info),
 		Size:     info.Size(),
 		Hash:     contentHash,
 		SyncHash: contentHash,
@@ -1103,9 +1404,13 @@ func (s *SyncClient) persistLocalFolder(path string) {
 	}
 }
 
-// persistPushedFile records both local and server state after we successfully
-// pushed a file to the server.
-func (s *SyncClient) persistPushedFile(path string, content []byte, encHash string, mtime int64) {
+// persistPushedFile records the local file state after we successfully
+// pushed a file to the server. The server-side record (with the real
+// server-assigned UID) is written by the echo handler -- either
+// handlePushWhileBusy (if the echo arrives during the push's ack loop)
+// or processPush (if it arrives after). Writing it here would race with
+// the echo and overwrite the UID with 0.
+func (s *SyncClient) persistPushedFile(path string, content []byte, encHash string, mtime int64, ctime int64) {
 	h := sha256.Sum256(content)
 	contentHash := hex.EncodeToString(h[:])
 	now := time.Now().UnixMilli()
@@ -1113,9 +1418,11 @@ func (s *SyncClient) persistPushedFile(path string, content []byte, encHash stri
 	info, err := s.vault.Stat(path)
 	var size int64
 	var fileMtime int64
+	var fileCt int64
 	if err == nil {
 		size = info.Size()
 		fileMtime = info.ModTime().UnixMilli()
+		fileCt = fileCtime(info)
 	} else {
 		size = int64(len(content))
 		fileMtime = mtime
@@ -1124,6 +1431,7 @@ func (s *SyncClient) persistPushedFile(path string, content []byte, encHash stri
 	lf := state.LocalFile{
 		Path:     path,
 		MTime:    fileMtime,
+		CTime:    fileCt,
 		Size:     size,
 		Hash:     contentHash,
 		SyncHash: contentHash,
@@ -1132,20 +1440,6 @@ func (s *SyncClient) persistPushedFile(path string, content []byte, encHash stri
 	}
 	if err := s.state.SetLocalFile(s.vaultID, lf); err != nil {
 		s.logger.Warn("failed to persist local file after push",
-			slog.String("path", path),
-			slog.String("error", err.Error()),
-		)
-	}
-
-	sf := state.ServerFile{
-		Path:   path,
-		Hash:   encHash,
-		MTime:  mtime,
-		Size:   size,
-		Folder: false,
-	}
-	if err := s.state.SetServerFile(s.vaultID, sf); err != nil {
-		s.logger.Warn("failed to persist server file after push",
 			slog.String("path", path),
 			slog.String("error", err.Error()),
 		)
@@ -1217,6 +1511,85 @@ func (s *SyncClient) ServerFileState(path string) *state.ServerFile {
 		return nil
 	}
 	return sf
+}
+
+// resolveLocalState returns the current local file state for a path by
+// checking persisted state and re-hashing from disk if the file changed
+// since it was last persisted. Returns nil if the file does not exist.
+// Also returns the encrypted local hash for use with Reconcile().
+func (s *SyncClient) resolveLocalState(path string) (*state.LocalFile, string) {
+	info, err := s.vault.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ""
+		}
+		s.logger.Warn("stat for reconcile", slog.String("path", path), slog.String("error", err.Error()))
+		return nil, ""
+	}
+
+	persisted, err := s.state.GetLocalFile(s.vaultID, path)
+	if err != nil {
+		s.logger.Warn("loading local file state", slog.String("path", path), slog.String("error", err.Error()))
+	}
+
+	ctime := fileCtime(info)
+
+	if info.IsDir() {
+		lf := state.LocalFile{
+			Path:   path,
+			Folder: true,
+			MTime:  info.ModTime().UnixMilli(),
+		}
+		return &lf, ""
+	}
+
+	mtime := info.ModTime().UnixMilli()
+	size := info.Size()
+
+	// If persisted state exists and mtime/size match, reuse the hash.
+	// Update CTime from the live stat in case the persisted value is stale.
+	if persisted != nil && persisted.MTime == mtime && persisted.Size == size && persisted.Hash != "" {
+		if ctime > 0 {
+			persisted.CTime = ctime
+		}
+		enc, err := s.cipher.EncryptPath(persisted.Hash)
+		if err != nil {
+			return persisted, ""
+		}
+		return persisted, enc
+	}
+
+	// Hash from disk.
+	content, err := s.vault.ReadFile(path)
+	if err != nil {
+		s.logger.Warn("reading file for hash", slog.String("path", path), slog.String("error", err.Error()))
+		if persisted != nil {
+			return persisted, ""
+		}
+		lf := state.LocalFile{Path: path, MTime: mtime, CTime: ctime, Size: size}
+		return &lf, ""
+	}
+
+	h := sha256.Sum256(content)
+	hashHex := hex.EncodeToString(h[:])
+
+	lf := state.LocalFile{
+		Path:  path,
+		MTime: mtime,
+		CTime: ctime,
+		Size:  size,
+		Hash:  hashHex,
+	}
+	if persisted != nil {
+		lf.SyncHash = persisted.SyncHash
+		lf.SyncTime = persisted.SyncTime
+	}
+
+	enc, err := s.cipher.EncryptPath(hashHex)
+	if err != nil {
+		return &lf, ""
+	}
+	return &lf, enc
 }
 
 // Pull sends a pull request and reads the response + binary frames
@@ -1449,99 +1822,21 @@ func (s *SyncClient) reconnect(ctx context.Context) error {
 }
 
 // processPushDirect handles a server push by reading directly from the
-// connection (not inboundCh). Used during initial startup and reconnect
-// before the reader goroutine is running.
+// connection (not inboundCh). Used during reconnect before the reader
+// goroutine is running. Routes through Reconcile() for consistent
+// decision-making.
 func (s *SyncClient) processPushDirect(ctx context.Context, push PushMessage) error {
 	path, err := s.cipher.DecryptPath(push.Path)
 	if err != nil {
 		return fmt.Errorf("decrypting path: %w", err)
 	}
+	path = normalizePath(path)
 
-	if push.Deleted {
-		s.logger.Info("delete", slog.String("path", path))
-		if err := s.vault.DeleteFile(path); err != nil {
-			return fmt.Errorf("deleting %s: %w", path, err)
-		}
-		s.removeHashCache(path)
-		s.persistServerFile(path, push, true)
-		s.deleteLocalState(path)
-		return nil
-	}
+	local, encLocalHash := s.resolveLocalState(path)
+	prev := s.ServerFileState(path)
+	decision := Reconcile(local, prev, push, encLocalHash, s.initial)
 
-	if push.Folder {
-		s.logger.Info("mkdir", slog.String("path", path))
-		if err := s.vault.MkdirAll(path); err != nil {
-			return err
-		}
-		s.persistServerFile(path, push, false)
-		s.persistLocalFolder(path)
-		return nil
-	}
-
-	if push.Hash != "" {
-		s.hashCacheMu.Lock()
-		cached, ok := s.hashCache[path]
-		s.hashCacheMu.Unlock()
-		if ok && cached.encHash == push.Hash {
-			s.logger.Debug("skipping push, hash unchanged", slog.String("path", path))
-			s.persistServerFile(path, push, false)
-			return nil
-		}
-	}
-
-	content, err := s.pullDirect(ctx, push.UID)
-	if err != nil {
-		return fmt.Errorf("pulling %s (uid %d): %w", path, push.UID, err)
-	}
-	if content == nil {
-		s.logger.Info("skip deleted content", slog.String("path", path))
-		s.persistServerFile(path, push, true)
-		s.deleteLocalState(path)
-		return nil
-	}
-
-	var plaintext []byte
-	if len(content) > 0 {
-		plaintext, err = s.cipher.DecryptContent(content)
-		if err != nil {
-			return fmt.Errorf("decrypting content for %s: %w", path, err)
-		}
-	}
-
-	// Check if file was modified during download.
-	var expectedMtime time.Time
-	if push.MTime > 0 {
-		expectedMtime = time.UnixMilli(push.MTime)
-	}
-	if err := s.checkFileChangedDuringDownload(path, expectedMtime, int64(len(plaintext))); err != nil {
-		return err
-	}
-
-	var mtime time.Time
-	if push.MTime > 0 {
-		mtime = time.UnixMilli(push.MTime)
-	}
-	if err := s.vault.WriteFile(path, plaintext, mtime); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-
-	contentH := sha256.Sum256(plaintext)
-	contentHash := hex.EncodeToString(contentH[:])
-	s.hashCacheMu.Lock()
-	s.hashCache[path] = hashEntry{
-		encHash:     push.Hash,
-		contentHash: contentHash,
-	}
-	s.hashCacheMu.Unlock()
-
-	s.persistServerFile(path, push, false)
-	s.persistLocalFileAfterWrite(path, contentHash)
-
-	s.logger.Info("wrote",
-		slog.String("path", path),
-		slog.Int("bytes", len(plaintext)),
-	)
-	return nil
+	return s.executeLiveDecision(ctx, decision, path, push, local, prev, s.pullDirect)
 }
 
 // pullDirect reads directly from the connection (not inboundCh). Used
@@ -1641,6 +1936,28 @@ func (s *SyncClient) touchLastMessage() {
 	s.lastMsgMu.Lock()
 	s.lastMessage = time.Now()
 	s.lastMsgMu.Unlock()
+}
+
+// persistVersionIfDirty saves the current version to bbolt if it changed
+// since the last persist. Called periodically from the event loop to
+// reduce the replay window on crash. The Obsidian app debounces version
+// persistence to 2 seconds; we do it on the heartbeat ticker (~20s).
+func (s *SyncClient) persistVersionIfDirty() {
+	if !s.versionDirty {
+		return
+	}
+	s.versionDirty = false
+	vs := state.VaultState{
+		Version: s.version,
+		Initial: s.initial,
+	}
+	if err := s.state.SetVault(s.vaultID, vs); err != nil {
+		s.logger.Warn("failed to persist version",
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	s.logger.Debug("version persisted", slog.Int64("version", s.version))
 }
 
 // checkRetryBackoff returns (waitUntil, true) if path is in backoff,

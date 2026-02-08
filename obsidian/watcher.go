@@ -138,6 +138,7 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 		w.logger.Warn("computing relative path", slog.String("error", err.Error()))
 		return
 	}
+	relPath = normalizePath(relPath)
 
 	info, err := w.vault.Stat(relPath)
 	if err != nil {
@@ -173,7 +174,17 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 	}
 
 	mtime := info.ModTime().UnixMilli()
-	if err := w.client.Push(ctx, relPath, content, mtime, 0, false, false); err != nil {
+	ctime := fileCtime(info)
+
+	// Ctime adoption: preserve the earliest known creation time.
+	// If the server has an older ctime, use that instead of the local one.
+	if sf := w.client.ServerFileState(relPath); sf != nil && sf.CTime > 0 {
+		if ctime == 0 || sf.CTime < ctime {
+			ctime = sf.CTime
+		}
+	}
+
+	if err := w.client.Push(ctx, relPath, content, mtime, ctime, false, false); err != nil {
 		w.logger.Warn("push file failed",
 			slog.String("path", relPath),
 			slog.String("error", err.Error()),
@@ -194,6 +205,7 @@ func (w *Watcher) handleDelete(ctx context.Context, absPath string) {
 		w.logger.Warn("computing relative path", slog.String("error", err.Error()))
 		return
 	}
+	relPath = normalizePath(relPath)
 
 	// Only push the delete if the server knows about this path.
 	// Local-only files that were never synced have no server entry.
@@ -282,6 +294,9 @@ func (w *Watcher) shouldIgnore(path string) bool {
 		return true
 	}
 	if strings.HasSuffix(base, "~") || strings.HasSuffix(base, ".swp") {
+		return true
+	}
+	if base == "node_modules" {
 		return true
 	}
 	// Obsidian never syncs workspace state files.
