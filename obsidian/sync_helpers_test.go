@@ -693,3 +693,58 @@ func (f fakeFileInfo) Mode() os.FileMode  { return 0644 }
 func (f fakeFileInfo) ModTime() time.Time { return f.mtime }
 func (f fakeFileInfo) IsDir() bool        { return false }
 func (f fakeFileInfo) Sys() interface{}   { return nil }
+
+// --- pull: push handled during pull ---
+
+func TestPull_PushHandledDuringPull(t *testing.T) {
+	s, _, _, _ := fullSyncClient(t)
+	s.inboundCh = make(chan inboundMsg, 8)
+	ctx := context.Background()
+
+	// Queue: push message, then actual pull response.
+	encPath := encryptPath(t, s.cipher, "pushed.md")
+	pushJSON, _ := json.Marshal(PushMessage{
+		Op:      "push",
+		UID:     999,
+		Path:    encPath,
+		Deleted: true,
+	})
+	s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: pushJSON}
+	s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"deleted":true}`)}
+
+	// pull writes the request first.
+	s.conn = &fakeWriteConn{}
+
+	content, err := s.pull(ctx, 1)
+	require.NoError(t, err)
+	assert.Nil(t, content, "deleted response should return nil")
+}
+
+// --- pull: unmarshal error ---
+
+func TestPull_UnmarshalError(t *testing.T) {
+	s, _, _, _ := fullSyncClient(t)
+	s.inboundCh = make(chan inboundMsg, 2)
+	ctx := context.Background()
+
+	// Send invalid JSON as pull response.
+	s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{bad json}`)}
+
+	s.conn = &fakeWriteConn{}
+
+	_, err := s.pull(ctx, 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decoding pull response")
+}
+
+// fakeWriteConn is a minimal wsConn that accepts writes and does nothing.
+type fakeWriteConn struct{}
+
+func (f *fakeWriteConn) Read(_ context.Context) (websocket.MessageType, []byte, error) {
+	return 0, nil, fmt.Errorf("not implemented")
+}
+func (f *fakeWriteConn) Write(_ context.Context, _ websocket.MessageType, _ []byte) error {
+	return nil
+}
+func (f *fakeWriteConn) Close(_ websocket.StatusCode, _ string) error { return nil }
+func (f *fakeWriteConn) SetReadLimit(_ int64)                         {}

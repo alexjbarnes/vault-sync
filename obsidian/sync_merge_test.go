@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -766,4 +767,314 @@ func TestHandlePushWhileBusy_BadJSON(t *testing.T) {
 
 	// Should not panic on bad JSON.
 	s.handlePushWhileBusy(ctx, []byte(`{bad json`))
+}
+
+// --- liveDownload: decrypt error ---
+
+func TestLiveDownload_DecryptContentError(t *testing.T) {
+	s, _, _, _ := fullSyncClient(t)
+	ctx := context.Background()
+
+	// Pull returns garbage that won't decrypt.
+	pull := func(_ context.Context, _ int64) ([]byte, error) {
+		return []byte{0xFF, 0xFE, 0xFD}, nil
+	}
+
+	push := PushMessage{UID: 1, Hash: "h"}
+	err := s.liveDownload(ctx, "broken.md", push, pull)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decrypting content")
+}
+
+// --- liveDownload: WriteFile error ---
+
+func TestLiveDownload_WriteFileError(t *testing.T) {
+	s, vault, _, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	encContent := encryptContent(t, cipher, []byte("data"))
+	pull := fakePull(encContent)
+
+	// Make the vault dir read-only so WriteFile fails. Create a
+	// non-existent subdirectory path to trigger an error.
+	// Use a path that requires creating a directory vault can't create.
+	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
+	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+
+	push := PushMessage{UID: 1, Hash: "h", MTime: 1000}
+	err := s.liveDownload(ctx, "sub/file.md", push, pull)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "writing")
+}
+
+// --- liveWriteContent: WriteFile error ---
+
+func TestLiveWriteContent_WriteFileError(t *testing.T) {
+	s, vault, _, _ := fullSyncClient(t)
+
+	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
+	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+
+	push := PushMessage{UID: 1, Hash: "h", MTime: 1000}
+	err := s.liveWriteContent("sub/new.md", push, []byte("data"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "writing")
+}
+
+// --- liveMergeMD: decrypt server version error ---
+
+func TestLiveMergeMD_DecryptServerError(t *testing.T) {
+	s, vault, _, _ := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("merge.md", []byte("local"), time.Time{}))
+
+	// Server pull returns garbage that won't decrypt.
+	pull := func(_ context.Context, _ int64) ([]byte, error) {
+		return []byte{0xDE, 0xAD}, nil
+	}
+
+	push := PushMessage{UID: 1, Hash: "h", MTime: 1000}
+	local := &state.LocalFile{Path: "merge.md", MTime: 500, Hash: "lh"}
+
+	err := s.liveMergeMD(ctx, "merge.md", push, local, nil, pull)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decrypting server version")
+}
+
+// --- liveMergeMD: decrypt base error, falls back to download ---
+
+func TestLiveMergeMD_DecryptBaseError_FallsBack(t *testing.T) {
+	s, vault, _, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("base-err.md", []byte("local"), time.Time{}))
+
+	serverContent := encryptContent(t, cipher, []byte("server"))
+	callCount := 0
+	pull := func(_ context.Context, uid int64) ([]byte, error) {
+		callCount++
+		if callCount == 1 {
+			// Base pull: return garbage that won't decrypt.
+			return []byte{0xBA, 0xD0}, nil
+		}
+		// Fallback download pull: return server content.
+		return serverContent, nil
+	}
+
+	push := PushMessage{UID: 2, Hash: "h", MTime: 2000}
+	local := &state.LocalFile{Path: "base-err.md", MTime: 500, Hash: "lh"}
+	prev := &state.ServerFile{Path: "base-err.md", UID: 1}
+
+	err := s.liveMergeMD(ctx, "base-err.md", push, local, prev, pull)
+	require.NoError(t, err)
+
+	// Should have fallen back to liveDownload.
+	got, err := vault.ReadFile("base-err.md")
+	require.NoError(t, err)
+	assert.Equal(t, "server", string(got))
+}
+
+// --- liveMergeJSON: decrypt server error ---
+
+func TestLiveMergeJSON_DecryptServerError(t *testing.T) {
+	s, vault, _, _ := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("app.json", []byte(`{"key":"val"}`), time.Time{}))
+
+	// Server pull returns garbage that won't decrypt.
+	pull := func(_ context.Context, _ int64) ([]byte, error) {
+		return []byte{0xDE, 0xAD}, nil
+	}
+
+	push := PushMessage{UID: 1, Hash: "h"}
+	err := s.liveMergeJSON(ctx, "app.json", push, pull)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decrypting server config")
+}
+
+// --- liveTypeConflict: local is file, push is deleted ---
+
+func TestLiveTypeConflict_LocalFile_PushDeleted(t *testing.T) {
+	s, vault, _, _ := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("conflict.md", []byte("local"), time.Time{}))
+
+	push := PushMessage{UID: 1, Deleted: true}
+	local := &state.LocalFile{Path: "conflict.md", Folder: false}
+
+	err := s.liveTypeConflict(ctx, "conflict.md", push, local, nil)
+	require.NoError(t, err)
+
+	// Conflict copy should exist.
+	content, err := vault.ReadFile("conflict (Conflicted copy).md")
+	require.NoError(t, err)
+	assert.Equal(t, "local", string(content))
+}
+
+// --- liveTypeConflict: local is file, ReadFile error ---
+
+func TestLiveTypeConflict_LocalFile_ReadFileError(t *testing.T) {
+	s, _, _, _ := fullSyncClient(t)
+	ctx := context.Background()
+
+	// File doesn't exist so ReadFile will fail.
+	push := PushMessage{UID: 1}
+	local := &state.LocalFile{Path: "nosuch.md", Folder: false}
+
+	err := s.liveTypeConflict(ctx, "nosuch.md", push, local, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reading local file for conflict copy")
+}
+
+// --- liveTypeConflict: local is file, WriteFile conflict copy error ---
+
+func TestLiveTypeConflict_LocalFile_WriteConflictCopyError(t *testing.T) {
+	s, vault, _, _ := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("wc.md", []byte("data"), time.Time{}))
+
+	// Make vault read-only so WriteFile for conflict copy fails.
+	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
+	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+
+	push := PushMessage{UID: 1}
+	local := &state.LocalFile{Path: "wc.md", Folder: false}
+
+	err := s.liveTypeConflict(ctx, "wc.md", push, local, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "writing conflict copy")
+}
+
+// --- liveDownload: MkdirAll error ---
+
+func TestLiveDownload_MkdirAllError(t *testing.T) {
+	s, vault, _, _ := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
+	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+
+	push := PushMessage{UID: 1, Folder: true}
+	err := s.liveDownload(ctx, "newdir", push, nil)
+	require.Error(t, err)
+}
+
+// --- liveMergeMD: ReadFile error ---
+
+func TestLiveMergeMD_ReadFileError(t *testing.T) {
+	s, _, _, _ := fullSyncClient(t)
+	ctx := context.Background()
+
+	// File doesn't exist, so ReadFile fails.
+	push := PushMessage{UID: 1, Hash: "h"}
+	local := &state.LocalFile{Path: "nosuch.md", Hash: "lh"}
+
+	err := s.liveMergeMD(ctx, "nosuch.md", push, local, nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reading local file for merge")
+}
+
+// --- liveMergeMD: server returns empty text ---
+
+func TestLiveMergeMD_EmptyServerText(t *testing.T) {
+	s, vault, _, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("em.md", []byte("local text"), time.Time{}))
+
+	// Server returns encrypted empty bytes, so serverText = "".
+	encEmpty := encryptContent(t, cipher, []byte{})
+	pull := fakePull(encEmpty)
+
+	push := PushMessage{UID: 1, Hash: "h", MTime: 5000}
+	local := &state.LocalFile{Path: "em.md", MTime: 1000, Hash: "lh"}
+
+	err := s.liveMergeMD(ctx, "em.md", push, local, nil, pull)
+	require.NoError(t, err)
+
+	// Empty server text: keep local.
+	got, err := vault.ReadFile("em.md")
+	require.NoError(t, err)
+	assert.Equal(t, "local text", string(got))
+}
+
+// --- liveMergeMD: no base, recent ctime, server wins ---
+
+func TestLiveMergeMD_RecentCtime_ServerWins(t *testing.T) {
+	s, vault, _, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("recent.md", []byte("local"), time.Time{}))
+
+	serverText := "server wins"
+	encServer := encryptContent(t, cipher, []byte(serverText))
+	pull := fakePull(encServer)
+
+	push := PushMessage{UID: 1, Hash: "h", MTime: 5000}
+	// CTime within 3 minutes of now.
+	local := &state.LocalFile{
+		Path:  "recent.md",
+		MTime: 1000,
+		CTime: time.Now().UnixMilli() - 60_000, // 1 minute ago
+		Hash:  "lh",
+	}
+
+	err := s.liveMergeMD(ctx, "recent.md", push, local, nil, pull)
+	require.NoError(t, err)
+
+	got, err := vault.ReadFile("recent.md")
+	require.NoError(t, err)
+	assert.Equal(t, serverText, string(got))
+}
+
+// --- resolveLocalState: GetLocalFile bbolt error ---
+
+func TestResolveLocalState_GetLocalFileError(t *testing.T) {
+	s, vault, appState, _ := fullSyncClient(t)
+
+	require.NoError(t, vault.WriteFile("dbfail.md", []byte("data"), time.Time{}))
+	appState.Close()
+
+	// GetLocalFile fails, but resolveLocalState still proceeds with
+	// persisted == nil. Should return a valid LocalFile from re-hash.
+	lf, enc := s.resolveLocalState("dbfail.md")
+	require.NotNil(t, lf)
+	assert.NotEmpty(t, lf.Hash, "should have computed hash from disk")
+	assert.NotEmpty(t, enc, "should have encrypted hash")
+}
+
+// --- checkRetryBackoff: delay cap at 5 minutes ---
+
+func TestRetryBackoff_DelayCap(t *testing.T) {
+	s, _, _, _ := fullSyncClient(t)
+
+	// Record many failures to exceed 5-minute cap.
+	// 5s * 2^7 = 640s > 5min, so count=7 should hit the cap.
+	for i := 0; i < 8; i++ {
+		s.recordRetryBackoff("capped.md")
+	}
+
+	_, inBackoff := s.checkRetryBackoff("capped.md")
+	assert.True(t, inBackoff)
+}
+
+// --- checkRetryBackoff: backoff expired ---
+
+func TestRetryBackoff_Expired(t *testing.T) {
+	s, _, _, _ := fullSyncClient(t)
+
+	// Record a failure, then manually set lastFailure to the past.
+	s.recordRetryBackoff("expired.md")
+	s.retryBackoffMu.Lock()
+	entry := s.retryBackoff["expired.md"]
+	entry.lastFailure = time.Now().Add(-1 * time.Hour)
+	s.retryBackoff["expired.md"] = entry
+	s.retryBackoffMu.Unlock()
+
+	_, inBackoff := s.checkRetryBackoff("expired.md")
+	assert.False(t, inBackoff, "should have expired")
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -1450,6 +1451,375 @@ func TestProcessOneServerPush_SkipsDeletedNoLocal(t *testing.T) {
 	sf, err := appState.GetServerFile(testSyncVaultID, "gone.md")
 	require.NoError(t, err)
 	assert.Nil(t, sf)
+}
+
+// --- handleTypeConflict: local file, ReadFile error ---
+
+func TestHandleTypeConflict_LocalFile_ReadError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// File doesn't exist on disk, so ReadFile will fail.
+	push := PushMessage{UID: 400, Hash: "h", Folder: true}
+	local := state.LocalFile{Path: "nosuch.md", Folder: false}
+
+	err := r.handleTypeConflict(ctx, "nosuch.md", push, local)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reading local file for conflict copy")
+}
+
+// --- handleTypeConflict: local file, push.Deleted ---
+
+func TestHandleTypeConflict_LocalFile_PushDeleted(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("del-conflict.md", []byte("local data"), time.Time{}))
+
+	push := PushMessage{UID: 401, Hash: "h", Deleted: true}
+	local := state.LocalFile{Path: "del-conflict.md", Folder: false}
+
+	err := r.handleTypeConflict(ctx, "del-conflict.md", push, local)
+	require.NoError(t, err)
+
+	// Conflict copy should exist.
+	content, err := vault.ReadFile("del-conflict (Conflicted copy).md")
+	require.NoError(t, err)
+	assert.Equal(t, "local data", string(content))
+}
+
+// --- writeServerContent: WriteFile error ---
+
+func TestWriteServerContent_WriteFileError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, _, _ := fullReconciler(t, ctrl)
+
+	// Make vault read-only to cause WriteFile to fail.
+	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
+	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+
+	push := PushMessage{UID: 500, Hash: "h", MTime: 1000}
+	err := r.writeServerContent("sub/fail.md", push, []byte("data"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "writing")
+}
+
+// --- threeWayMerge: server decrypt error ---
+
+func TestThreeWayMerge_DecryptServerVersionError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, _, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("srvdec.md", []byte("local"), time.Time{}))
+
+	// No base (hasPrev=false). Server pull returns garbage.
+	badContent := []byte{0xBA, 0xD0, 0xBA, 0xD0}
+	mockPullDirect(mock, badContent)
+
+	push := PushMessage{UID: 600, Hash: "h", MTime: 3000}
+	local := state.LocalFile{Path: "srvdec.md", MTime: 1000, Hash: "lh"}
+
+	err := r.threeWayMerge(ctx, "srvdec.md", push, local, state.ServerFile{}, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decrypting server version")
+}
+
+// --- jsonMerge: decrypt server config error ---
+
+func TestJSONMerge_DecryptServerConfigError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, _, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("app.json", []byte(`{"key":"val"}`), time.Time{}))
+
+	// Server pull returns garbage that fails to decrypt.
+	badContent := []byte{0xDE, 0xAD}
+	mockPullDirect(mock, badContent)
+
+	push := PushMessage{UID: 700, Hash: "h"}
+	err := r.jsonMerge(ctx, "app.json", push)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decrypting server config")
+}
+
+// --- downloadServerFile: pull error ---
+
+func TestDownloadServerFile_PullError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, _, _, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Pull fails.
+	gomock.InOrder(
+		mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil),
+		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageType(0), nil, fmt.Errorf("pull failed")),
+	)
+
+	push := PushMessage{UID: 800, Hash: "h"}
+	err := r.downloadServerFile(ctx, "broken.md", push)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pulling")
+}
+
+// --- downloadServerFile: folder MkdirAll error ---
+
+func TestDownloadServerFile_FolderMkdirError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
+	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+
+	push := PushMessage{UID: 900, Folder: true}
+	err := r.downloadServerFile(ctx, "newdir", push)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "creating folder")
+}
+
+// --- downloadServerFile: empty content writes zero-byte file ---
+
+func TestDownloadServerFile_EmptyContentFile(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, cipher, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Encrypt empty content.
+	encEmpty := encryptContent(t, cipher, []byte{})
+	mockPullDirect(mock, encEmpty)
+
+	push := PushMessage{UID: 1000, Hash: "h", MTime: 5000}
+	err := r.downloadServerFile(ctx, "empty.md", push)
+	require.NoError(t, err)
+
+	content, err := vault.ReadFile("empty.md")
+	require.NoError(t, err)
+	assert.Empty(t, content)
+}
+
+// --- threeWayMerge: ReadFile error ---
+
+func TestThreeWayMerge_ReadFileError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// File doesn't exist, ReadFile fails.
+	push := PushMessage{UID: 700, Hash: "h"}
+	local := state.LocalFile{Path: "nosuch.md", Hash: "lh"}
+
+	err := r.threeWayMerge(ctx, "nosuch.md", push, local, state.ServerFile{}, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reading local file for merge")
+}
+
+// --- threeWayMerge: no base, recent ctime, server wins ---
+
+func TestThreeWayMerge_RecentCtime_ServerWins(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, cipher, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("recent.md", []byte("local"), time.Time{}))
+
+	serverText := "server wins"
+	encServer := encryptContent(t, cipher, []byte(serverText))
+	// No base (hasPrev=false). Server pull returns valid content.
+	mockPullDirect(mock, encServer)
+
+	push := PushMessage{UID: 701, Hash: "h", MTime: 5000}
+	// CTime within 3 minutes of now.
+	local := state.LocalFile{
+		Path:  "recent.md",
+		MTime: 1000,
+		CTime: time.Now().UnixMilli() - 60_000,
+		Hash:  "lh",
+	}
+
+	err := r.threeWayMerge(ctx, "recent.md", push, local, state.ServerFile{}, false)
+	require.NoError(t, err)
+
+	got, err := vault.ReadFile("recent.md")
+	require.NoError(t, err)
+	assert.Equal(t, serverText, string(got))
+}
+
+// --- jsonMerge: ReadFile error ---
+
+func TestJSONMerge_ReadFileError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, _, cipher, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// File doesn't exist. jsonMerge falls back to downloadServerFile.
+	encContent := encryptContent(t, cipher, []byte(`{"server":"data"}`))
+	mockPullDirect(mock, encContent)
+
+	push := PushMessage{UID: 800, Hash: "h"}
+	err := r.jsonMerge(ctx, "nosuch.json", push)
+	require.NoError(t, err)
+
+	got, err := r.vault.ReadFile("nosuch.json")
+	require.NoError(t, err)
+	assert.Contains(t, string(got), "server")
+}
+
+// --- jsonMerge: pull error ---
+
+func TestJSONMerge_PullError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, _, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("app.json", []byte(`{"key":"val"}`), time.Time{}))
+
+	// Pull fails.
+	gomock.InOrder(
+		mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil),
+		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageType(0), nil, fmt.Errorf("pull error")),
+	)
+
+	push := PushMessage{UID: 801, Hash: "h"}
+	err := r.jsonMerge(ctx, "app.json", push)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pulling server config")
+}
+
+// --- handleTypeConflict: folder rename error ---
+
+func TestHandleTypeConflict_FolderRenameError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, cipher, mock := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Create a folder that should be renamed. Make vault read-only so
+	// Rename fails, but the function logs and continues to downloadServerFile.
+	require.NoError(t, vault.MkdirAll("myfolder"))
+
+	serverText := "server file"
+	encServer := encryptContent(t, cipher, []byte(serverText))
+	mockPullDirect(mock, encServer)
+
+	// Make vault read-only so Rename fails.
+	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
+	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+
+	push := PushMessage{UID: 900, Hash: "h", MTime: 1000}
+	local := state.LocalFile{Path: "myfolder", Folder: true}
+
+	// Rename fails (logged), then downloadServerFile tries to write
+	// which also fails because vault is read-only. So we get an error
+	// from the write step, not the rename.
+	err := r.handleTypeConflict(ctx, "myfolder", push, local)
+	require.Error(t, err)
+}
+
+// --- handleTypeConflict: WriteFile conflict copy error ---
+
+func TestHandleTypeConflict_WriteConflictCopyError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	require.NoError(t, vault.WriteFile("wce.md", []byte("local"), time.Time{}))
+
+	// Make vault read-only so WriteFile for conflict copy fails.
+	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
+	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+
+	push := PushMessage{UID: 901}
+	local := state.LocalFile{Path: "wce.md", Folder: false}
+
+	err := r.handleTypeConflict(ctx, "wce.md", push, local)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "writing conflict copy")
+}
+
+// --- uploadLocalChanges: folder push error ---
+
+func TestUploadLocalChanges_FolderPushError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, _, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Fake event loop that returns errors.
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	go func() {
+		for {
+			select {
+			case op := <-s.opCh:
+				op.result <- fmt.Errorf("push failed")
+			case <-loopCtx.Done():
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { loopCancel() })
+
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{
+			"newdir": {Path: "newdir", Folder: true},
+		},
+		Changed: []string{"newdir"},
+	}
+
+	// Folder push fails, logged but continues.
+	err := r.uploadLocalChanges(ctx, scan, map[string]state.ServerFile{})
+	require.NoError(t, err) // errors are logged, not returned
+}
+
+// --- uploadLocalChanges: file push error ---
+
+func TestUploadLocalChanges_FilePushError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, vault, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	content := []byte("file data")
+	require.NoError(t, vault.WriteFile("fail.md", content, time.Time{}))
+
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	go func() {
+		for {
+			select {
+			case op := <-s.opCh:
+				op.result <- fmt.Errorf("push failed")
+			case <-loopCtx.Done():
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { loopCancel() })
+
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{
+			"fail.md": {Path: "fail.md", Hash: "h", Size: int64(len(content))},
+		},
+		Changed: []string{"fail.md"},
+	}
+
+	err := r.uploadLocalChanges(ctx, scan, map[string]state.ServerFile{})
+	require.NoError(t, err) // errors are logged, not returned
+}
+
+// --- uploadLocalChanges: changed path not in Current ---
+
+func TestUploadLocalChanges_ChangedPathNotInCurrent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, _, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{},
+		Changed: []string{"vanished.md"}, // not in Current
+	}
+
+	err := r.uploadLocalChanges(ctx, scan, map[string]state.ServerFile{})
+	require.NoError(t, err) // skipped silently
 }
 
 // mustJSON marshals v to JSON bytes, panicking on error.

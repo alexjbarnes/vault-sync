@@ -1000,3 +1000,15 @@ func TestWaitForReady_DecryptPushError_Skipped(t *testing.T) {
 	// Version should still be updated from the push.
 	assert.Equal(t, int64(10), sc.version)
 }
+
+// --- readInbound: timeout (synctest) ---
+
+func TestReadInbound_Timeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sc := newTestSyncClient(t, nil)
+		sc.inboundCh = make(chan inboundMsg) // unbuffered, will block
+
+		_, err := sc.readInbound(t.Context())
+		assert.ErrorIs(t, err, errResponseTimeout)
+	})
+}

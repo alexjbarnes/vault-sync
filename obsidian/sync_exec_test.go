@@ -850,6 +850,89 @@ func TestPersistVersionIfDirty_SetVaultError(t *testing.T) {
 	assert.False(t, s.versionDirty)
 }
 
+// --- persist* bbolt error branches ---
+// These functions only log errors (no return), so we close the DB to trigger
+// errors and verify the functions don't panic.
+
+func TestPersistServerFile_SetError(t *testing.T) {
+	s, _, appState, _ := fullSyncClient(t)
+	appState.Close()
+
+	// Should log warning but not panic.
+	push := PushMessage{Hash: "h", UID: 1}
+	s.persistServerFile("test.md", push, false)
+}
+
+func TestPersistServerFile_DeleteError(t *testing.T) {
+	s, _, appState, _ := fullSyncClient(t)
+	appState.Close()
+
+	// Deleted path: calls DeleteServerFile which will fail.
+	push := PushMessage{Hash: "h", UID: 1}
+	s.persistServerFile("test.md", push, true)
+}
+
+func TestPersistLocalFileAfterWrite_SetLocalFileError(t *testing.T) {
+	s, vault, appState, _ := fullSyncClient(t)
+	// Write a real file so Stat succeeds.
+	require.NoError(t, vault.WriteFile("written.md", []byte("data"), time.Time{}))
+	appState.Close()
+
+	// Stat succeeds but SetLocalFile fails. Should log, not panic.
+	s.persistLocalFileAfterWrite("written.md", "hash")
+}
+
+func TestPersistLocalFolder_SetLocalFileError(t *testing.T) {
+	s, _, appState, _ := fullSyncClient(t)
+	appState.Close()
+
+	// Should log warning but not panic.
+	s.persistLocalFolder("folder")
+}
+
+func TestPersistPushedFolder_SetLocalFileError(t *testing.T) {
+	s, _, appState, _ := fullSyncClient(t)
+	appState.Close()
+
+	// Both SetLocalFile and SetServerFile will fail. Neither should panic.
+	s.persistPushedFolder("folder")
+}
+
+func TestPersistPushedDelete_DeleteServerFileError(t *testing.T) {
+	s, _, appState, _ := fullSyncClient(t)
+	appState.Close()
+
+	// DeleteServerFile and DeleteLocalFile will both fail. No panic.
+	s.persistPushedDelete("gone.md")
+}
+
+func TestDeleteLocalState_Error(t *testing.T) {
+	s, _, appState, _ := fullSyncClient(t)
+	appState.Close()
+
+	// Should log warning but not panic.
+	s.deleteLocalState("gone.md")
+}
+
+func TestServerFileState_Error(t *testing.T) {
+	s, _, appState, _ := fullSyncClient(t)
+	appState.Close()
+
+	// GetServerFile fails, should return nil and log.
+	sf := s.ServerFileState("test.md")
+	assert.Nil(t, sf)
+}
+
+func TestPersistPushedFile_SetLocalFileError(t *testing.T) {
+	s, vault, appState, _ := fullSyncClient(t)
+	// Write a real file so Stat succeeds.
+	require.NoError(t, vault.WriteFile("pushed.md", []byte("content"), time.Time{}))
+	appState.Close()
+
+	// Stat succeeds, SetLocalFile fails. Should log, not panic.
+	s.persistPushedFile("pushed.md", []byte("content"), "enchash", 1000, 500)
+}
+
 // --- Connected ---
 
 func TestConnected_FalseByDefault(t *testing.T) {

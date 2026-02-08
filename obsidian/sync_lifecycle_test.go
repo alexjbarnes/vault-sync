@@ -108,6 +108,21 @@ func TestPush_ContextCancelledBeforeSend(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestPush_ContextCancelledWhileWaitingForResult(t *testing.T) {
+	s, _, _, _ := fullSyncClient(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Drain opCh but never send a result back. Cancel ctx after the op
+	// is sent to test the result-wait cancellation path.
+	go func() {
+		<-s.opCh // consume the op, don't reply
+		cancel()
+	}()
+
+	err := s.Push(ctx, "test.md", nil, 0, 0, false, false)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
 // --- startReader ---
 
 func TestStartReader_FeedsInboundCh(t *testing.T) {
