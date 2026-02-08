@@ -20,15 +20,19 @@ WebSocket (wss://sync-{N}.obsidian.md)  →  Real-time file sync
 Base URL: `https://api.obsidian.md`
 All requests: `POST` with `Content-Type: application/json`
 
-All requests require `Origin: app://obsidian.md` header. Without it, the API rejects requests with a misleading "invalid credentials" error rather than a proper 403. The API also returns errors as HTTP 200 with an `error` field in the JSON body, not as HTTP error status codes.
+The Obsidian app does NOT set an `Origin` header on REST API calls. The app uses plain `fetch()` with only `Content-Type: application/json`. The `Origin: app://obsidian.md` header is only set on WebSocket connections (automatically by the Electron shell). The API returns errors as HTTP 200 with an `error` field in the JSON body, not as HTTP error status codes.
 
 ### Authentication
 
 ```
 POST /user/signin
-Body: {"email": "...", "password": "..."}
+Body: {"email": "...", "password": "...", "mfa": "..."}
 Response: {"token": "...", "email": "...", "name": "...", "license": "..."}
 ```
+
+The `mfa` field is a 6-digit TOTP code for users with two-factor authentication enabled. If the user has 2FA enabled and the `mfa` field is empty or missing, the server returns an error containing "2FA code". The app detects this and prompts for the code.
+
+**Note for headless clients**: a daemon cannot prompt for TOTP codes interactively. Users with 2FA enabled must either disable it or obtain a session token through other means (browser, curl).
 
 The token from signin works for `/vault/list`, `/user/info`, and WebSocket `init`. It does NOT work with `/user/authtoken` (that endpoint expects a different kind of long-lived token used internally by the Obsidian app).
 
@@ -47,24 +51,34 @@ Body: {"token": "..."}
 
 | Endpoint | Purpose | Params |
 |----------|---------|--------|
-| `/user/signin` | Sign in with email/password | `{email, password}` |
+| `/user/signup` | Create account | `{email, password, name, next}` |
+| `/user/signin` | Sign in with email/password | `{email, password, mfa}` |
+| `/user/resendconfirmation` | Resend confirmation email | `{email, next}` |
 | `/user/info` | Get account info | `{token}` |
 | `/user/signout` | Invalidate token | `{token}` |
 | `/user/authtoken` | Rotate long-lived token (app internal) | `{token}` |
 | `/vault/list` | List user's vaults | `{token, supported_encryption_version: 3}` |
 | `/vault/create` | Create vault | `{token, name, keyhash, salt, region, encryption_version}` |
+| `/vault/access` | Access shared vault / validate password | `{token, vault_uid, keyhash, host, encryption_version}` |
+| `/vault/migrate` | Migrate vault encryption | `{token, vault_uid, keyhash, salt, region, encryption_version}` |
 | `/vault/regions` | List available regions | `{token, host}` |
 | `/vault/delete` | Delete vault | `{token, vault_uid}` |
 | `/vault/rename` | Rename vault | `{token, vault_uid, name}` |
-| `/vault/share/invite` | Share vault | `{token, vault_uid, ...}` |
+| `/vault/share/invite` | Share vault | `{token, vault_uid, email}` |
 | `/vault/share/list` | List shares | `{token, vault_uid}` |
 | `/vault/share/remove` | Remove share | `{token, vault_uid, share_uid}` |
+| `/subscription/list` | List subscriptions | `{token}` |
+| `/subscription/business` | Business subscription | `{key}` |
 
 ### Token Behavior
 
 Tokens from `/user/signin` persist across requests and survive process restarts. They can be cached and reused. The simplest way to validate a cached token is to call `/vault/list` with it. If it returns data, the token is valid. If it returns an error, sign in again.
 
 The `/user/authtoken` endpoint rotates tokens: it returns a new token and invalidates the old one. The Obsidian app uses this to refresh its stored token on startup. Tokens from `/user/signin` are not compatible with this endpoint.
+
+The Obsidian app's signout handler swallows "Not logged in" errors silently and then clears the stored token, email, name, and license fields regardless.
+
+The app checks `/subscription/list` before connecting to a vault. If the response lacks `sync: true`, the connection is blocked with "Require subscription to connect".
 
 ### Vault List Response
 
@@ -84,7 +98,9 @@ key      = scrypt(password, salt, N=32768, r=8, p=1, dkLen=32)
 
 Parameters: `N=32768 (2^15)`, `r=8`, `p=1`, `maxmem=67108864`, output = 32 bytes.
 
-The key is stored locally as base64.
+**NFKC normalization is mandatory.** Both password and salt are normalized to Unicode NFKC form before being passed to scrypt. Without this, non-ASCII characters in the password or salt (which is typically the user's email) produce a different derived key. In Go, use `golang.org/x/text/unicode/norm` with `norm.NFKC.String()`.
+
+The key is stored locally as base64. The app validates `key.byteLength === 32` before proceeding and throws "Invalid encryption key" on mismatch.
 
 ### Step 2: Key → Encryption Provider
 
@@ -184,6 +200,15 @@ open(data):
 ```
 
 The S2V (String-to-Vector) uses CMAC (AES-CBC-MAC with subkey derivation, block size 16).
+
+### Empty Content Handling
+
+The push and pull paths skip encryption/decryption for zero-length content:
+
+- **Push**: if `content.byteLength === 0`, send zero binary bytes. Do not call `encrypt()`. Calling `encrypt()` on empty input produces 28 bytes (12 IV + 16 GCM tag), which differs from the expected 0-byte wire format.
+- **Pull**: if `encryptedContent.byteLength === 0`, skip `decrypt()` and use empty content directly.
+
+This means empty files are transmitted as zero bytes on the wire with no encryption envelope.
 
 ### File Hash
 
@@ -415,13 +440,14 @@ During initial sync, the server does NOT replay the full version history. It sen
 **Client behavior (Obsidian app):**
 
 During initial sync (`initial: true`):
-- Deleted pushes are dropped (safety net, since the server already excludes them)
-- Each file record is tagged with `initial: true` internally
-- Conflict resolution uses simple timestamp comparison (server wins if mtime is newer)
-- Three-way merge is skipped for .md files
+- Deleted pushes are dropped entirely: `if (this.initial && e.deleted) return`
+- Each server file record is tagged with `initial: true` internally
+- When both sides have changed a file (step 9 in the reconciliation tree), the decision is: if the server record has `initial: true` AND server mtime is newer than local mtime, server wins via `syncFileDown`. Otherwise, local wins (no upload needed, just accept server record).
+- Three-way merge is NOT attempted. The `initial` tag on the record causes step 9 to fire before the merge logic in step 10.
+- No conflict copies are created.
 
 During incremental sync (`initial: false`):
-- Deleted pushes are processed normally (local files get deleted)
+- Deleted pushes are processed normally (local files get deleted if clean)
 - .md files with conflicting hashes go through three-way merge using the common ancestor
 - The common ancestor is fetched via `pull` using the previous known server version uid
 
@@ -501,8 +527,9 @@ The `serverFiles` dictionary (keyed by path) tracks server state:
 
 `create` and `modify` share the same handler (`onFileAdd`):
 - Creates entry in `localFiles` if missing.
-- For files: updates mtime, ctime, size. Clears `hash` to `""` if mtime or size changed (forcing recomputation at sync time).
+- For files: updates mtime, ctime, size. Timestamps are rounded up via `Math.ceil()` to handle fractional milliseconds from the OS. Clears `hash` to `""` only if mtime or size actually changed (forcing recomputation at sync time). If mtime and size are unchanged, the existing hash is preserved.
 - For folders: sets `folder=true`, zeroes file-specific fields.
+- Does NOT call `setDirty()` (no persistence triggered, only in-memory update).
 - Calls `requestSync()`.
 
 `delete` (`onFileRemove`):
@@ -545,7 +572,7 @@ Two paths to compute hashes:
 **File type categories** (user-toggleable via `allowTypes` set):
 - `image`: bmp, png, jpg, jpeg, gif, svg, webp, avif
 - `audio`: mp3, wav, m4a, 3gp, flac, ogg, oga, opus
-- `video`: mp4, webm, ogv, mov, mkv
+- `video`: mp4, ogv, mov, mkv (note: `webm` syncs if either `audio` or `video` is enabled)
 - `pdf`: pdf
 - `unsupported`: everything else
 
@@ -564,6 +591,49 @@ Defaults enabled: image, audio, pdf, video. The `unsupported` category requires 
 Defaults enabled: app, appearance, appearance-data, hotkey, core-plugin, core-plugin-data. Community plugin sync is opt-in.
 
 Filter results are cached per-path in `filterCache`. Cache is invalidated when filters change.
+
+### Path Normalization
+
+All file paths go through `normalizePath()` before use:
+
+```
+normalizePath(path):
+  path = replaceNonBreakingSpaces(path)   // \u00A0 and \u202F -> regular space
+  path = cleanSlashes(path)               // collapse multiple /, trim leading/trailing /
+  path = path.normalize("NFC")            // Unicode NFC normalization
+  return path
+```
+
+NFC normalization matters on macOS, which stores filenames in NFD form by default. A file named `Resume.md` (with accented e) would be stored as NFD on macOS but compared as NFC by Obsidian. Without normalization, the same file could appear as two different paths across platforms.
+
+Non-breaking space replacement prevents invisible characters in filenames from causing sync mismatches.
+
+### Filename Validation
+
+The app validates filenames before syncing:
+
+- **Windows**: rejects filenames ending with `.` or ` ` (space), and reserved names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`).
+- **All platforms**: rejects filenames containing platform-specific forbidden characters (`\\/:"` on Unix, `*"\\/<>:|?` on Windows).
+- **Android**: rejects filenames containing `*?<>"` with a user-visible notice.
+
+Invalid filenames from the server are silently skipped during download. The file is not created and no error is thrown.
+
+### Extension Extraction
+
+Extensions are extracted from the **basename** (not the full path), lowercased:
+
+```
+basename = path after last "/"
+extension = basename after last ".", lowercased
+```
+
+Edge cases:
+- No dot in basename: empty extension
+- Dot at position 0 of basename (dotfile like `.gitignore`): empty extension
+- Dot at end of basename (`file.`): empty extension
+- Folder push: always empty extension
+
+Extracting from the full path instead of the basename is a bug. A path like `folder.with.dots/file` would incorrectly yield `"with.dots/file"` as the extension.
 
 ### Per-File Upload Cooldown
 
@@ -601,7 +671,15 @@ Fields saved to IndexedDB via `saveData()`:
 
 **Hostname validation**: only `*.obsidian.md` and `127.0.0.1` are allowed. The native `WebSocket` constructor and `URL.prototype.hostname` getter are captured at module scope to prevent prototype pollution.
 
-**Auth phase**: On `onopen`, start 20s heartbeat timer and send `{op: "init", ...}`. A temporary `onmessage` handler waits for `{res: "ok"}` or `{res: "err"}`. On success, swap to the permanent `onMessage` handler.
+**Auth phase**: On `onopen`, start 20s heartbeat timer and send `{op: "init", ...}`. A temporary `onmessage` handler processes the response:
+1. Binary frame during auth: reject with "Server returned binary".
+2. JSON parse failure: reject with "Server JSON failed to parse".
+3. If `msg.op === "pong"`: silently ignore (pong can arrive during auth if heartbeat fires before the server responds).
+4. If `msg.status === "err"` or `msg.res === "err"`: reject with `"Failed to authenticate: " + msg.msg`. The error message in `msg.msg` may contain "Your subscription to Obsidian Sync has expired" or "Vault not found".
+5. If `msg.res !== "ok"`: reject with "Did not respond to login request".
+6. If `msg.perFileMax` is present: validate it is a non-negative integer, store it.
+7. If `msg.userId` is present: store it.
+8. On success, swap to the permanent `onMessage` handler.
 
 **Permanent `onMessage` routing**:
 1. Update `lastMessageTs` on every message.
@@ -612,10 +690,11 @@ Fields saved to IndexedDB via `saveData()`:
 6. Everything else -> resolves the pending `responsePromise`.
 7. Binary frames -> resolve the pending `dataPromise`.
 
-**request() vs response()**:
-- `request(msg, timeout=60s)`: sends JSON, creates deferred, starts timeout. Disconnects on timeout. Checks `resp.err` and throws if non-empty.
-- `response()`: creates deferred only, no send, no timeout. Used for per-chunk acks during push.
-- Both share the same `responsePromise` slot, resolved by `onMessage`.
+**request() vs response() vs dataResponse()**:
+- `request(msg, timeout=60s)`: sends JSON, creates deferred for `responsePromise`, starts 60-second timeout. On timeout, disconnects the entire WebSocket. After response, checks `resp.err` and throws if non-empty. Used for push metadata, pull requests, and all other outbound operations.
+- `response()`: creates deferred for `responsePromise` only, no send, no timeout. Used for per-chunk acks during push. Could hang forever if the server dies mid-upload.
+- `dataResponse()`: creates deferred for `dataPromise` only, no send, no timeout. Used to receive binary frames during pull. Resolved by `onMessage` when a binary frame arrives.
+- `responsePromise` and `dataPromise` are two separate slots. Text frames resolve `responsePromise`, binary frames resolve `dataPromise`. They never mix.
 
 **Two independent serial queues**:
 - `queue` (SerialQueue): serializes all outbound operations (push, pull, history, etc.)
@@ -626,13 +705,21 @@ Fields saved to IndexedDB via `saveData()`:
 ### Connection Backoff
 
 Connection-level exponential backoff (`Y1` class):
-- Base: 5 seconds
-- Factor: 2x per failure
-- Jitter: 50%-100% of computed value
-- Cap: 5 minutes
-- Reset to 0 on success
+- Constructor: `Y1(min=0, max=300000, base=5000, jitter=true)`
+- On first attempt (count=0): delay = 0 (immediate)
+- On failure: `count++`, delay = `base * 2^(count-1)` with jitter (50%-100% of computed value), clamped to max
+- On success: `count = 0`, next attempt is immediate
+- Formula: `Math.floor(Math.min(max, min + base * Math.pow(2, count-1) * (0.5 + 0.5 * Math.random())))`
+- Sequence on failures: 0ms, ~5s, ~10s, ~20s, ~40s, ~80s, ~160s, 300s (cap)
 
 The client never gives up. The 30-second `setInterval` timer keeps calling `requestSync()`, which checks `backoff.isReady()`. As long as the plugin is enabled, reconnection attempts continue indefinitely.
+
+### Connection Error Handling
+
+Specific error messages during auth trigger different behaviors:
+- `"Your subscription to Obsidian Sync has expired"`: show notice to user, disconnect with backoff. Does NOT unsetup (vault state preserved).
+- `"Vault not found"`: show notice, call `unsetup()` which clears all vault state (version=0, initial=true, empty localFiles/serverFiles/newServerFiles) and disconnects.
+- All other errors: `backoff.fail()`, set `error = true`, disconnect.
 
 ### The Sync Loop (`requestSync` + `_sync`)
 
@@ -665,9 +752,9 @@ For each entry, in order:
 6. Hashes match: no-op.
 7. Local is clean (hash matches previous server record): server wins. Delete or download.
 8. Type conflict (file vs folder): rename local to `(Conflicted copy)`, return `true` to re-enter.
-9. Initial sync with newer server mtime: server wins.
-10. Both changed, `.md` file: three-way merge (see Merge Strategy section).
-11. Both changed, `.json` in `.obsidian/`: shallow JSON merge.
+9. Initial sync (`record.initial === true`) with newer server mtime (`server.mtime > local.mtime`): server wins via `syncFileDown`. This fires BEFORE the merge logic, so three-way merge is never attempted during initial sync.
+10. Both changed, `.md` file (incremental sync only): three-way merge (see Merge Strategy section).
+11. Both changed, `.json` in `.obsidian/` (incremental sync only): shallow JSON merge.
 12. All other both-changed: server wins via `syncFileDown`.
 13. Catch-all: "Rejected server change", accept record silently.
 
@@ -690,6 +777,8 @@ Hash is computed at upload time: try metadata cache first, then read file and ha
 
 The file buffer from hashing is reused for the push to avoid double disk I/O.
 
+Before upload, **ctime adoption** (Linux and mobile only, not Windows/macOS): if the server has a ctime for this file and the local ctime is 0 or later than the server ctime, adopt the server's ctime: `local.ctime = server.ctime`. This preserves the earliest known creation time across devices.
+
 After upload: set `synchash = hash`, clear `previouspath`, set `synctime = Date.now()`.
 
 **End**: if no skipped files, log "Fully synced", clear `fileRetry`, return `false`. If skipped files exist (in retry cooldown), return `true`.
@@ -697,16 +786,18 @@ After upload: set `synchash = hash`, clear `previouspath`, set `synctime = Date.
 ### syncFileDown() -- Download Flow
 
 1. If server entry is a folder:
-   - If path exists as a folder: check for case-sensitive collisions, rename if needed.
+   - If path exists as a folder but is NOT in `localFiles`: possible case-sensitive collision. Search `localFiles` for a key whose lowercase matches. If found, rename the existing folder to the server's casing via `adapter.rename()`. Log "Detected case sensitive folder collision, renaming folder".
    - If path exists as a file: delete the file, create the folder.
    - If path doesn't exist: create the folder.
 
 2. If server entry is a file:
    - If path exists as a folder: if empty, remove it. If non-empty, rename to `(Conflicted copy)`.
    - Pull encrypted content via `server.pull(uid)`, decrypt.
-   - Patch `core-plugins.json` to ensure sync stays enabled.
-   - Concurrency guard: wait for pending filesystem operations, re-stat the file. If mtime or size changed during download, throw error (triggers per-path retry).
-   - Write file with server's mtime and ctime preserved.
+   - Patch `core-plugins.json` to ensure sync stays enabled (self-preservation).
+   - **Concurrency guard**: wait for pending filesystem operations via `gL(adapter.promise)`. Then re-stat the file. If mtime or size changed since the pull started, throw "Download cancelled because file was changed locally. Will try again soon." This triggers per-path retry backoff. Also checks `file.saving` flag (another operation in progress) and waits again if set.
+   - **Write with timestamp preservation**: `adapter.writeBinary(path, content, {ctime, mtime})`. The adapter calls `fsPromises.utimes(fullPath, mtime/1000, mtime/1000)` to set both atime and mtime. On desktop (not Windows/macOS), a native `btime` module sets the birth time (ctime). Without timestamp preservation, the scanner detects the file as "changed" and re-uploads it.
+   - **ctime logic for existing files**: only overwrite ctime if the server's ctime is older than the local ctime (or local ctime is 0). This preserves the earliest known creation time.
+   - **ctime logic for new files**: use the server's ctime directly.
    - Update `localFiles` entry: `hash = synchash = downloadedHash`.
 
 ### Per-Path Retry Backoff
@@ -723,7 +814,11 @@ Self-preservation: ensures the `sync` plugin stays enabled in `core-plugins.json
 
 ### File Size Limits
 
-Default `perFileMax`: 208,666,624 bytes (~199 MB). The server can override this during handshake. Files exceeding the limit are silently skipped during upload. No warning to the user.
+Client-side default `perFileMax`: 208,666,624 bytes (~199 MB). The server overrides this during the init handshake response (typically 5,242,880 = 5 MB for standard plans). The app validates the server value is a non-negative integer.
+
+During upload (Phase 3), files where `localFile.size > perFileMax` are silently skipped. No warning is shown. The file remains in `localFiles` but is never pushed. This check happens before reading or hashing the file content.
+
+During auth, if the server does not send `perFileMax`, the client keeps its 208 MB default. A client implementation that defaults to 0 would effectively skip all files.
 
 ### Device Name
 
@@ -740,7 +835,11 @@ This section documents how the Obsidian desktop app handles reconciliation decis
 For each server push received during the `init` -> `ready` window:
 
 ```
-1. Server push is a deletion?
+0. Initial sync and push is a deletion?
+   - Drop entirely. Do not process. (Safety net: server already excludes
+     deletions during initial sync.)
+
+1. Server push is a deletion? (incremental sync only)
    - File exists locally and local hash matches server's previous hash (clean):
      Delete local file.
    - File exists locally but local hash differs (dirty):
@@ -774,8 +873,8 @@ Three-way merge using diff-match-patch:
 
 1. Fetch the base version from the server using `pull(prev.uid)`.
 2. If no base is available (no previous uid, or pull fails):
-   - If file was created less than 3 minutes ago: server wins.
-   - Otherwise: compare mtimes. Server wins if server is newer. Local wins if local is newer or equal.
+   - If file was created less than 3 minutes ago (`Math.abs(Date.now() - local.ctime) < 180000`): server wins unconditionally via `syncFileDown`.
+   - Otherwise: compare mtimes. Server wins if `server.mtime > local.mtime`. Local wins if `local.mtime >= server.mtime`.
    - Local content is backed up to File Recovery plugin (fire-and-forget, errors swallowed).
    - No conflict copy file is created.
 3. If base is available:
@@ -891,11 +990,23 @@ The Obsidian app uses a single-operation promise queue (class `cL`) that seriali
 
 | Name | Value | Purpose |
 |------|-------|---------|
-| `perFileMax` | 5,242,880 (5MB) | Max file size |
+| `perFileMax` (client default) | 208,666,624 (~199MB) | Client-side default before server override |
+| `perFileMax` (typical server) | 5,242,880 (5MB) | Server-assigned max file size |
 | Chunk size | 2,097,152 (2MB) | Binary frame chunk size for uploads |
 | Ping interval | 10,000ms | Send ping after this idle time |
 | Disconnect timeout | 120,000ms | Disconnect after this idle time |
 | Heartbeat check | 20,000ms | Interval to check connection health |
+| Request timeout | 60,000ms | Timeout for `request()`, disconnects on expiry |
+| Sync loop throttle | 50ms | Minimum gap between `_sync()` calls |
+| Save data debounce | 2,000ms | Debounce for IndexedDB persistence |
+| Sync timer interval | 30,000ms | Safety-net timer that calls `requestSync()` |
+| Connection backoff base | 5,000ms | Base delay for reconnection backoff |
+| Connection backoff max | 300,000ms (5min) | Cap for reconnection backoff |
+| Per-path retry base | 5,000ms | Base delay for per-path failure backoff |
+| Per-path retry max | 300,000ms (5min) | Cap for per-path failure backoff |
+| Upload cooldown (<=10KB) | 10,000ms | Per-file upload rate limit |
+| Upload cooldown (10-100KB) | 20,000ms | Per-file upload rate limit |
+| Upload cooldown (>100KB) | 30,000ms | Per-file upload rate limit |
 | scrypt N | 32,768 | Cost parameter |
 | scrypt r | 8 | Block size |
 | scrypt p | 1 | Parallelization |

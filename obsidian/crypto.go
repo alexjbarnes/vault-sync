@@ -9,11 +9,15 @@ import (
 	"fmt"
 
 	"golang.org/x/crypto/scrypt"
+	"golang.org/x/text/unicode/norm"
 )
 
 // DeriveKey derives a 32-byte encryption key from password and salt using scrypt.
 // Parameters match Obsidian exactly: N=32768, r=8, p=1.
+// Both inputs are normalized to NFKC before hashing, matching app.js behavior.
 func DeriveKey(password, salt string) ([]byte, error) {
+	password = norm.NFKC.String(password)
+	salt = norm.NFKC.String(salt)
 	key, err := scrypt.Key([]byte(password), []byte(salt), 32768, 8, 1, 32)
 	if err != nil {
 		return nil, fmt.Errorf("deriving key: %w", err)

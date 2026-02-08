@@ -284,5 +284,9 @@ func (w *Watcher) shouldIgnore(path string) bool {
 	if strings.HasSuffix(base, "~") || strings.HasSuffix(base, ".swp") {
 		return true
 	}
+	// Obsidian never syncs workspace state files.
+	if base == "workspace.json" || base == "workspace-mobile.json" {
+		return true
+	}
 	return false
 }

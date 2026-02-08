@@ -25,9 +25,9 @@ const (
 	heartbeatCheckAt = 20 * time.Second
 	chunkSize        = 2097152 // 2MB
 
-	reconnectMin    = 1 * time.Second
-	reconnectMax    = 60 * time.Second
-	responseTimeout = 30 * time.Second
+	reconnectMin    = 5 * time.Second
+	reconnectMax    = 5 * time.Minute
+	responseTimeout = 60 * time.Second
 )
 
 var errResponseTimeout = fmt.Errorf("timed out waiting for server response")
@@ -146,6 +146,7 @@ func NewSyncClient(cfg SyncConfig, logger *slog.Logger) *SyncClient {
 		vault:             cfg.Vault,
 		state:             cfg.State,
 		onReady:           cfg.OnReady,
+		perFileMax:        208_666_624, // ~199MB, matches Obsidian client default
 		opCh:              make(chan syncOp, 64),
 		hashCache:         make(map[string]hashEntry),
 	}
@@ -202,8 +203,12 @@ func (s *SyncClient) Connect(ctx context.Context) error {
 	}
 
 	if initResp.Res != "ok" {
+		msg := initResp.Msg
+		if msg == "" {
+			msg = initResp.Res
+		}
 		s.conn.Close(websocket.StatusNormalClosure, "auth failed")
-		return fmt.Errorf("auth failed: %s", initResp.Res)
+		return fmt.Errorf("auth failed: %s", msg)
 	}
 
 	s.perFileMax = initResp.PerFileMax
@@ -540,8 +545,12 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 
 	ext := ""
 	if !op.isFolder {
-		if idx := strings.LastIndex(op.path, "."); idx >= 0 {
-			ext = op.path[idx+1:]
+		base := op.path
+		if slashIdx := strings.LastIndex(op.path, "/"); slashIdx >= 0 {
+			base = op.path[slashIdx+1:]
+		}
+		if dotIdx := strings.LastIndex(base, "."); dotIdx > 0 && dotIdx < len(base)-1 {
+			ext = strings.ToLower(base[dotIdx+1:])
 		}
 	}
 
@@ -583,7 +592,16 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 		return nil
 	}
 
-	// File with content.
+	// File with content. Skip files exceeding the server's size limit.
+	if s.perFileMax > 0 && len(op.content) > s.perFileMax {
+		s.logger.Warn("skipping file exceeding size limit",
+			slog.String("path", op.path),
+			slog.Int("size", len(op.content)),
+			slog.Int("limit", s.perFileMax),
+		)
+		return nil
+	}
+
 	var encContent []byte
 	if len(op.content) > 0 {
 		encContent, err = s.cipher.EncryptContent(op.content)
@@ -901,7 +919,11 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 		}
 	}
 
-	if err := s.vault.WriteFile(path, plaintext); err != nil {
+	var mtime time.Time
+	if push.MTime > 0 {
+		mtime = time.UnixMilli(push.MTime)
+	}
+	if err := s.vault.WriteFile(path, plaintext, mtime); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 
@@ -1421,7 +1443,11 @@ func (s *SyncClient) processPushDirect(ctx context.Context, push PushMessage) er
 		}
 	}
 
-	if err := s.vault.WriteFile(path, plaintext); err != nil {
+	var mtime time.Time
+	if push.MTime > 0 {
+		mtime = time.UnixMilli(push.MTime)
+	}
+	if err := s.vault.WriteFile(path, plaintext, mtime); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 
@@ -1532,10 +1558,9 @@ func isPermanentError(err error) bool {
 		return false
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "auth failed") {
-		return true
-	}
-	return false
+	return strings.Contains(msg, "auth failed") ||
+		strings.Contains(msg, "subscription") ||
+		strings.Contains(msg, "Vault not found")
 }
 
 func (s *SyncClient) touchLastMessage() {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Vault provides thread-safe filesystem operations on the sync directory.
@@ -42,8 +43,10 @@ func (v *Vault) ReadFile(relPath string) ([]byte, error) {
 }
 
 // WriteFile writes content to a file by relative path. Creates parent
-// directories as needed.
-func (v *Vault) WriteFile(relPath string, data []byte) error {
+// directories as needed. If mtime is non-zero, the file's modification
+// time is set to that value after writing (matching Obsidian's behavior
+// of preserving server timestamps on downloaded files).
+func (v *Vault) WriteFile(relPath string, data []byte, mtime time.Time) error {
 	absPath, err := v.resolve(relPath)
 	if err != nil {
 		return err
@@ -57,7 +60,17 @@ func (v *Vault) WriteFile(relPath string, data []byte) error {
 		return fmt.Errorf("creating directory for %s: %w", relPath, err)
 	}
 
-	return os.WriteFile(absPath, data, 0644)
+	if err := os.WriteFile(absPath, data, 0644); err != nil {
+		return err
+	}
+
+	if !mtime.IsZero() {
+		if err := os.Chtimes(absPath, mtime, mtime); err != nil {
+			return fmt.Errorf("setting mtime for %s: %w", relPath, err)
+		}
+	}
+
+	return nil
 }
 
 // DeleteFile removes a file by relative path. Returns nil if the file

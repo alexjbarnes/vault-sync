@@ -1,64 +1,100 @@
-# Bugs and Issues
+# Bugs and Issues -- Review 4 (Final app.js Audit)
 
-## Accepted Risk
+## Bug 40: NFKC normalization missing in DeriveKey
+- **File**: `obsidian/crypto.go:16-17`
+- **Severity**: Medium
+- **Status**: FIXED
+- app.js normalizes both password and salt to NFKC before scrypt. We pass raw strings. Users with non-ASCII characters in their password or email (salt) will derive a wrong key.
+- Fix: added `norm.NFKC.String()` from `golang.org/x/text/unicode/norm`
 
-### 19. 12-byte ciphertext bypasses GCM authentication
-**File:** `obsidian/crypto.go:111-113`
+## Bug 41: No mtime preservation on downloaded files
+- **File**: `obsidian/vault.go:47`
+- **Severity**: High
+- **Status**: FIXED
+- app.js calls `utimes()` to set mtime to the server value after writing. We use bare `os.WriteFile` so downloads get the current system time. The scanner then detects them as "changed" and may re-upload.
+- Fix: added `mtime time.Time` parameter to `WriteFile`, calls `os.Chtimes()` when non-zero. Server download paths pass `time.UnixMilli(push.MTime)`. Conflict copies pass zero time.
 
-Intentional for Obsidian app compatibility (empty files). A compromised server could send 12-byte payloads for any file and the client accepts it as empty content without authentication, silently wiping file contents. TLS mitigates this.
+## Bug 42: Extension extraction operates on full path instead of basename
+- **File**: `obsidian/sync.go:543`
+- **Severity**: Medium
+- **Status**: FIXED
+- `strings.LastIndex(op.path, ".")` finds the last dot in the entire path. For `folder.with.dots/file` this returns `"with.dots/file"` as the extension. app.js extracts basename first. Also not lowercased.
+- Fix: extract basename first, find dot after position 0 and before end, lowercase result. Matches app.js edge cases for dotfiles and trailing dots.
 
-## Review 3
+## Bug 43: Initial sync processes deletions
+- **File**: `obsidian/reconcile.go`
+- **Severity**: Medium
+- **Status**: OPEN
+- app.js drops deleted pushes during initial sync (`if (this.initial && e.deleted) return`). We process them, potentially deleting local files that the server already excluded.
+- Fix: check `initial` flag in Phase1 and skip deleted entries.
 
-### 27-29. Reconciliation matches Obsidian app behavior (NOT BUGS)
+## Bug 44: Delete ordering doesn't separate files from folders
+- **File**: `obsidian/reconcile.go`
+- **Severity**: Medium
+- **Status**: OPEN
+- app.js deletes files first (deepest first), then folders (deepest first) in separate passes. We don't separate them. If we delete a folder before its children, the server may reject it.
 
-Bugs 27, 28, 29 were originally flagged as data loss issues in reconciliation. After reviewing `app.js`, these all match the Obsidian desktop app's behavior exactly:
-- Non-mergeable files: server wins silently, no conflict copy.
-- Conflict copy write failure: log warning, proceed with server overwrite.
-- Pull/decrypt base failure: fall back to server wins, no conflict copy.
+## Bug 45: MFA field missing from signin
+- **File**: `obsidian/client.go`
+- **Severity**: Low (only affects 2FA users)
+- **Status**: WON'T FIX
+- `SigninRequest` is missing the `mfa` field. Users with 2FA enabled cannot authenticate. vault-sync is a headless daemon with no way to prompt for a TOTP code. Users with 2FA must disable it or obtain a token through other means.
 
-See "Reconciliation Behavior" section in `obsidian-sync-protocol.md` for full documentation.
+## Bug 46: isPermanentError too narrow
+- **File**: `obsidian/sync.go:1530-1539`
+- **Severity**: Medium
+- **Status**: FIXED
+- Only checked for "auth failed". Now also detects "subscription" and "Vault not found" as permanent errors.
 
-### 30. No error check on push metadata response before sending binary chunks (HIGH)
-**File:** `sync.go:638-667`
+## Bug 47: Response timeout is 30s vs app.js 60s
+- **File**: `obsidian/sync.go`
+- **Severity**: Low
+- **Status**: FIXED
+- Bumped `responseTimeout` from 30s to 60s to match app.js.
 
-After reading the server's response to push metadata, the code only checks for `"ok"` (skip upload). Any non-"ok" response, including error responses, falls through to the chunk sending loop. The client sends binary frames the server never asked for, desynchronizing the protocol.
+## Bug 48: Reconnect backoff caps at 60s vs app.js 300s
+- **File**: `obsidian/sync.go`
+- **Severity**: Low
+- **Status**: FIXED
+- Bumped `reconnectMax` from 60s to 5 minutes. Also bumped `reconnectMin` from 1s to 5s to match app.js base.
 
-### 31. `persistPushedFile` stores `ServerFile.UID` as zero (NOT A BUG)
+## Bug 49: Default perFileMax is 0
+- **File**: `obsidian/sync.go:76`
+- **Severity**: Low
+- **Status**: FIXED
+- Set default `perFileMax` to 208,666,624 (~199 MB) in `NewSyncClient`, matching app.js client default.
 
-The zero UID is a transient placeholder. The server echoes back every push as a push message to all clients including the sender. This echo contains the server-assigned UID. Our `handlePushWhileBusy` catches the echo via hash cache match and calls `persistServerFile` with the full `PushMessage`, overwriting the zero-UID entry. Same pattern as Obsidian, which also stores `uid: 0` for folders at push time and relies on the echo to populate the real UID. See "Push (Upload) Flow" in `obsidian-sync-protocol.md`.
+## Bug 50: No perFileMax enforcement before upload
+- **File**: `obsidian/sync.go`
+- **Severity**: Low
+- **Status**: FIXED
+- Added size check in `executePush` before encrypting content. Files exceeding `perFileMax` are logged and silently skipped, matching app.js behavior.
 
-### 32. `uniqueConflictPath` returns a colliding path after 100 attempts (MEDIUM)
-**File:** `reconcile.go:452-458`
+## Bug 51: No pre-write re-stat guard during download
+- **File**: `obsidian/sync.go:904`
+- **Severity**: Medium
+- **Status**: OPEN
+- app.js re-stats the file after pulling content and before writing. If mtime/size changed (user edited while downloading), app.js aborts. We silently overwrite. Lower risk for a headless daemon but still a race condition.
 
-The loop runs from 1 to 99. If all candidates exist, it returns the last `candidate` which was verified to already exist. Writing to that path overwrites whatever file is there.
+## Bug 52: No per-path retry backoff
+- **File**: `obsidian/sync.go`, `obsidian/watcher.go`
+- **Severity**: Medium
+- **Status**: OPEN
+- app.js tracks `{count, error, ts}` per path with `5s * 2^count` backoff capped at 5 minutes. If a file fails repeatedly, we retry on every watcher event with no delay. Could cause log spam and server load.
 
-### 33. `drainQueue` deletes map entry before handler runs (NOT A BUG)
+## Bug 53: Extension not lowercased
+- **File**: `obsidian/sync.go:543`
+- **Severity**: Low
+- **Status**: FIXED (covered by Bug 42 fix)
 
-Matches Obsidian's behavior. Connected push failures are treated as permanent for that cycle. Obsidian's `requeueIfDisconnected` has the same logic: only re-queue if the connection dropped, not on a connected rejection. The watcher will pick up the file change again on the next fsnotify event. See "Sync Loop and Failure Handling" in `obsidian-sync-protocol.md`.
+## Bug 54: No workspace.json exclusion
+- **File**: `obsidian/watcher.go`, `obsidian/scanner.go`
+- **Severity**: Low
+- **Status**: FIXED
+- Added `workspace.json` and `workspace-mobile.json` to `shouldIgnore` in watcher and scanner skip logic.
 
-### 34. `deleteRemoteFiles` uses string length as depth proxy (NOT A BUG)
-
-Matches Obsidian's behavior exactly. The Obsidian app uses `path.length` (string length) as its depth proxy for deepest-first delete ordering. It also deletes files before folders, and processes one delete per sync cycle. See "Sync Loop and Failure Handling" in `obsidian-sync-protocol.md`.
-
-### 35. bbolt open with no timeout (MEDIUM)
-**File:** `internal/state/state.go:76`
-
-`bolt.Open(p, 0600, nil)` blocks indefinitely on the file lock if another instance is running.
-
-### 36. Negative `resp.Pieces` causes pull to return empty content (LOW)
-**File:** `sync.go:1177-1204`
-
-`PullResponse.Pieces` is `int`. A negative value passes the max-pieces guard and makes the `for` loop execute zero iterations, returning empty content. Requires a buggy server.
-
-### 37. `OnReady` callback logs "state saved" even on failure (LOW)
-**File:** `main.go:115`
-
-The success log fires regardless of whether `SetVault` returned an error.
-
-### 38. `defer syncClient.Close()` before `Connect()` succeeds (NOT A BUG)
-
-`Close()` already guards against nil `conn` and nil `connCancel` with nil checks before use. Safe to call on an unconnected client.
-
-### 39. `threeWayMerge` treats genuinely empty base as "no base" (NOT A BUG)
-
-Matches Obsidian's behavior. The Obsidian app checks truthiness of the base text variable, and empty string is falsy in JS. A three-way merge with an empty base would produce poor results anyway (all local content treated as inserts, duplicating into server version). The "no base" fallback is the better outcome for this edge case.
+## Bug 55: Auth response missing msg field
+- **File**: `obsidian/types.go:68`
+- **Severity**: Low
+- **Status**: FIXED
+- Added `Msg string` field to `InitResponse`. Auth failure now uses `msg` for descriptive error messages.

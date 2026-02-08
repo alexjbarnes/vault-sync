@@ -293,7 +293,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 		conflictExt := filepath.Ext(path)
 		conflictBase := strings.TrimSuffix(path, conflictExt)
 		conflictPath := conflictCopyPath(conflictBase, conflictExt)
-		if err := r.vault.WriteFile(conflictPath, localContent); err != nil {
+		if err := r.vault.WriteFile(conflictPath, localContent, time.Time{}); err != nil {
 			r.logger.Warn("reconcile: failed to write conflict copy",
 				slog.String("path", conflictPath),
 				slog.String("error", err.Error()),
@@ -330,7 +330,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 		conflictExt := filepath.Ext(path)
 		conflictBase := strings.TrimSuffix(path, conflictExt)
 		conflictPath := conflictCopyPath(conflictBase, conflictExt)
-		if err := r.vault.WriteFile(conflictPath, localContent); err != nil {
+		if err := r.vault.WriteFile(conflictPath, localContent, time.Time{}); err != nil {
 			r.logger.Warn("reconcile: failed to write merge conflict copy",
 				slog.String("path", conflictPath),
 				slog.String("error", err.Error()),
@@ -429,7 +429,7 @@ func (r *Reconciler) handleTypeConflict(ctx context.Context, path string, push P
 	if err != nil {
 		return fmt.Errorf("reading local file for conflict copy: %w", err)
 	}
-	if err := r.vault.WriteFile(conflictPath, content); err != nil {
+	if err := r.vault.WriteFile(conflictPath, content, time.Time{}); err != nil {
 		return fmt.Errorf("writing conflict copy %s: %w", conflictPath, err)
 	}
 	r.vault.DeleteFile(path)
@@ -484,7 +484,11 @@ func (r *Reconciler) downloadServerFile(ctx context.Context, path string, push P
 
 // writeServerContent writes plaintext to disk and persists state.
 func (r *Reconciler) writeServerContent(path string, push PushMessage, plaintext []byte) error {
-	if err := r.vault.WriteFile(path, plaintext); err != nil {
+	var mtime time.Time
+	if push.MTime > 0 {
+		mtime = time.UnixMilli(push.MTime)
+	}
+	if err := r.vault.WriteFile(path, plaintext, mtime); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 

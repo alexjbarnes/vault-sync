@@ -67,6 +67,10 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 			}
 			return nil
 		}
+		// Obsidian never syncs workspace state files.
+		if base == "workspace.json" || base == "workspace-mobile.json" {
+			return nil
+		}
 
 		seen[relPath] = true
 
