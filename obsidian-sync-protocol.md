@@ -444,6 +444,293 @@ The Obsidian app stores these values in IndexedDB between sessions:
 
 ---
 
+## Client Implementation (from app.js)
+
+All behavior in this section was reverse-engineered from the Obsidian desktop app's minified webpack bundle (`app.js`). The sync plugin is class `a0`.
+
+### Plugin Initialization Sequence
+
+1. Register vault event listeners (create, modify, delete, rename, raw).
+2. Wait for workspace layout ready.
+3. Load persisted state from IndexedDB (database named `{appId}-sync`).
+4. Call `scanFiles()` to walk the vault tree and populate `localFiles`.
+5. Set `initialized = true`.
+6. Call `requestSync()` to start the first sync cycle.
+7. Start a 30-second `setInterval` timer that calls `requestSync()`.
+
+On shutdown: unregister vault events, clear the interval timer, disconnect WebSocket.
+
+App ID mismatch detection: if the persisted `appId` differs from the current app (vault restored from backup on different device), sync auto-pauses and resets to `initial=true, version=0` with empty state.
+
+### Local State Tracking
+
+The `localFiles` dictionary (keyed by file path) tracks every file in the vault:
+
+```
+{
+    path:         string   // current file path
+    previouspath: string   // old path before rename ("" if not renamed)
+    folder:       boolean  // true for directories
+    ctime:        number   // creation time (ms, ceiled to integer)
+    mtime:        number   // modification time (ms, ceiled to integer)
+    size:         number   // file size in bytes
+    hash:         string   // SHA-256 hex digest ("" = not yet computed)
+    synctime:     number   // Date.now() at last sync operation
+    synchash:     string   // hash at last successful upload
+}
+```
+
+The `serverFiles` dictionary (keyed by path) tracks server state:
+
+```
+{
+    path:    string
+    size:    number
+    hash:    string   // encrypted hash from server
+    ctime:   number
+    mtime:   number
+    folder:  boolean
+    deleted: boolean
+    uid:     number   // server version number for this change
+    device:  string
+    user:    number
+}
+```
+
+### Vault Event Handlers
+
+`create` and `modify` share the same handler (`onFileAdd`):
+- Creates entry in `localFiles` if missing.
+- For files: updates mtime, ctime, size. Clears `hash` to `""` if mtime or size changed (forcing recomputation at sync time).
+- For folders: sets `folder=true`, zeroes file-specific fields.
+- Calls `requestSync()`.
+
+`delete` (`onFileRemove`):
+- Removes the entry entirely from `localFiles`.
+- The sync loop detects deletions by finding paths in `serverFiles` that are absent from `localFiles`.
+- Calls `requestSync()`.
+
+`rename` (`onFileRename`):
+- Moves the entry from old key to new key in `localFiles`.
+- Sets `previouspath` to old path (only if not already tracking a prior rename, preserving the chain: A -> B -> C keeps `previouspath` as "A").
+- Sets `synctime = 0` (bypasses per-file cooldown, makes rename immediately eligible for sync).
+- Re-runs `onFileAdd` for fresh stat.
+- Calls `setDirty()` then `requestSync()`.
+
+`raw` (`onRaw`):
+- Only handles paths under `.obsidian/`. Adds them to `scanSpecialFileQueue` for the sync loop to stat.
+
+### Hash Computation
+
+Hashes are **lazy** -- computed at sync time, not on file change events. `onFileAdd` clears the hash to `""` when mtime or size changes.
+
+Two paths to compute hashes:
+1. **Metadata cache (free)**: `getHashFromMetadataCache` checks Obsidian's internal metadata indexer. If mtime and size match, uses the cached hash without disk I/O.
+2. **Full file read**: `updateHash` reads the file via `adapter.readBinary()` and computes `SHA-256` hex via `crypto.subtle.digest`. The read buffer is reused for the subsequent upload to avoid double I/O.
+
+### File Filtering
+
+`_allowSyncFile(path, isFolder)` determines what gets synced:
+
+**Always synced:** `.md` and `.canvas` files.
+
+**Always excluded:**
+- `workspace.json` and `workspace-mobile.json`
+- `node_modules` directories and dotfiles within `.obsidian/`
+- Files/folders starting with `.` outside `.obsidian/`
+- Files not matching any enabled category
+
+**User-configurable exclusions:** `ignoreFolders` list.
+
+**File type categories** (user-toggleable via `allowTypes` set):
+- `image`: bmp, png, jpg, jpeg, gif, svg, webp, avif
+- `audio`: mp3, wav, m4a, 3gp, flac, ogg, oga, opus
+- `video`: mp4, webm, ogv, mov, mkv
+- `pdf`: pdf
+- `unsupported`: everything else
+
+Defaults enabled: image, audio, pdf, video. The `unsupported` category requires opt-in.
+
+**Config file categories** (user-toggleable via `allowSpecialFiles` set):
+- `app`: app.json, types.json
+- `appearance`: appearance.json
+- `hotkey`: hotkeys.json
+- `core-plugin`: core-plugins.json, core-plugins-migration.json
+- `community-plugin`: community-plugins.json
+- `appearance-data`: themes/*/theme.css, themes/*/manifest.json, snippets/*.css
+- `core-plugin-data`: any top-level .json in .obsidian/ (not named above)
+- `community-plugin-data`: plugins/*/manifest.json, main.js, styles.css, data.json
+
+Defaults enabled: app, appearance, appearance-data, hotkey, core-plugin, core-plugin-data. Community plugin sync is opt-in.
+
+Filter results are cached per-path in `filterCache`. Cache is invalidated when filters change.
+
+### Per-File Upload Cooldown
+
+`canSyncLocalFile(now, entry)` rate-limits uploads based on file size:
+- Files never synced (`synctime=0`): eligible immediately
+- Files <= 10KB: 10-second cooldown after last sync
+- Files 10KB-100KB: 20-second cooldown
+- Files > 100KB: 30-second cooldown
+
+Renames reset `synctime` to 0, bypassing the cooldown.
+
+### Rename Protocol
+
+`previouspath` tracks the original path the server knows about. It persists through chained renames (A -> B -> C keeps `previouspath` as A). Cleared after successful upload.
+
+The push message includes `relatedpath` (encrypted `previouspath`). The server uses this to track renames rather than treating them as delete + create.
+
+### Persistence (IndexedDB)
+
+Fields saved to IndexedDB via `saveData()`:
+- `appId`, `vaultId`, `vaultName`, `key`, `salt`, `encryptionVersion`, `host`
+- `deviceName`, `userId`, `pause`
+- `version`, `initial`
+- `local` (localFiles dictionary)
+- `remote` (serverFiles dictionary)
+- `pending` (newServerFiles array)
+- `allowTypes`, `allowSpecialFiles`, `ignoreFolders`
+- `preventSleep`, `dataVer`
+
+`saveData()` is gated by a `dirty` flag. `setDirty()` sets the flag and triggers a status-change event. `requestSaveData` is debounced to 2 seconds.
+
+`onFileAdd` and `onFileRemove` do NOT call `setDirty()`. They modify `localFiles` in memory and call `requestSync()`. Persistence happens when something structurally meaningful changes (renames, completed syncs, config changes).
+
+### WebSocket Client Lifecycle
+
+**Hostname validation**: only `*.obsidian.md` and `127.0.0.1` are allowed. The native `WebSocket` constructor and `URL.prototype.hostname` getter are captured at module scope to prevent prototype pollution.
+
+**Auth phase**: On `onopen`, start 20s heartbeat timer and send `{op: "init", ...}`. A temporary `onmessage` handler waits for `{res: "ok"}` or `{res: "err"}`. On success, swap to the permanent `onMessage` handler.
+
+**Permanent `onMessage` routing**:
+1. Update `lastMessageTs` on every message.
+2. Text frames are JSON-parsed. Parse failure disconnects.
+3. `pong` -> consumed silently (timestamp already updated).
+4. `ready` -> dispatched to `onReady(version)`.
+5. `push` -> dispatched to `onServerPush(msg)`.
+6. Everything else -> resolves the pending `responsePromise`.
+7. Binary frames -> resolve the pending `dataPromise`.
+
+**request() vs response()**:
+- `request(msg, timeout=60s)`: sends JSON, creates deferred, starts timeout. Disconnects on timeout. Checks `resp.err` and throws if non-empty.
+- `response()`: creates deferred only, no send, no timeout. Used for per-chunk acks during push.
+- Both share the same `responsePromise` slot, resolved by `onMessage`.
+
+**Two independent serial queues**:
+- `queue` (SerialQueue): serializes all outbound operations (push, pull, history, etc.)
+- `notifyQueue` (SerialQueue): serializes inbound server push decryption and dispatch. Runs independently from the outbound queue.
+
+**Disconnect cleanup**: close socket, clear heartbeat interval, reject pending `responsePromise` and `dataPromise`.
+
+### Connection Backoff
+
+Connection-level exponential backoff (`Y1` class):
+- Base: 5 seconds
+- Factor: 2x per failure
+- Jitter: 50%-100% of computed value
+- Cap: 5 minutes
+- Reset to 0 on success
+
+The client never gives up. The 30-second `setInterval` timer keeps calling `requestSync()`, which checks `backoff.isReady()`. As long as the plugin is enabled, reconnection attempts continue indefinitely.
+
+### The Sync Loop (`requestSync` + `_sync`)
+
+`requestSync()` is a re-entrant-guarded loop:
+1. If `syncing` is true, drop the call.
+2. Set `syncing = true`.
+3. Sleep 50ms.
+4. Loop: call `_sync()` until it returns `false` or plugin is disabled/paused. Throttle 50ms between calls.
+5. On `_sync()` throw: catch, log, record per-path backoff via `failedSync`, stop loop.
+6. Set `syncing = false`.
+
+Events arriving during an active sync cycle are implicitly coalesced: they mutate `localFiles` in memory, and the next `_sync()` iteration picks up the changes.
+
+### `_sync()` Phases
+
+Each `_sync()` call processes exactly one file, then returns `true` (more work) or `false` (done).
+
+**Pre-flight checks**: pause flag, backoff readiness, auth token exists, establish/verify WebSocket connection.
+
+**Config dir scanning**: walks `.obsidian/` for themes, snippets, plugins. Updates `localFiles` with fresh stat data.
+
+**Phase 1 -- Process incoming server changes** (`newServerFiles` array):
+
+For each entry, in order:
+1. Filter: `allowSyncFile`, valid filename, path traversal check, retry backoff.
+2. Dedup: skip if same path appears later in the array.
+3. If file doesn't exist locally: download (or no-op if server says deleted).
+4. Compute local hash if needed (metadata cache first, then disk read).
+5. Both folders: accept. If server says deleted, only delete empty folders.
+6. Hashes match: no-op.
+7. Local is clean (hash matches previous server record): server wins. Delete or download.
+8. Type conflict (file vs folder): rename local to `(Conflicted copy)`, return `true` to re-enter.
+9. Initial sync with newer server mtime: server wins.
+10. Both changed, `.md` file: three-way merge (see Merge Strategy section).
+11. Both changed, `.json` in `.obsidian/`: shallow JSON merge.
+12. All other both-changed: server wins via `syncFileDown`.
+13. Catch-all: "Rejected server change", accept record silently.
+
+On completion of each entry: call `f()` which splices it from the array, updates `serverFiles`, sets `synctime`, marks dirty.
+
+**Phase 2 -- Delete remote files**:
+
+Scan `serverFiles` for paths not in `localFiles`. Pick the deepest file (longest path). Push a delete. Then pick the deepest folder. One delete per `_sync()` call. Files before folders.
+
+**Phase 3 -- Upload local changes**:
+
+Scan `localFiles` for paths needing upload. Pick folders first (shallowest, shortest path). Then files (smallest size first).
+
+Upload candidates:
+- No server record, or server record is deleted.
+- Both are files but hashes differ.
+- Type mismatch.
+
+Hash is computed at upload time: try metadata cache first, then read file and hash. If hash matches server after computation ("Comparing" path), skip upload.
+
+The file buffer from hashing is reused for the push to avoid double disk I/O.
+
+After upload: set `synchash = hash`, clear `previouspath`, set `synctime = Date.now()`.
+
+**End**: if no skipped files, log "Fully synced", clear `fileRetry`, return `false`. If skipped files exist (in retry cooldown), return `true`.
+
+### syncFileDown() -- Download Flow
+
+1. If server entry is a folder:
+   - If path exists as a folder: check for case-sensitive collisions, rename if needed.
+   - If path exists as a file: delete the file, create the folder.
+   - If path doesn't exist: create the folder.
+
+2. If server entry is a file:
+   - If path exists as a folder: if empty, remove it. If non-empty, rename to `(Conflicted copy)`.
+   - Pull encrypted content via `server.pull(uid)`, decrypt.
+   - Patch `core-plugins.json` to ensure sync stays enabled.
+   - Concurrency guard: wait for pending filesystem operations, re-stat the file. If mtime or size changed during download, throw error (triggers per-path retry).
+   - Write file with server's mtime and ctime preserved.
+   - Update `localFiles` entry: `hash = synchash = downloadedHash`.
+
+### Per-Path Retry Backoff
+
+`failedSync(message)` records failure for `syncingPath`:
+- `fileRetry[path] = { count, error, ts }`
+- Delay: `5s * 2^count`, capped at 5 minutes.
+- `canSyncPath(now, path)` blocks any path starting with a failed path's prefix until cooldown expires.
+- On success, the retry entry is cleared.
+
+### patchCorePluginsFile
+
+Self-preservation: ensures the `sync` plugin stays enabled in `core-plugins.json`. Called during download and JSON merge of that file. If `sync` is missing from the plugin list, it gets added back.
+
+### File Size Limits
+
+Default `perFileMax`: 208,666,624 bytes (~199 MB). The server can override this during handshake. Files exceeding the limit are silently skipped during upload. No warning to the user.
+
+### Device Name
+
+Desktop: `require("os").hostname()`. Mobile: `Capacitor Device.getInfo().name`. Users can override in settings. Sent during WebSocket connect and shown in sync log for remote changes.
+
+---
+
 ## Reconciliation Behavior (from app.js)
 
 This section documents how the Obsidian desktop app handles reconciliation decisions. All behavior was reverse-engineered from `app.js`. Our implementation should match these decisions.
