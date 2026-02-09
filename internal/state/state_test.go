@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	bolt "go.etcd.io/bbolt"
 )
 
 func testDB(t *testing.T) *State {
@@ -400,4 +401,79 @@ func TestServerFiles_IsolatedBetweenVaults(t *testing.T) {
 	sf2, _ := s.GetServerFile("v2", "shared.md")
 	assert.Equal(t, int64(10), sf1.UID)
 	assert.Equal(t, int64(20), sf2.UID)
+}
+
+// --- Corrupt data / error branches ---
+
+// putRaw writes raw bytes into a bbolt bucket, bypassing JSON marshaling.
+// Used to inject corrupt data that triggers unmarshal errors.
+func putRaw(t *testing.T, s *State, bucket []byte, key, value string) {
+	t.Helper()
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists(bucket)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(key), []byte(value))
+	})
+	require.NoError(t, err)
+}
+
+func TestGetVault_CorruptJSON(t *testing.T) {
+	s := testDB(t)
+	putRaw(t, s, vaultMetaBucket("bad"), "state", "not-json{{{")
+
+	_, err := s.GetVault("bad")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid")
+}
+
+func TestAllLocalFiles_CorruptJSON(t *testing.T) {
+	s := testDB(t)
+	putRaw(t, s, vaultLocalBucket(testVault), "corrupt.md", "%%%bad")
+
+	_, err := s.AllLocalFiles(testVault)
+	require.Error(t, err)
+}
+
+func TestAllServerFiles_CorruptJSON(t *testing.T) {
+	s := testDB(t)
+	putRaw(t, s, vaultServerBucket(testVault), "corrupt.md", "%%%bad")
+
+	_, err := s.AllServerFiles(testVault)
+	require.Error(t, err)
+}
+
+func TestGetLocalFile_CorruptJSON(t *testing.T) {
+	s := testDB(t)
+	putRaw(t, s, vaultLocalBucket(testVault), "bad.md", "not-json")
+
+	_, err := s.GetLocalFile(testVault, "bad.md")
+	require.Error(t, err)
+}
+
+func TestGetServerFile_CorruptJSON(t *testing.T) {
+	s := testDB(t)
+	putRaw(t, s, vaultServerBucket(testVault), "bad.md", "not-json")
+
+	_, err := s.GetServerFile(testVault, "bad.md")
+	require.Error(t, err)
+}
+
+func TestGetVault_BucketExistsButNoStateKey(t *testing.T) {
+	s := testDB(t)
+	// Create the meta bucket without writing the "state" key.
+	putRaw(t, s, vaultMetaBucket("empty-meta"), "other-key", "irrelevant")
+
+	vs, err := s.GetVault("empty-meta")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), vs.Version)
+	assert.True(t, vs.Initial)
+}
+
+func TestLoadAt_InvalidPath(t *testing.T) {
+	// /dev/null is not a directory, so MkdirAll for a subpath should fail.
+	_, err := LoadAt("/dev/null/sub/state.db")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "creating state directory")
 }

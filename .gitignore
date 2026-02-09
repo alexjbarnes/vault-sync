@@ -1,5 +1,5 @@
 .env
 bin/
-vault/
-coverage.out
+/vault/
+cover*.out
 coverage.html
