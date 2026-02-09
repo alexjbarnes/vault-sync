@@ -3,30 +3,43 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
+	"github.com/alexjbarnes/vault-sync/internal/auth"
 	"github.com/caarlos0/env/v11"
 	"github.com/joho/godotenv"
 )
 
 type Config struct {
-	// Obsidian account credentials
-	Email    string `env:"OBSIDIAN_EMAIL,required"`
-	Password string `env:"OBSIDIAN_PASSWORD,required"`
+	// Service flags. At least one must be true.
+	EnableSync bool `env:"ENABLE_SYNC" envDefault:"true"`
+	EnableMCP  bool `env:"ENABLE_MCP" envDefault:"false"`
 
-	// Vault encryption password
-	VaultPassword string `env:"OBSIDIAN_VAULT_PASSWORD,required"`
+	// Obsidian account credentials (required when sync is enabled)
+	Email    string `env:"OBSIDIAN_EMAIL"`
+	Password string `env:"OBSIDIAN_PASSWORD"`
+
+	// Vault encryption password (required when sync is enabled)
+	VaultPassword string `env:"OBSIDIAN_VAULT_PASSWORD"`
 
 	// Vault name to sync. If empty and only one vault exists, it is used automatically.
 	VaultName string `env:"OBSIDIAN_VAULT_NAME" envDefault:""`
 
-	// Directory to sync vault files into
-	SyncDir string `env:"OBSIDIAN_SYNC_DIR,required"`
+	// Directory to sync vault files into (required always: used by sync as the
+	// sync target, and by MCP as the vault root to serve)
+	SyncDir string `env:"OBSIDIAN_SYNC_DIR"`
 
 	// Device name this client identifies as
 	DeviceName string `env:"OBSIDIAN_DEVICE_NAME" envDefault:"vault-sync"`
 
 	// Environment controls log format
 	Environment string `env:"ENVIRONMENT" envDefault:"development"`
+
+	// MCP server settings (required when MCP is enabled)
+	MCPListenAddr string `env:"MCP_LISTEN_ADDR" envDefault:":8090"`
+	MCPServerURL  string `env:"MCP_SERVER_URL"`
+	MCPAuthUsers  string `env:"MCP_AUTH_USERS"`
+	MCPLogLevel   string `env:"MCP_LOG_LEVEL" envDefault:"info"`
 }
 
 // Load reads configuration from environment variables.
@@ -57,21 +70,64 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) validate() error {
-	if c.Email == "" {
-		return fmt.Errorf("OBSIDIAN_EMAIL is required")
+	if !c.EnableSync && !c.EnableMCP {
+		return fmt.Errorf("at least one of ENABLE_SYNC or ENABLE_MCP must be true")
 	}
-	if c.Password == "" {
-		return fmt.Errorf("OBSIDIAN_PASSWORD is required")
-	}
-	if c.VaultPassword == "" {
-		return fmt.Errorf("OBSIDIAN_VAULT_PASSWORD is required")
-	}
+
 	if c.SyncDir == "" {
 		return fmt.Errorf("OBSIDIAN_SYNC_DIR is required")
 	}
+
+	if c.EnableSync {
+		if c.Email == "" {
+			return fmt.Errorf("OBSIDIAN_EMAIL is required when sync is enabled")
+		}
+		if c.Password == "" {
+			return fmt.Errorf("OBSIDIAN_PASSWORD is required when sync is enabled")
+		}
+		if c.VaultPassword == "" {
+			return fmt.Errorf("OBSIDIAN_VAULT_PASSWORD is required when sync is enabled")
+		}
+	}
+
+	if c.EnableMCP {
+		if c.MCPServerURL == "" {
+			return fmt.Errorf("MCP_SERVER_URL is required when MCP is enabled")
+		}
+		if c.MCPAuthUsers == "" {
+			return fmt.Errorf("MCP_AUTH_USERS is required when MCP is enabled")
+		}
+	}
+
 	return nil
 }
 
 func (c *Config) IsProduction() bool {
 	return c.Environment == "production"
+}
+
+// ParseMCPUsers parses the MCP_AUTH_USERS string into a UserCredentials map.
+// Format: "user1:bcrypt_hash1,user2:bcrypt_hash2"
+func (c *Config) ParseMCPUsers() (auth.UserCredentials, error) {
+	users := make(auth.UserCredentials)
+	if c.MCPAuthUsers == "" {
+		return users, nil
+	}
+	for _, pair := range strings.Split(c.MCPAuthUsers, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		idx := strings.Index(pair, ":")
+		if idx < 0 {
+			return nil, fmt.Errorf("invalid user entry (missing ':'): %s", pair)
+		}
+		username := pair[:idx]
+		hash := pair[idx+1:]
+		if username == "" || hash == "" {
+			return nil, fmt.Errorf("empty username or hash in: %s", pair)
+		}
+		users[username] = hash
+	}
+	return users, nil
 }

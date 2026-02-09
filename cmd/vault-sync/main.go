@@ -1,28 +1,58 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/alexjbarnes/vault-sync/internal/auth"
 	"github.com/alexjbarnes/vault-sync/internal/config"
 	"github.com/alexjbarnes/vault-sync/internal/logging"
+	"github.com/alexjbarnes/vault-sync/internal/mcpserver"
 	"github.com/alexjbarnes/vault-sync/internal/state"
+	"github.com/alexjbarnes/vault-sync/internal/vault"
 	"github.com/alexjbarnes/vault-sync/obsidian"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/sync/errgroup"
 )
 
 var Version = "dev"
 
 func main() {
+	// Handle hash-password subcommand before config loading.
+	if len(os.Args) > 1 && os.Args[1] == "hash-password" {
+		hashPassword()
+		return
+	}
+
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func hashPassword() {
+	fmt.Fprint(os.Stderr, "Enter password: ")
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		fmt.Fprintln(os.Stderr, "no input")
+		os.Exit(1)
+	}
+	password := scanner.Text()
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(string(hash))
 }
 
 func run() error {
@@ -32,11 +62,34 @@ func run() error {
 	}
 
 	logger := logging.NewLogger(cfg.Environment)
-	logger.Info("vault-sync starting", slog.String("version", Version))
+	logger.Info("vault-sync starting",
+		slog.String("version", Version),
+		slog.Bool("sync", cfg.EnableSync),
+		slog.Bool("mcp", cfg.EnableMCP),
+	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	g, gctx := errgroup.WithContext(ctx)
+
+	if cfg.EnableSync {
+		g.Go(func() error {
+			return runSync(gctx, cfg, logger)
+		})
+	}
+
+	if cfg.EnableMCP {
+		g.Go(func() error {
+			return runMCP(gctx, cfg, logger)
+		})
+	}
+
+	return g.Wait()
+}
+
+// runSync starts the Obsidian sync daemon.
+func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 	appState, err := state.Load()
 	if err != nil {
 		return fmt.Errorf("loading state: %w", err)
@@ -50,21 +103,20 @@ func run() error {
 		return err
 	}
 
-	vault, err := selectVault(vaultList, cfg.VaultName)
+	v, err := selectVault(vaultList, cfg.VaultName)
 	if err != nil {
 		return err
 	}
 
 	logger.Info("selected vault",
-		slog.String("name", vault.Name),
-		slog.String("id", vault.ID),
-		slog.String("host", vault.Host),
-		slog.Int("encryption_version", vault.EncryptionVersion),
+		slog.String("name", v.Name),
+		slog.String("id", v.ID),
+		slog.String("host", v.Host),
+		slog.Int("encryption_version", v.EncryptionVersion),
 	)
 
-	// Derive encryption key, keyhash, and cipher.
 	logger.Info("deriving encryption key")
-	key, err := obsidian.DeriveKey(cfg.VaultPassword, vault.Salt)
+	key, err := obsidian.DeriveKey(cfg.VaultPassword, v.Salt)
 	if err != nil {
 		return fmt.Errorf("deriving key: %w", err)
 	}
@@ -76,7 +128,7 @@ func run() error {
 		return fmt.Errorf("creating cipher: %w", err)
 	}
 
-	vs, err := appState.GetVault(vault.ID)
+	vs, err := appState.GetVault(v.ID)
 	if err != nil {
 		return fmt.Errorf("reading vault state: %w", err)
 	}
@@ -87,26 +139,24 @@ func run() error {
 
 	vaultFS := obsidian.NewVault(cfg.SyncDir)
 
-	// Initialize vault buckets for local/server file tracking.
-	if err := appState.InitVaultBuckets(vault.ID); err != nil {
+	if err := appState.InitVaultBuckets(v.ID); err != nil {
 		return fmt.Errorf("initializing vault buckets: %w", err)
 	}
 
-	// Connect to sync server.
 	syncClient := obsidian.NewSyncClient(obsidian.SyncConfig{
-		Host:              vault.Host,
+		Host:              v.Host,
 		Token:             token,
-		VaultID:           vault.ID,
+		VaultID:           v.ID,
 		KeyHash:           keyHash,
 		Device:            cfg.DeviceName,
-		EncryptionVersion: vault.EncryptionVersion,
+		EncryptionVersion: v.EncryptionVersion,
 		Version:           vs.Version,
 		Initial:           vs.Initial,
 		Cipher:            cipher,
 		Vault:             vaultFS,
 		State:             appState,
 		OnReady: func(version int64) {
-			if err := appState.SetVault(vault.ID, state.VaultState{
+			if err := appState.SetVault(v.ID, state.VaultState{
 				Version: version,
 				Initial: false,
 			}); err != nil {
@@ -122,48 +172,109 @@ func run() error {
 		return fmt.Errorf("connecting to sync server: %w", err)
 	}
 
-	// Read from server until "ready". Pushes are queued for reconciliation.
-	// No read loop goroutine is running, so the reconciler can call pull
-	// directly on the connection.
 	var serverPushes []obsidian.ServerPush
 	if err := syncClient.WaitForReady(ctx, &serverPushes); err != nil {
 		return fmt.Errorf("waiting for server ready: %w", err)
 	}
 
-	// Scan local filesystem.
-	scan, err := obsidian.ScanLocal(vaultFS, appState, vault.ID, logger)
+	scan, err := obsidian.ScanLocal(vaultFS, appState, v.ID, logger)
 	if err != nil {
 		return fmt.Errorf("scanning local files: %w", err)
 	}
 
-	// Phase 1: Process server pushes (downloads/merges). This calls pull
-	// directly and must complete before the read loop starts.
-	reconciler := obsidian.NewReconciler(vaultFS, syncClient, appState, vault.ID, cipher, logger)
+	reconciler := obsidian.NewReconciler(vaultFS, syncClient, appState, v.ID, cipher, logger)
 	if err := reconciler.Phase1(ctx, serverPushes, scan); err != nil {
 		return fmt.Errorf("reconciliation phase 1 failed: %w", err)
 	}
 	serverPushes = nil
 
-	// Start the read loop. After this, the read loop owns all conn.Read
-	// calls. Phase 2-3 use Push which needs the read loop for acks.
-	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		return syncClient.Listen(gctx)
+	sg, sgctx := errgroup.WithContext(ctx)
+	sg.Go(func() error {
+		return syncClient.Listen(sgctx)
 	})
 
-	// Phases 2-3: Delete remote files, upload local changes. These use
-	// Push which requires the read loop to deliver server acks.
-	if err := reconciler.Phase2And3(gctx, scan); err != nil {
+	if err := reconciler.Phase2And3(sgctx, scan); err != nil {
 		logger.Warn("reconciliation phases 2-3 failed", slog.String("error", err.Error()))
 	}
 
-	// Start the watcher for live file changes.
 	watcher := obsidian.NewWatcher(vaultFS, syncClient, logger)
-	g.Go(func() error {
-		return watcher.Watch(gctx)
+	sg.Go(func() error {
+		return watcher.Watch(sgctx)
 	})
 
-	return g.Wait()
+	return sg.Wait()
+}
+
+// runMCP starts the MCP HTTP server.
+func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
+	users, err := cfg.ParseMCPUsers()
+	if err != nil {
+		return fmt.Errorf("parsing MCP auth users: %w", err)
+	}
+
+	mcpLogger := logger.With(slog.String("service", "mcp"))
+
+	mcpLogger.Info("opening vault", slog.String("path", cfg.SyncDir))
+	v, err := vault.New(cfg.SyncDir)
+	if err != nil {
+		return fmt.Errorf("opening vault: %w", err)
+	}
+
+	if vault.RgPath() != "" {
+		mcpLogger.Info("ripgrep available for search", slog.String("path", vault.RgPath()))
+	} else {
+		mcpLogger.Debug("ripgrep not found, using built-in search")
+	}
+
+	mcpServer := mcp.NewServer(
+		&mcp.Implementation{Name: "vault-sync-mcp", Version: Version},
+		nil,
+	)
+	mcpserver.RegisterTools(mcpServer, v)
+
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		return mcpServer
+	}, nil)
+
+	store := auth.NewStore()
+	authMiddleware := auth.Middleware(store, cfg.MCPServerURL)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/oauth-protected-resource", auth.HandleProtectedResourceMetadata(cfg.MCPServerURL))
+	mux.HandleFunc("/.well-known/oauth-authorization-server", auth.HandleAuthServerMetadata(cfg.MCPServerURL))
+	mux.HandleFunc("/oauth/register", auth.HandleRegistration(store))
+	mux.HandleFunc("/oauth/authorize", auth.HandleAuthorize(store, users, mcpLogger))
+	mux.HandleFunc("/oauth/token", auth.HandleToken(store))
+	mux.Handle("/mcp", authMiddleware(mcpHandler))
+
+	server := &http.Server{
+		Addr:         cfg.MCPListenAddr,
+		Handler:      mux,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	mcpLogger.Info("starting MCP server",
+		slog.String("listen", cfg.MCPListenAddr),
+		slog.String("server_url", cfg.MCPServerURL),
+		slog.Int("users", len(users)),
+	)
+
+	// Shutdown when context is cancelled.
+	go func() {
+		<-ctx.Done()
+		mcpLogger.Info("shutting down MCP server")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		server.Shutdown(shutdownCtx)
+	}()
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("MCP server error: %w", err)
+	}
+
+	return nil
 }
 
 func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Config, appState *state.State, logger *slog.Logger) (string, *obsidian.VaultListResponse, error) {
@@ -178,17 +289,17 @@ func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Conf
 	}
 
 	logger.Info("signing in", slog.String("email", cfg.Email))
-	auth, err := client.Signin(ctx, cfg.Email, cfg.Password)
+	authResp, err := client.Signin(ctx, cfg.Email, cfg.Password)
 	if err != nil {
 		return "", nil, fmt.Errorf("signing in: %w", err)
 	}
-	logger.Info("signed in", slog.String("name", auth.Name), slog.String("email", auth.Email))
+	logger.Info("signed in", slog.String("name", authResp.Name), slog.String("email", authResp.Email))
 
-	if err := appState.SetToken(auth.Token); err != nil {
+	if err := appState.SetToken(authResp.Token); err != nil {
 		logger.Warn("failed to save token", slog.String("error", err.Error()))
 	}
 
-	vaults, err := client.ListVaults(ctx, auth.Token)
+	vaults, err := client.ListVaults(ctx, authResp.Token)
 	if err != nil {
 		return "", nil, fmt.Errorf("listing vaults: %w", err)
 	}
@@ -197,7 +308,7 @@ func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Conf
 		return "", nil, fmt.Errorf("no vaults found for this account")
 	}
 
-	return auth.Token, vaults, nil
+	return authResp.Token, vaults, nil
 }
 
 func selectVault(vaults *obsidian.VaultListResponse, name string) (*obsidian.VaultInfo, error) {
