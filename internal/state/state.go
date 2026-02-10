@@ -297,8 +297,13 @@ func (s *State) AllServerFiles(vaultID string) (map[string]ServerFile, error) {
 }
 
 func dbPath() string {
-	if dir, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(dir, ".vault-sync", "state.db")
+	dir, err := os.UserHomeDir()
+	if err != nil {
+		// Fail loudly rather than silently writing to the current directory
+		// where the database (containing session tokens) might end up with
+		// wrong permissions or inside a source-controlled tree.
+		fmt.Fprintf(os.Stderr, "fatal: cannot determine home directory: %v\n", err)
+		os.Exit(1)
 	}
-	return "state.db"
+	return filepath.Join(dir, ".vault-sync", "state.db")
 }

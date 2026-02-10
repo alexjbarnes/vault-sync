@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -180,7 +181,9 @@ func TestPost_EndpointAppendsToBaseURL(t *testing.T) {
 
 func TestNewClient_NilHTTPClient(t *testing.T) {
 	c := NewClient(nil)
-	assert.Equal(t, http.DefaultClient, c.httpClient)
+	assert.NotNil(t, c.httpClient)
+	assert.Equal(t, 30*time.Second, c.httpClient.Timeout, "default client should have a 30s timeout")
+	assert.NotNil(t, c.httpClient.CheckRedirect, "default client should have a redirect policy")
 	assert.Equal(t, baseURL, c.baseURL)
 }
 

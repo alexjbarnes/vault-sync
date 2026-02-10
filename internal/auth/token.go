@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -114,8 +115,9 @@ func HandleToken(store *Store) http.HandlerFunc {
 }
 
 // verifyPKCE checks that SHA256(verifier) matches the challenge (S256 method).
+// Uses constant-time comparison to prevent timing side channels.
 func verifyPKCE(verifier, challenge string) bool {
 	h := sha256.Sum256([]byte(verifier))
 	computed := base64.RawURLEncoding.EncodeToString(h[:])
-	return computed == challenge
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 }

@@ -77,6 +77,14 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 			return nil
 		}
 
+		// Skip symlinks to prevent following links to files outside the
+		// vault or to special files (devices, FIFOs) that could hang or
+		// produce unexpected data.
+		if d.Type()&os.ModeSymlink != 0 {
+			logger.Debug("skipping symlink during scan", slog.String("path", relPath))
+			return nil
+		}
+
 		seen[relPath] = true
 
 		info, err := d.Info()

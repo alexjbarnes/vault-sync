@@ -2,7 +2,10 @@ package config
 
 import (
 	"fmt"
+	"log"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/alexjbarnes/vault-sync/internal/auth"
@@ -42,10 +45,28 @@ type Config struct {
 	MCPLogLevel   string `env:"MCP_LOG_LEVEL" envDefault:"info"`
 }
 
+// warnInsecureEnvFile checks whether the .env file (if present) has
+// overly permissive permissions. On Unix systems, group or world
+// readable files risk exposing credentials to other users.
+func warnInsecureEnvFile() {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(".env")
+	if err != nil {
+		return // file does not exist, nothing to check
+	}
+	mode := info.Mode().Perm()
+	if mode&0077 != 0 {
+		log.Printf("WARNING: .env file has insecure permissions %04o; recommended 0600", mode)
+	}
+}
+
 // Load reads configuration from environment variables.
 // It first attempts to load a .env file if present, then parses env vars.
 func Load() (*Config, error) {
 	_ = godotenv.Load()
+	warnInsecureEnvFile()
 
 	cfg := &Config{}
 	if err := env.Parse(cfg); err != nil {

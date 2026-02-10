@@ -11,6 +11,14 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
+// mtimeMin and mtimeMax clamp server-provided modification times to a
+// reasonable range, preventing a malicious server from setting far-future
+// or far-past timestamps that could confuse the reconciler.
+var (
+	mtimeMin = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	mtimeMax = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+)
+
 // Vault provides thread-safe filesystem operations on the sync directory.
 // All writes are serialized by an exclusive lock. Reads take a shared lock
 // to prevent reading partial writes. SyncClient, Watcher, API, and MCP
@@ -67,6 +75,7 @@ func (v *Vault) WriteFile(relPath string, data []byte, mtime time.Time) error {
 	}
 
 	if !mtime.IsZero() {
+		mtime = clampMtime(mtime)
 		if err := os.Chtimes(absPath, mtime, mtime); err != nil {
 			return fmt.Errorf("setting mtime for %s: %w", relPath, err)
 		}
@@ -185,17 +194,117 @@ func (v *Vault) Stat(relPath string) (os.FileInfo, error) {
 	return os.Stat(absPath)
 }
 
+// StatAndWriteFile atomically checks that a file has not changed since
+// prePullInfo and writes new content. Both the check and write happen
+// under a single write lock, closing the TOCTOU gap between separate
+// Stat and WriteFile calls. If prePullInfo is nil, the write proceeds
+// unconditionally. Returns an error if the file was modified between
+// the pre-pull stat and now.
+func (v *Vault) StatAndWriteFile(relPath string, data []byte, mtime time.Time, prePullInfo os.FileInfo) error {
+	absPath, err := v.resolve(relPath)
+	if err != nil {
+		return err
+	}
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if prePullInfo != nil {
+		info, err := os.Stat(absPath)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("stat %s: %w", relPath, err)
+		}
+		if err == nil {
+			if !info.ModTime().Equal(prePullInfo.ModTime()) || info.Size() != prePullInfo.Size() {
+				return fmt.Errorf("download cancelled because %s was changed locally during download", relPath)
+			}
+		}
+		// If file was deleted (os.IsNotExist), let the write recreate it.
+	}
+
+	dir := filepath.Dir(absPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating directory for %s: %w", relPath, err)
+	}
+
+	if err := os.WriteFile(absPath, data, 0644); err != nil {
+		return err
+	}
+
+	if !mtime.IsZero() {
+		mtime = clampMtime(mtime)
+		if err := os.Chtimes(absPath, mtime, mtime); err != nil {
+			return fmt.Errorf("setting mtime for %s: %w", relPath, err)
+		}
+	}
+
+	return nil
+}
+
 // resolve converts a relative path to an absolute path within the vault
-// directory, rejecting path traversal attempts.
+// directory, rejecting path traversal attempts. Validates against null
+// bytes, ".." segments, and symlinks that escape the vault.
 func (v *Vault) resolve(relPath string) (string, error) {
 	if relPath == "" {
 		return "", fmt.Errorf("empty path")
+	}
+	if strings.ContainsRune(relPath, 0) {
+		return "", fmt.Errorf("path contains null byte: %q", relPath)
+	}
+	// Reject paths containing ".." segments before filepath.Join cleans
+	// them, as defense in depth against traversal in decrypted server paths.
+	for _, seg := range strings.Split(relPath, "/") {
+		if seg == ".." {
+			return "", fmt.Errorf("path contains ..: %q", relPath)
+		}
 	}
 	absPath := filepath.Join(v.dir, relPath)
 	if !strings.HasPrefix(absPath, v.dir+string(os.PathSeparator)) {
 		return "", fmt.Errorf("path traversal blocked: %q resolves outside vault dir", relPath)
 	}
+
+	// Resolve symlinks and verify the real path stays within the vault.
+	// This prevents a symlink at any path component from escaping the vault.
+	realPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		// If the file does not exist yet (WriteFile for a new file), check
+		// the parent directory instead. If the parent is a symlink pointing
+		// outside, that is still a traversal.
+		if os.IsNotExist(err) {
+			parentReal, pErr := filepath.EvalSymlinks(filepath.Dir(absPath))
+			if pErr != nil {
+				// Parent doesn't exist either. MkdirAll will create it.
+				// The prefix check above already passed, so we allow it.
+				return absPath, nil
+			}
+			parentExpected := filepath.Dir(absPath)
+			vaultPrefix := v.dir + string(os.PathSeparator)
+			if !strings.HasPrefix(parentReal+string(os.PathSeparator), vaultPrefix) && parentReal != v.dir {
+				// Check if parentExpected is the vault dir itself (single-level file).
+				if parentExpected != v.dir {
+					return "", fmt.Errorf("symlink traversal blocked: parent of %q resolves to %q outside vault", relPath, parentReal)
+				}
+			}
+			return absPath, nil
+		}
+		return "", fmt.Errorf("resolving symlinks for %q: %w", relPath, err)
+	}
+	if !strings.HasPrefix(realPath, v.dir+string(os.PathSeparator)) && realPath != v.dir {
+		return "", fmt.Errorf("symlink traversal blocked: %q resolves to %q outside vault dir", relPath, realPath)
+	}
 	return absPath, nil
+}
+
+// clampMtime restricts a timestamp to the range [2000, 2100) to prevent
+// a malicious server from setting unreasonable modification times.
+func clampMtime(t time.Time) time.Time {
+	if t.Before(mtimeMin) {
+		return mtimeMin
+	}
+	if t.After(mtimeMax) {
+		return mtimeMax
+	}
+	return t
 }
 
 // normalizePath matches Obsidian's normalizePath() function. It replaces

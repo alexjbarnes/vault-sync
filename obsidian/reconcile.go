@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -307,7 +308,9 @@ func (r *Reconciler) executeDecision(ctx context.Context, decision ReconcileDeci
 				return nil
 			}
 		} else {
-			r.vault.DeleteFile(path)
+			if err := r.vault.DeleteFile(path); err != nil {
+				r.logger.Warn("reconcile: delete failed", slog.String("path", path), slog.String("error", err.Error()))
+			}
 		}
 		r.persistServerPush(path, push, true)
 		r.deleteLocalState(path)
@@ -458,8 +461,17 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 	}
 	patches := dmp.PatchMake(baseText, diffs)
 	// Obsidian discards the applied-status array and writes the result
-	// regardless. Failed patches are silently lost. We match this behavior.
-	merged, _ := dmp.PatchApply(patches, serverText)
+	// regardless. We match this behavior but log a warning when patches
+	// fail so users can identify potential data loss.
+	merged, applied := dmp.PatchApply(patches, serverText)
+	for i, ok := range applied {
+		if !ok {
+			r.logger.Warn("reconcile: merge patch failed to apply",
+				slog.String("path", path),
+				slog.Int("patch_index", i),
+			)
+		}
+	}
 
 	r.logger.Info("reconcile: three-way merge", slog.String("path", path))
 	return r.writeServerContent(path, push, []byte(merged))
@@ -559,7 +571,9 @@ func (r *Reconciler) handleTypeConflict(ctx context.Context, path string, push P
 	if err := r.vault.WriteFile(conflictPath, content, time.Time{}); err != nil {
 		return fmt.Errorf("writing conflict copy %s: %w", conflictPath, err)
 	}
-	r.vault.DeleteFile(path)
+	if err := r.vault.DeleteFile(path); err != nil {
+		r.logger.Warn("reconcile: delete after conflict copy failed", slog.String("path", path), slog.String("error", err.Error()))
+	}
 
 	if push.Deleted {
 		r.persistServerPush(path, push, true)
@@ -569,11 +583,22 @@ func (r *Reconciler) handleTypeConflict(ctx context.Context, path string, push P
 	return r.downloadServerFile(ctx, path, push)
 }
 
-// conflictCopyPath returns the conflict copy path for a file. Matches
-// the Obsidian app behavior: single fixed name, no deduplication. If a
-// conflict copy already exists at this path it gets overwritten.
+// conflictCopyPath returns the conflict copy path for a file. Appends
+// a counter if the base conflict path already exists on disk to avoid
+// silently overwriting a previous conflict copy or a user-created file.
 func conflictCopyPath(base, ext string) string {
-	return base + " (Conflicted copy)" + ext
+	candidate := base + " (Conflicted copy)" + ext
+	if _, err := os.Stat(candidate); os.IsNotExist(err) {
+		return candidate
+	}
+	for i := 2; i <= 100; i++ {
+		candidate = fmt.Sprintf("%s (Conflicted copy %d)%s", base, i, ext)
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+	}
+	// Fallback: use timestamp to guarantee uniqueness.
+	return fmt.Sprintf("%s (Conflicted copy %d)%s", base, time.Now().UnixMilli(), ext)
 }
 
 // downloadServerFile pulls content from the server, decrypts it, and

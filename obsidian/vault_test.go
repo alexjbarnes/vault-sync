@@ -257,7 +257,7 @@ func TestVault_RejectsPathTraversal(t *testing.T) {
 
 	_, err := v.ReadFile("../../etc/passwd")
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "path traversal blocked")
+	assert.Contains(t, err.Error(), "path contains ..")
 }
 
 func TestVault_RejectsEmptyPath(t *testing.T) {

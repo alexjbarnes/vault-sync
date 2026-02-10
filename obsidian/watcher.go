@@ -97,9 +97,11 @@ func (w *Watcher) Watch(ctx context.Context) error {
 				pending[event.Name] = time.Now()
 
 				// If a new directory was created, watch it recursively.
+				// Use Lstat to avoid following symlinks that could point
+				// outside the vault directory.
 				if event.Has(fsnotify.Create) {
-					info, err := os.Stat(event.Name)
-					if err == nil && info.IsDir() {
+					info, err := os.Lstat(event.Name)
+					if err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 						w.addRecursive(event.Name)
 					}
 				}

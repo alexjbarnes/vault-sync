@@ -302,7 +302,9 @@ func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPus
 				elapsed := time.Since(s.lastMessage)
 				s.lastMsgMu.Unlock()
 				if elapsed > pingAfter {
-					s.writeJSON(ctx, map[string]string{"op": "ping"})
+					if err := s.writeJSON(ctx, map[string]string{"op": "ping"}); err != nil {
+						return
+					}
 				}
 			}
 		}
@@ -384,9 +386,13 @@ func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPus
 func (s *SyncClient) startReader(connCtx context.Context) {
 	ch := make(chan inboundMsg, 64)
 	s.inboundCh = ch
+	// Capture conn by value to avoid racing with s.conn reassignment
+	// during reconnect. The old reader goroutine uses the old conn;
+	// the new reader goroutine uses the new conn.
+	conn := s.conn
 	go func() {
 		for {
-			typ, data, err := s.conn.Read(connCtx)
+			typ, data, err := conn.Read(connCtx)
 			select {
 			case ch <- inboundMsg{typ: typ, data: data, err: err}:
 			case <-connCtx.Done():
@@ -879,7 +885,9 @@ func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 				return
 			}
 		} else {
-			s.vault.DeleteFile(path)
+			if err := s.vault.DeleteFile(path); err != nil {
+				s.logger.Warn("delete failed (while busy)", slog.String("path", path), slog.String("error", err.Error()))
+			}
 		}
 		s.removeHashCache(path)
 		s.persistServerFile(path, push, true)
@@ -969,7 +977,9 @@ func (s *SyncClient) executeLiveDecision(ctx context.Context, decision Reconcile
 				return nil
 			}
 		} else {
-			s.vault.DeleteFile(path)
+			if err := s.vault.DeleteFile(path); err != nil {
+				s.logger.Warn("delete failed", slog.String("path", path), slog.String("error", err.Error()))
+			}
 		}
 		s.removeHashCache(path)
 		s.persistServerFile(path, push, true)
@@ -1030,17 +1040,13 @@ func (s *SyncClient) liveDownload(ctx context.Context, path string, push PushMes
 		}
 	}
 
-	// Check if file was modified during download by comparing against
-	// the pre-pull stat, not the server mtime.
-	if err := s.checkFileChangedDuringDownload(path, prePullInfo); err != nil {
-		return err
-	}
-
 	var mtime time.Time
 	if push.MTime > 0 {
 		mtime = time.UnixMilli(push.MTime)
 	}
-	if err := s.vault.WriteFile(path, plaintext, mtime); err != nil {
+	// Atomically check that the file was not modified during download
+	// and write the new content under a single lock.
+	if err := s.vault.StatAndWriteFile(path, plaintext, mtime, prePullInfo); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 
@@ -1173,7 +1179,15 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 		diffs = dmp.DiffCleanupEfficiency(diffs)
 	}
 	patches := dmp.PatchMake(baseText, diffs)
-	merged, _ := dmp.PatchApply(patches, serverText)
+	merged, applied := dmp.PatchApply(patches, serverText)
+	for i, ok := range applied {
+		if !ok {
+			s.logger.Warn("merge patch failed to apply",
+				slog.String("path", path),
+				slog.Int("patch_index", i),
+			)
+		}
+	}
 
 	s.logger.Info("merge: three-way", slog.String("path", path))
 	return s.liveWriteContent(path, push, []byte(merged))
@@ -1265,7 +1279,9 @@ func (s *SyncClient) liveTypeConflict(ctx context.Context, path string, push Pus
 	if err := s.vault.WriteFile(cp, content, time.Time{}); err != nil {
 		return fmt.Errorf("writing conflict copy %s: %w", cp, err)
 	}
-	s.vault.DeleteFile(path)
+	if err := s.vault.DeleteFile(path); err != nil {
+		s.logger.Warn("delete after conflict copy failed", slog.String("path", path), slog.String("error", err.Error()))
+	}
 
 	if push.Deleted {
 		s.persistServerFile(path, push, true)
@@ -1302,27 +1318,6 @@ func (s *SyncClient) liveWriteContent(path string, push PushMessage, plaintext [
 		slog.String("path", path),
 		slog.Int("bytes", len(plaintext)),
 	)
-	return nil
-}
-
-// checkFileChangedDuringDownload aborts if the file was modified while we
-// were pulling content. prePullInfo is the os.FileInfo from before the pull
-// started. If nil (file didn't exist before), the check is skipped.
-func (s *SyncClient) checkFileChangedDuringDownload(path string, prePullInfo os.FileInfo) error {
-	if prePullInfo == nil {
-		return nil
-	}
-	info, err := s.vault.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// File was deleted during download. Let the write recreate it.
-			return nil
-		}
-		return fmt.Errorf("stat %s: %w", path, err)
-	}
-	if !info.ModTime().Equal(prePullInfo.ModTime()) || info.Size() != prePullInfo.Size() {
-		return fmt.Errorf("download cancelled because %s was changed locally during download", path)
-	}
 	return nil
 }
 
@@ -1663,7 +1658,9 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 		return nil, fmt.Errorf("pull response pieces %d out of range [0, %d] for size %d", resp.Pieces, maxPieces, resp.Size)
 	}
 
-	// Read binary frames containing the encrypted content.
+	// Read binary frames containing the encrypted content. Track
+	// cumulative size to prevent a malicious server from sending
+	// more data than claimed in resp.Size.
 	content := make([]byte, 0, resp.Size)
 	for i := 0; i < resp.Pieces; i++ {
 		raw, err := s.readInbound(ctx)
@@ -1684,6 +1681,9 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 			}
 			return nil, fmt.Errorf("expected binary frame, got text: %s", string(raw.data))
 		}
+		if int64(len(content))+int64(len(raw.data)) > maxSize {
+			return nil, fmt.Errorf("pull data exceeds declared size %d", resp.Size)
+		}
 		content = append(content, raw.data...)
 	}
 
@@ -1692,6 +1692,9 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 
 // readInbound reads the next message from inboundCh with a timeout.
 func (s *SyncClient) readInbound(ctx context.Context) (inboundMsg, error) {
+	timer := time.NewTimer(responseTimeout)
+	defer timer.Stop()
+
 	select {
 	case msg := <-s.inboundCh:
 		if msg.err != nil {
@@ -1699,7 +1702,7 @@ func (s *SyncClient) readInbound(ctx context.Context) (inboundMsg, error) {
 		}
 		s.touchLastMessage()
 		return msg, nil
-	case <-time.After(responseTimeout):
+	case <-timer.C:
 		return inboundMsg{}, errResponseTimeout
 	case <-ctx.Done():
 		return inboundMsg{}, ctx.Err()
@@ -1796,6 +1799,13 @@ func (s *SyncClient) reconnect(ctx context.Context) error {
 	clear(s.retryBackoff)
 	s.retryBackoffMu.Unlock()
 
+	// Clear the hash cache to prevent unbounded growth over long sessions.
+	// The cache will be repopulated as files are pushed and pulled on the
+	// new connection.
+	s.hashCacheMu.Lock()
+	clear(s.hashCache)
+	s.hashCacheMu.Unlock()
+
 	if err := s.Connect(ctx); err != nil {
 		return err
 	}
@@ -1820,8 +1830,10 @@ func (s *SyncClient) reconnect(ctx context.Context) error {
 	// processPushDirect calls above. Each pull may trigger more
 	// interleaved pushes, so loop until the queue is empty. The reader
 	// goroutine has not started, so processPushDirect reads directly
-	// from the connection.
-	for {
+	// from the connection. Cap iterations to prevent an infinite loop
+	// if the server keeps sending interleaved pushes.
+	const maxDrainIterations = 50
+	for iter := 0; iter < maxDrainIterations; iter++ {
 		s.pendingPullsMu.Lock()
 		pulls := s.pendingPulls
 		s.pendingPulls = nil
@@ -1838,6 +1850,10 @@ func (s *SyncClient) reconnect(ctx context.Context) error {
 					slog.String("error", err.Error()),
 				)
 			}
+		}
+
+		if iter == maxDrainIterations-1 {
+			s.logger.Warn("pending pull drain loop hit max iterations, breaking")
 		}
 	}
 
@@ -1938,6 +1954,9 @@ func (s *SyncClient) pullDirect(ctx context.Context, uid int64) ([]byte, error) 
 			}
 			return nil, fmt.Errorf("expected binary frame, got text: %s", string(data))
 		}
+		if int64(len(content))+int64(len(data)) > maxSize {
+			return nil, fmt.Errorf("pull data exceeds declared size %d", resp.Size)
+		}
 		content = append(content, data...)
 	}
 
@@ -1994,7 +2013,14 @@ func (s *SyncClient) checkRetryBackoff(path string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 
-	delay := 5 * time.Second * time.Duration(1<<entry.count)
+	// Cap the shift exponent to prevent integer overflow. At count=10,
+	// the raw delay is 5s * 1024 = ~85 minutes, well above the 5-minute
+	// cap. Beyond 10 the bit shift overflows time.Duration.
+	shift := entry.count
+	if shift > 10 {
+		shift = 10
+	}
+	delay := 5 * time.Second * time.Duration(1<<shift)
 	if delay > 5*time.Minute {
 		delay = 5 * time.Minute
 	}

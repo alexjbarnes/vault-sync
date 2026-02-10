@@ -54,6 +54,15 @@ func NewCipherV0(key []byte) (*CipherV0, error) {
 	return &CipherV0{gcm: gcm}, nil
 }
 
+// ZeroKey overwrites the key material in the given slice. Call this
+// immediately after passing the key to NewCipherV0 to limit the window
+// during which raw key bytes are accessible in memory.
+func ZeroKey(key []byte) {
+	for i := range key {
+		key[i] = 0
+	}
+}
+
 // DecryptPath decodes a hex-encoded encrypted path string.
 // Format: hex([12-byte IV][ciphertext+tag])
 func (c *CipherV0) DecryptPath(hexStr string) (string, error) {

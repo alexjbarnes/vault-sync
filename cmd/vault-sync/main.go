@@ -102,6 +102,18 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error
 	if err != nil {
 		return err
 	}
+	// Best-effort signout on shutdown to invalidate the session token.
+	// Uses a detached context so the signout request can complete even
+	// after the parent context is cancelled by SIGINT/SIGTERM.
+	defer func() {
+		signoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := client.Signout(signoutCtx, token); err != nil {
+			logger.Debug("signout on shutdown", slog.String("error", err.Error()))
+		} else {
+			logger.Debug("signed out")
+		}
+	}()
 
 	v, err := selectVault(vaultList, cfg.VaultName)
 	if err != nil {
@@ -121,12 +133,14 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error
 		return fmt.Errorf("deriving key: %w", err)
 	}
 	keyHash := obsidian.KeyHash(key)
-	logger.Debug("key derived", slog.String("keyhash_prefix", keyHash[:16]))
+	logger.Debug("key derived")
 
 	cipher, err := obsidian.NewCipherV0(key)
 	if err != nil {
+		obsidian.ZeroKey(key)
 		return fmt.Errorf("creating cipher: %w", err)
 	}
+	obsidian.ZeroKey(key)
 
 	vs, err := appState.GetVault(v.ID)
 	if err != nil {
@@ -299,12 +313,12 @@ func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Conf
 		logger.Debug("cached token expired, signing in fresh")
 	}
 
-	logger.Info("signing in", slog.String("email", cfg.Email))
+	logger.Debug("signing in", slog.String("email", cfg.Email))
 	authResp, err := client.Signin(ctx, cfg.Email, cfg.Password)
 	if err != nil {
 		return "", nil, fmt.Errorf("signing in: %w", err)
 	}
-	logger.Info("signed in", slog.String("name", authResp.Name), slog.String("email", authResp.Email))
+	logger.Info("signed in")
 
 	if err := appState.SetToken(authResp.Token); err != nil {
 		logger.Warn("failed to save token", slog.String("error", err.Error()))

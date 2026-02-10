@@ -38,6 +38,11 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 			return
 		}
 
+		if !store.RegistrationAllowed() {
+			writeJSONError(w, http.StatusTooManyRequests, "rate_limit", "too many registration requests, try again later")
+			return
+		}
+
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 
 		var req registrationRequest

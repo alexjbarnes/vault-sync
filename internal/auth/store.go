@@ -61,6 +61,10 @@ type Store struct {
 	clients map[string]*ClientInfo // client_id -> ClientInfo
 	csrf    map[string]csrfEntry   // csrf token -> expiry
 	stopGC  chan struct{}
+
+	// registrationTimes tracks recent registration timestamps for
+	// rate limiting unauthenticated /oauth/register requests.
+	registrationTimes []time.Time
 }
 
 // NewStore creates an empty OAuth store and starts a background
@@ -166,6 +170,32 @@ func (s *Store) ValidateToken(token string) *TokenInfo {
 		return nil
 	}
 	return ti
+}
+
+// RegistrationAllowed checks whether a new registration is allowed under
+// the rate limit (10 registrations per minute). Returns false if the
+// limit is exceeded.
+func (s *Store) RegistrationAllowed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	window := now.Add(-1 * time.Minute)
+
+	// Prune entries older than the window.
+	valid := s.registrationTimes[:0]
+	for _, t := range s.registrationTimes {
+		if t.After(window) {
+			valid = append(valid, t)
+		}
+	}
+	s.registrationTimes = valid
+
+	if len(s.registrationTimes) >= 10 {
+		return false
+	}
+	s.registrationTimes = append(s.registrationTimes, now)
+	return true
 }
 
 // RegisterClient stores a new client registration. Returns false if the

@@ -604,28 +604,36 @@ func TestPersistLocalFolder_WritesCorrectState(t *testing.T) {
 	assert.Greater(t, lf.SyncTime, int64(0))
 }
 
-// --- checkFileChangedDuringDownload ---
+// --- StatAndWriteFile (replaces checkFileChangedDuringDownload) ---
 
-func TestCheckFileChanged_NilPrePullInfo(t *testing.T) {
-	s, _, _, _ := fullSyncClient(t)
+func TestStatAndWriteFile_NilPrePullInfo(t *testing.T) {
+	_, vault, _, _ := fullSyncClient(t)
 
-	err := s.checkFileChangedDuringDownload("any.md", nil)
-	assert.NoError(t, err, "nil prePullInfo should skip check")
+	err := vault.StatAndWriteFile("any.md", []byte("new"), time.Time{}, nil)
+	assert.NoError(t, err, "nil prePullInfo should write unconditionally")
+
+	content, err := vault.ReadFile("any.md")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("new"), content)
 }
 
-func TestCheckFileChanged_Unchanged(t *testing.T) {
-	s, vault, _, _ := fullSyncClient(t)
+func TestStatAndWriteFile_Unchanged(t *testing.T) {
+	_, vault, _, _ := fullSyncClient(t)
 
 	require.NoError(t, vault.WriteFile("stable.md", []byte("data"), time.Time{}))
 	info, err := vault.Stat("stable.md")
 	require.NoError(t, err)
 
-	err = s.checkFileChangedDuringDownload("stable.md", info)
+	err = vault.StatAndWriteFile("stable.md", []byte("updated"), time.Time{}, info)
 	assert.NoError(t, err)
+
+	content, err := vault.ReadFile("stable.md")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("updated"), content)
 }
 
-func TestCheckFileChanged_MtimeChanged(t *testing.T) {
-	s, vault, _, _ := fullSyncClient(t)
+func TestStatAndWriteFile_MtimeChanged(t *testing.T) {
+	_, vault, _, _ := fullSyncClient(t)
 
 	require.NoError(t, vault.WriteFile("changing.md", []byte("data"), time.Time{}))
 	info, err := vault.Stat("changing.md")
@@ -635,12 +643,12 @@ func TestCheckFileChanged_MtimeChanged(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	require.NoError(t, vault.WriteFile("changing.md", []byte("data"), time.Time{}))
 
-	err = s.checkFileChangedDuringDownload("changing.md", info)
+	err = vault.StatAndWriteFile("changing.md", []byte("should fail"), time.Time{}, info)
 	assert.ErrorContains(t, err, "changed locally during download")
 }
 
-func TestCheckFileChanged_SizeChanged(t *testing.T) {
-	s, vault, _, _ := fullSyncClient(t)
+func TestStatAndWriteFile_SizeChanged(t *testing.T) {
+	_, vault, _, _ := fullSyncClient(t)
 
 	mtime := time.Now().Truncate(time.Second)
 	require.NoError(t, vault.WriteFile("grow.md", []byte("a"), mtime))
@@ -650,12 +658,12 @@ func TestCheckFileChanged_SizeChanged(t *testing.T) {
 	// Write different size with same mtime.
 	require.NoError(t, vault.WriteFile("grow.md", []byte("abcdef"), mtime))
 
-	err = s.checkFileChangedDuringDownload("grow.md", info)
+	err = vault.StatAndWriteFile("grow.md", []byte("should fail"), time.Time{}, info)
 	assert.ErrorContains(t, err, "changed locally during download")
 }
 
-func TestCheckFileChanged_FileDeleted(t *testing.T) {
-	s, vault, _, _ := fullSyncClient(t)
+func TestStatAndWriteFile_FileDeleted(t *testing.T) {
+	_, vault, _, _ := fullSyncClient(t)
 
 	require.NoError(t, vault.WriteFile("ephemeral.md", []byte("data"), time.Time{}))
 	info, err := vault.Stat("ephemeral.md")
@@ -663,21 +671,20 @@ func TestCheckFileChanged_FileDeleted(t *testing.T) {
 
 	require.NoError(t, vault.DeleteFile("ephemeral.md"))
 
-	err = s.checkFileChangedDuringDownload("ephemeral.md", info)
-	assert.NoError(t, err, "deleted file should not block download")
+	err = vault.StatAndWriteFile("ephemeral.md", []byte("recreated"), time.Time{}, info)
+	assert.NoError(t, err, "deleted file should allow write to recreate it")
+
+	content, err := vault.ReadFile("ephemeral.md")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("recreated"), content)
 }
 
-func TestCheckFileChanged_StatError(t *testing.T) {
-	s, _, _, _ := fullSyncClient(t)
+func TestStatAndWriteFile_PathTraversal(t *testing.T) {
+	_, vault, _, _ := fullSyncClient(t)
 
-	// Use a fake os.FileInfo so prePullInfo is non-nil but the path
-	// doesn't exist and is invalid enough to cause a non-IsNotExist error.
-	// Actually vault.Stat on a nonexistent file returns os.IsNotExist,
-	// which returns nil. We need a path that causes a different error.
-	// Path traversal attempts return "path escapes vault root" errors.
 	info := fakeFileInfo{name: "x", size: 1, mtime: time.Now()}
-	err := s.checkFileChangedDuringDownload("../escape", info)
-	assert.Error(t, err, "non-existence errors other than NotExist should propagate")
+	err := vault.StatAndWriteFile("../escape", []byte("data"), time.Time{}, info)
+	assert.Error(t, err, "path traversal should be blocked")
 }
 
 // fakeFileInfo implements os.FileInfo for testing.
