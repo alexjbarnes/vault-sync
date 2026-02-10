@@ -151,7 +151,10 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error
 		slog.Bool("initial", vs.Initial),
 	)
 
-	vaultFS := obsidian.NewVault(cfg.SyncDir)
+	vaultFS, err := obsidian.NewVault(cfg.SyncDir)
+	if err != nil {
+		return fmt.Errorf("creating vault directory: %w", err)
+	}
 
 	if err := appState.InitVaultBuckets(v.ID); err != nil {
 		return fmt.Errorf("initializing vault buckets: %w", err)

@@ -28,10 +28,14 @@ type Vault struct {
 	mu  sync.RWMutex
 }
 
-// NewVault creates a Vault rooted at the given directory. The directory
-// must be an absolute path (resolved at config load time).
-func NewVault(dir string) *Vault {
-	return &Vault{dir: dir}
+// NewVault creates a Vault rooted at the given directory, creating it if
+// it does not exist. The directory must be an absolute path (resolved at
+// config load time).
+func NewVault(dir string) (*Vault, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("creating vault directory %s: %w", dir, err)
+	}
+	return &Vault{dir: dir}, nil
 }
 
 // Dir returns the root directory of the vault.

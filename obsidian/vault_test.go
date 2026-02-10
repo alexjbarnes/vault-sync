@@ -13,14 +13,17 @@ import (
 func tempVault(t *testing.T) *Vault {
 	t.Helper()
 	dir := t.TempDir()
-	return NewVault(dir)
+	v, err := NewVault(dir)
+	require.NoError(t, err)
+	return v
 }
 
 // --- Vault basic operations ---
 
 func TestVault_Dir(t *testing.T) {
 	dir := t.TempDir()
-	v := NewVault(dir)
+	v, err := NewVault(dir)
+	require.NoError(t, err)
 	assert.Equal(t, dir, v.Dir())
 }
 
@@ -497,9 +500,10 @@ func TestVault_MkdirAllIdempotent(t *testing.T) {
 
 func TestVault_ResolveJoinsCorrectly(t *testing.T) {
 	dir := t.TempDir()
-	v := NewVault(dir)
+	v, err := NewVault(dir)
+	require.NoError(t, err)
 
-	err := v.WriteFile("sub/file.md", []byte("data"), time.Time{})
+	err = v.WriteFile("sub/file.md", []byte("data"), time.Time{})
 	require.NoError(t, err)
 
 	expected := filepath.Join(dir, "sub", "file.md")
