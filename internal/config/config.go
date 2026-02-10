@@ -28,8 +28,10 @@ type Config struct {
 	// Vault name to sync. If empty and only one vault exists, it is used automatically.
 	VaultName string `env:"OBSIDIAN_VAULT_NAME" envDefault:""`
 
-	// Directory to sync vault files into (required always: used by sync as the
-	// sync target, and by MCP as the vault root to serve)
+	// Directory to sync vault files into. When sync is enabled and this is
+	// empty, it defaults to ~/.vault-sync/vaults/<vault_id>/ after vault
+	// selection. Required when MCP is enabled without sync (no vault ID
+	// available to derive a default).
 	SyncDir string `env:"OBSIDIAN_SYNC_DIR"`
 
 	// Device name this client identifies as
@@ -81,11 +83,15 @@ func Load() (*Config, error) {
 	// it for path traversal checks (ensuring decrypted server paths stay
 	// within the sync directory). Those checks rely on string prefix
 	// comparison, which only works reliably with absolute paths.
-	absDir, err := filepath.Abs(cfg.SyncDir)
-	if err != nil {
-		return nil, fmt.Errorf("resolving sync dir to absolute path: %w", err)
+	// When sync is enabled and SyncDir is empty, it will be resolved
+	// later in runSync after vault selection.
+	if cfg.SyncDir != "" {
+		absDir, err := filepath.Abs(cfg.SyncDir)
+		if err != nil {
+			return nil, fmt.Errorf("resolving sync dir to absolute path: %w", err)
+		}
+		cfg.SyncDir = absDir
 	}
-	cfg.SyncDir = absDir
 
 	return cfg, nil
 }
@@ -95,8 +101,12 @@ func (c *Config) validate() error {
 		return fmt.Errorf("at least one of ENABLE_SYNC or ENABLE_MCP must be true")
 	}
 
-	if c.SyncDir == "" {
-		return fmt.Errorf("OBSIDIAN_SYNC_DIR is required")
+	// SyncDir is required when MCP is enabled without sync, because there
+	// is no vault selection step to derive a default from. When sync is
+	// enabled, an empty SyncDir is allowed and will be derived from the
+	// vault ID after authentication.
+	if c.SyncDir == "" && !c.EnableSync {
+		return fmt.Errorf("OBSIDIAN_SYNC_DIR is required when sync is not enabled")
 	}
 
 	if c.EnableSync {
@@ -120,6 +130,28 @@ func (c *Config) validate() error {
 		}
 	}
 
+	return nil
+}
+
+// DefaultSyncDir returns the default sync directory for a given vault ID:
+// ~/.vault-sync/vaults/<vaultID>/
+func DefaultSyncDir(vaultID string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("determining home directory: %w", err)
+	}
+	return filepath.Join(home, ".vault-sync", "vaults", vaultID), nil
+}
+
+// SetSyncDir sets the sync directory and resolves it to an absolute path.
+// Called from runSync after vault selection when OBSIDIAN_SYNC_DIR was not
+// explicitly configured.
+func (c *Config) SetSyncDir(dir string) error {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolving sync dir to absolute path: %w", err)
+	}
+	c.SyncDir = absDir
 	return nil
 }
 

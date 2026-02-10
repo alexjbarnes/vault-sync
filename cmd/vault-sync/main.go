@@ -120,6 +120,18 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error
 		return err
 	}
 
+	// If OBSIDIAN_SYNC_DIR was not set, derive it from the vault ID.
+	if cfg.SyncDir == "" {
+		defaultDir, err := config.DefaultSyncDir(v.ID)
+		if err != nil {
+			return fmt.Errorf("determining default sync dir: %w", err)
+		}
+		if err := cfg.SetSyncDir(defaultDir); err != nil {
+			return err
+		}
+		logger.Info("using default sync dir", slog.String("dir", cfg.SyncDir))
+	}
+
 	logger.Info("selected vault",
 		slog.String("name", v.Name),
 		slog.String("id", v.ID),

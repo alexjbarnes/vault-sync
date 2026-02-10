@@ -181,18 +181,45 @@ func TestLoad_NeitherMode(t *testing.T) {
 	assert.Contains(t, err.Error(), "at least one")
 }
 
-// --- Load: missing SyncDir always fails ---
+// --- Load: SyncDir behavior ---
 
-func TestLoad_MissingSyncDir(t *testing.T) {
+func TestLoad_SyncDir_OptionalForSyncMode(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("ENABLE_SYNC", "true")
 	t.Setenv("OBSIDIAN_EMAIL", "a@b.com")
 	t.Setenv("OBSIDIAN_PASSWORD", "p")
 	t.Setenv("OBSIDIAN_VAULT_PASSWORD", "vp")
 
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "", cfg.SyncDir, "SyncDir should be empty; derived later from vault ID")
+}
+
+func TestLoad_SyncDir_RequiredForMCPOnly(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("ENABLE_SYNC", "false")
+	t.Setenv("ENABLE_MCP", "true")
+	t.Setenv("MCP_SERVER_URL", "https://vault.example.com")
+	t.Setenv("MCP_AUTH_USERS", "alex:hash")
+
 	_, err := Load()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "OBSIDIAN_SYNC_DIR")
+}
+
+func TestDefaultSyncDir(t *testing.T) {
+	dir, err := DefaultSyncDir("abc123")
+	require.NoError(t, err)
+	assert.True(t, filepath.IsAbs(dir))
+	assert.Contains(t, dir, filepath.Join(".vault-sync", "vaults", "abc123"))
+}
+
+func TestSetSyncDir_ResolvesToAbsolute(t *testing.T) {
+	cfg := &Config{}
+	err := cfg.SetSyncDir("relative/path")
+	require.NoError(t, err)
+	assert.True(t, filepath.IsAbs(cfg.SyncDir))
+	assert.Contains(t, cfg.SyncDir, "relative/path")
 }
 
 // --- Defaults ---
@@ -357,6 +384,16 @@ func TestValidate_SyncAllPresent(t *testing.T) {
 		SyncDir:       "/tmp",
 	}
 	assert.NoError(t, cfg.validate())
+}
+
+func TestValidate_SyncWithoutSyncDir(t *testing.T) {
+	cfg := &Config{
+		EnableSync:    true,
+		Email:         "a@b.com",
+		Password:      "pass",
+		VaultPassword: "vp",
+	}
+	assert.NoError(t, cfg.validate(), "SyncDir should be optional when sync is enabled")
 }
 
 func TestValidate_MCPAllPresent(t *testing.T) {
