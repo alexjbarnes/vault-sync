@@ -24,6 +24,10 @@ type registrationResponse struct {
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
 }
 
+// maxRequestBody caps the size of JSON request bodies to prevent
+// memory exhaustion from oversized requests.
+const maxRequestBody = 64 * 1024 // 64KB
+
 // HandleRegistration returns the /oauth/register handler.
 func HandleRegistration(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -31,6 +35,8 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 
 		var req registrationRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -58,11 +64,15 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 			authMethod = "none"
 		}
 
-		store.RegisterClient(&ClientInfo{
+		ok := store.RegisterClient(&ClientInfo{
 			ClientID:     clientID,
 			ClientName:   req.ClientName,
 			RedirectURIs: req.RedirectURIs,
 		})
+		if !ok {
+			writeJSONError(w, http.StatusServiceUnavailable, "server_error", "maximum number of registered clients reached")
+			return
+		}
 
 		resp := registrationResponse{
 			ClientID:                clientID,

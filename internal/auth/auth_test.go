@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -29,15 +30,51 @@ func testUsers(t *testing.T) UserCredentials {
 	return UserCredentials{"testuser": string(hash)}
 }
 
+func testStore(t *testing.T) *Store {
+	t.Helper()
+	s := NewStore()
+	t.Cleanup(s.Stop)
+	return s
+}
+
 func pkceChallenge(verifier string) string {
 	h := sha256.Sum256([]byte(verifier))
 	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 
+// registerTestClient registers a client and returns its ID.
+func registerTestClient(t *testing.T, store *Store, redirectURIs []string) string {
+	t.Helper()
+	clientID := RandomHex(16)
+	ok := store.RegisterClient(&ClientInfo{
+		ClientID:     clientID,
+		RedirectURIs: redirectURIs,
+	})
+	require.True(t, ok)
+	return clientID
+}
+
+// getCSRFToken renders the login form and extracts the CSRF token from
+// the hidden field.
+func getCSRFToken(t *testing.T, handler http.HandlerFunc, clientID, redirectURI string) string {
+	t.Helper()
+	challenge := pkceChallenge("test-verifier")
+	req := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+"&redirect_uri="+url.QueryEscape(redirectURI)+"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Extract csrf_token value from the hidden input.
+	re := regexp.MustCompile(`name="csrf_token" value="([a-f0-9]+)"`)
+	matches := re.FindStringSubmatch(rec.Body.String())
+	require.Len(t, matches, 2, "CSRF token not found in form")
+	return matches[1]
+}
+
 // --- Store ---
 
 func TestStore_CodeRoundTrip(t *testing.T) {
-	s := NewStore()
+	s := testStore(t)
 	s.SaveCode(&AuthCode{
 		Code:      "abc123",
 		ClientID:  "client1",
@@ -54,7 +91,7 @@ func TestStore_CodeRoundTrip(t *testing.T) {
 }
 
 func TestStore_CodeExpired(t *testing.T) {
-	s := NewStore()
+	s := testStore(t)
 	s.SaveCode(&AuthCode{
 		Code:      "expired",
 		ExpiresAt: time.Now().Add(-1 * time.Minute),
@@ -64,12 +101,12 @@ func TestStore_CodeExpired(t *testing.T) {
 }
 
 func TestStore_CodeNotFound(t *testing.T) {
-	s := NewStore()
+	s := testStore(t)
 	assert.Nil(t, s.ConsumeCode("nonexistent"))
 }
 
 func TestStore_TokenRoundTrip(t *testing.T) {
-	s := NewStore()
+	s := testStore(t)
 	s.SaveToken(&TokenInfo{
 		Token:     "tok_abc",
 		UserID:    "user1",
@@ -82,7 +119,7 @@ func TestStore_TokenRoundTrip(t *testing.T) {
 }
 
 func TestStore_TokenExpired(t *testing.T) {
-	s := NewStore()
+	s := testStore(t)
 	s.SaveToken(&TokenInfo{
 		Token:     "expired_tok",
 		ExpiresAt: time.Now().Add(-1 * time.Minute),
@@ -92,22 +129,84 @@ func TestStore_TokenExpired(t *testing.T) {
 }
 
 func TestStore_TokenNotFound(t *testing.T) {
-	s := NewStore()
+	s := testStore(t)
 	assert.Nil(t, s.ValidateToken("nonexistent"))
 }
 
 func TestStore_ClientRoundTrip(t *testing.T) {
-	s := NewStore()
-	s.RegisterClient(&ClientInfo{
+	s := testStore(t)
+	ok := s.RegisterClient(&ClientInfo{
 		ClientID:     "client1",
 		ClientName:   "Test",
 		RedirectURIs: []string{"https://example.com/callback"},
 	})
+	assert.True(t, ok)
 
 	ci := s.GetClient("client1")
 	require.NotNil(t, ci)
 	assert.Equal(t, "Test", ci.ClientName)
 	assert.Nil(t, s.GetClient("nonexistent"))
+}
+
+func TestStore_ClientMaxLimit(t *testing.T) {
+	s := testStore(t)
+	for i := 0; i < maxClients; i++ {
+		ok := s.RegisterClient(&ClientInfo{
+			ClientID:     RandomHex(8),
+			RedirectURIs: []string{"https://example.com/cb"},
+		})
+		require.True(t, ok)
+	}
+
+	// Next registration should fail.
+	ok := s.RegisterClient(&ClientInfo{
+		ClientID:     "overflow",
+		RedirectURIs: []string{"https://example.com/cb"},
+	})
+	assert.False(t, ok)
+}
+
+func TestStore_CSRFRoundTrip(t *testing.T) {
+	s := testStore(t)
+	s.SaveCSRF("csrf123")
+
+	assert.True(t, s.ConsumeCSRF("csrf123"))
+	// Second consume should fail.
+	assert.False(t, s.ConsumeCSRF("csrf123"))
+}
+
+func TestStore_CSRFEmpty(t *testing.T) {
+	s := testStore(t)
+	assert.False(t, s.ConsumeCSRF(""))
+}
+
+func TestStore_CSRFNotFound(t *testing.T) {
+	s := testStore(t)
+	assert.False(t, s.ConsumeCSRF("nonexistent"))
+}
+
+func TestStore_Cleanup(t *testing.T) {
+	s := testStore(t)
+
+	s.SaveCode(&AuthCode{
+		Code:      "expired-code",
+		ExpiresAt: time.Now().Add(-1 * time.Minute),
+	})
+	s.SaveToken(&TokenInfo{
+		Token:     "expired-token",
+		ExpiresAt: time.Now().Add(-1 * time.Minute),
+	})
+	s.mu.Lock()
+	s.csrf["expired-csrf"] = csrfEntry{expiresAt: time.Now().Add(-1 * time.Minute)}
+	s.mu.Unlock()
+
+	s.cleanup()
+
+	s.mu.RLock()
+	assert.Empty(t, s.codes)
+	assert.Empty(t, s.tokens)
+	assert.Empty(t, s.csrf)
+	s.mu.RUnlock()
 }
 
 func TestRandomHex_Length(t *testing.T) {
@@ -159,7 +258,7 @@ func TestAuthServerMetadata(t *testing.T) {
 // --- Registration ---
 
 func TestRegistration_Success(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
 	handler := HandleRegistration(store)
 
 	body := `{"client_name":"Claude","redirect_uris":["https://claude.ai/callback"]}`
@@ -182,7 +281,7 @@ func TestRegistration_Success(t *testing.T) {
 }
 
 func TestRegistration_MissingRedirectURIs(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
 	handler := HandleRegistration(store)
 
 	body := `{"client_name":"Claude"}`
@@ -195,7 +294,7 @@ func TestRegistration_MissingRedirectURIs(t *testing.T) {
 }
 
 func TestRegistration_WrongMethod(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
 	handler := HandleRegistration(store)
 
 	req := httptest.NewRequest("GET", "/oauth/register", nil)
@@ -205,27 +304,45 @@ func TestRegistration_WrongMethod(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }
 
+func TestRegistration_ClientLimitReached(t *testing.T) {
+	store := testStore(t)
+	for i := 0; i < maxClients; i++ {
+		store.RegisterClient(&ClientInfo{
+			ClientID:     RandomHex(8),
+			RedirectURIs: []string{"https://example.com/cb"},
+		})
+	}
+
+	handler := HandleRegistration(store)
+	body := `{"redirect_uris":["https://example.com/cb"]}`
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
 // --- Authorize ---
 
 func TestAuthorize_GET_ShowsLoginForm(t *testing.T) {
-	store := NewStore()
-	store.RegisterClient(&ClientInfo{
-		ClientID:     "test-client",
-		RedirectURIs: []string{"https://example.com/callback"},
-	})
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
 
 	handler := HandleAuthorize(store, testUsers(t), testLogger())
-	req := httptest.NewRequest("GET", "/oauth/authorize?client_id=test-client&redirect_uri=https://example.com/callback&state=xyz&code_challenge=abc&code_challenge_method=S256", nil)
+	challenge := pkceChallenge("test-verifier")
+	req := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+"&redirect_uri=https://example.com/callback&state=xyz&code_challenge="+challenge+"&code_challenge_method=S256", nil)
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "Vault Sync Login")
-	assert.Contains(t, rec.Body.String(), "test-client")
+	assert.Contains(t, rec.Body.String(), clientID)
+	assert.Contains(t, rec.Body.String(), "csrf_token")
 }
 
 func TestAuthorize_GET_MissingClientID(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
 	handler := HandleAuthorize(store, testUsers(t), testLogger())
 
 	req := httptest.NewRequest("GET", "/oauth/authorize", nil)
@@ -236,7 +353,7 @@ func TestAuthorize_GET_MissingClientID(t *testing.T) {
 }
 
 func TestAuthorize_GET_UnknownClient(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
 	handler := HandleAuthorize(store, testUsers(t), testLogger())
 
 	req := httptest.NewRequest("GET", "/oauth/authorize?client_id=unknown", nil)
@@ -246,21 +363,48 @@ func TestAuthorize_GET_UnknownClient(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestAuthorize_POST_ValidLogin(t *testing.T) {
-	store := NewStore()
-	store.RegisterClient(&ClientInfo{
-		ClientID:     "test-client",
-		RedirectURIs: []string{"https://example.com/callback"},
-	})
-	users := testUsers(t)
+func TestAuthorize_GET_InvalidRedirectURI(t *testing.T) {
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
 
+	handler := HandleAuthorize(store, testUsers(t), testLogger())
+	challenge := pkceChallenge("v")
+	req := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+"&redirect_uri=https://evil.com/steal&code_challenge="+challenge, nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "redirect_uri not registered")
+}
+
+func TestAuthorize_GET_MissingPKCE(t *testing.T) {
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
+
+	handler := HandleAuthorize(store, testUsers(t), testLogger())
+	req := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+"&redirect_uri=https://example.com/callback", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "code_challenge is required")
+}
+
+func TestAuthorize_POST_ValidLogin(t *testing.T) {
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
+	users := testUsers(t)
 	handler := HandleAuthorize(store, users, testLogger())
 
+	csrfToken := getCSRFToken(t, handler, clientID, "https://example.com/callback")
+	challenge := pkceChallenge("test-verifier")
+
 	form := url.Values{
-		"client_id":             {"test-client"},
+		"csrf_token":            {csrfToken},
+		"client_id":             {clientID},
 		"redirect_uri":          {"https://example.com/callback"},
 		"state":                 {"mystate"},
-		"code_challenge":        {"challenge123"},
+		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
 		"username":              {"testuser"},
 		"password":              {"password123"},
@@ -278,19 +422,54 @@ func TestAuthorize_POST_ValidLogin(t *testing.T) {
 	assert.Contains(t, location, "state=mystate")
 }
 
-func TestAuthorize_POST_InvalidPassword(t *testing.T) {
-	store := NewStore()
-	store.RegisterClient(&ClientInfo{
-		ClientID:     "test-client",
-		RedirectURIs: []string{"https://example.com/callback"},
-	})
+func TestAuthorize_POST_StateURLEncoded(t *testing.T) {
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
+	users := testUsers(t)
+	handler := HandleAuthorize(store, users, testLogger())
 
+	csrfToken := getCSRFToken(t, handler, clientID, "https://example.com/callback")
+	challenge := pkceChallenge("test-verifier")
+
+	// State containing special characters that need URL encoding.
+	form := url.Values{
+		"csrf_token":     {csrfToken},
+		"client_id":      {clientID},
+		"redirect_uri":   {"https://example.com/callback"},
+		"state":          {"has&equals=and spaces"},
+		"code_challenge": {challenge},
+		"username":       {"testuser"},
+		"password":       {"password123"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusFound, rec.Code)
+	location := rec.Header().Get("Location")
+
+	// Parse the redirect URL to verify proper encoding.
+	u, err := url.Parse(location)
+	require.NoError(t, err)
+	assert.Equal(t, "has&equals=and spaces", u.Query().Get("state"))
+}
+
+func TestAuthorize_POST_InvalidPassword(t *testing.T) {
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
 	handler := HandleAuthorize(store, testUsers(t), testLogger())
 
+	csrfToken := getCSRFToken(t, handler, clientID, "https://example.com/callback")
+	challenge := pkceChallenge("v")
+
 	form := url.Values{
-		"client_id": {"test-client"},
-		"username":  {"testuser"},
-		"password":  {"wrong"},
+		"csrf_token":     {csrfToken},
+		"client_id":      {clientID},
+		"code_challenge": {challenge},
+		"username":       {"testuser"},
+		"password":       {"wrong"},
 	}
 
 	req := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(form.Encode()))
@@ -302,10 +481,123 @@ func TestAuthorize_POST_InvalidPassword(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "Invalid username or password")
 }
 
+func TestAuthorize_POST_InvalidRedirectURI(t *testing.T) {
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
+	handler := HandleAuthorize(store, testUsers(t), testLogger())
+
+	csrfToken := getCSRFToken(t, handler, clientID, "https://example.com/callback")
+
+	form := url.Values{
+		"csrf_token":     {csrfToken},
+		"client_id":      {clientID},
+		"redirect_uri":   {"https://evil.com/steal"},
+		"code_challenge": {"challenge"},
+		"username":       {"testuser"},
+		"password":       {"password123"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "redirect_uri not registered")
+}
+
+func TestAuthorize_POST_MissingCSRF(t *testing.T) {
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
+	handler := HandleAuthorize(store, testUsers(t), testLogger())
+
+	form := url.Values{
+		"client_id":      {clientID},
+		"code_challenge": {"challenge"},
+		"username":       {"testuser"},
+		"password":       {"password123"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "CSRF")
+}
+
+func TestAuthorize_POST_MissingPKCE(t *testing.T) {
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
+	handler := HandleAuthorize(store, testUsers(t), testLogger())
+
+	// Manually create a CSRF token (can't use getCSRFToken since GET
+	// now requires code_challenge too).
+	store.SaveCSRF("manual-csrf")
+
+	form := url.Values{
+		"csrf_token": {"manual-csrf"},
+		"client_id":  {clientID},
+		"username":   {"testuser"},
+		"password":   {"password123"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "code_challenge is required")
+}
+
+func TestAuthorize_POST_RateLimited(t *testing.T) {
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
+	users := testUsers(t)
+	handler := HandleAuthorize(store, users, testLogger())
+
+	challenge := pkceChallenge("v")
+
+	// Exhaust the rate limit with failed attempts.
+	for i := 0; i < rateLimitMaxFail; i++ {
+		csrf := generateCSRFToken(store)
+		form := url.Values{
+			"csrf_token":     {csrf},
+			"client_id":      {clientID},
+			"code_challenge": {challenge},
+			"username":       {"testuser"},
+			"password":       {"wrong"},
+		}
+		req := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	}
+
+	// Next attempt should be rate limited.
+	csrf := generateCSRFToken(store)
+	form := url.Values{
+		"csrf_token":     {csrf},
+		"client_id":      {clientID},
+		"code_challenge": {challenge},
+		"username":       {"testuser"},
+		"password":       {"password123"},
+	}
+	req := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+}
+
 // --- Token ---
 
 func TestToken_FullFlow(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	challenge := pkceChallenge(verifier)
 
@@ -347,7 +639,7 @@ func TestToken_FullFlow(t *testing.T) {
 }
 
 func TestToken_InvalidCode(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
 	handler := HandleToken(store)
 
 	form := url.Values{
@@ -364,7 +656,7 @@ func TestToken_InvalidCode(t *testing.T) {
 }
 
 func TestToken_WrongGrantType(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
 	handler := HandleToken(store)
 
 	form := url.Values{
@@ -380,7 +672,7 @@ func TestToken_WrongGrantType(t *testing.T) {
 }
 
 func TestToken_PKCEVerificationFails(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
 	store.SaveCode(&AuthCode{
 		Code:          "code-with-pkce",
 		CodeChallenge: "validchallenge",
@@ -404,20 +696,71 @@ func TestToken_PKCEVerificationFails(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "PKCE")
 }
 
-func TestToken_RedirectURIMismatch(t *testing.T) {
-	store := NewStore()
+func TestToken_MissingPKCE(t *testing.T) {
+	store := testStore(t)
+	// Auth code with a code_challenge but no verifier provided.
 	store.SaveCode(&AuthCode{
-		Code:        "code-redirect",
-		RedirectURI: "https://example.com/callback",
-		ExpiresAt:   time.Now().Add(5 * time.Minute),
+		Code:          "code-needs-pkce",
+		CodeChallenge: pkceChallenge("verifier"),
+		ExpiresAt:     time.Now().Add(5 * time.Minute),
 	})
 
 	handler := HandleToken(store)
 
 	form := url.Values{
-		"grant_type":   {"authorization_code"},
-		"code":         {"code-redirect"},
-		"redirect_uri": {"https://evil.com/callback"},
+		"grant_type": {"authorization_code"},
+		"code":       {"code-needs-pkce"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "code_verifier is required")
+}
+
+func TestToken_NoPKCEOnCode(t *testing.T) {
+	store := testStore(t)
+	// Auth code issued without code_challenge (legacy or attacker bypass).
+	store.SaveCode(&AuthCode{
+		Code:      "no-pkce-code",
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	})
+
+	handler := HandleToken(store)
+
+	form := url.Values{
+		"grant_type": {"authorization_code"},
+		"code":       {"no-pkce-code"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "without PKCE")
+}
+
+func TestToken_RedirectURIMismatch(t *testing.T) {
+	store := testStore(t)
+	store.SaveCode(&AuthCode{
+		Code:          "code-redirect",
+		RedirectURI:   "https://example.com/callback",
+		CodeChallenge: pkceChallenge("v"),
+		ExpiresAt:     time.Now().Add(5 * time.Minute),
+	})
+
+	handler := HandleToken(store)
+
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {"code-redirect"},
+		"redirect_uri":  {"https://evil.com/callback"},
+		"code_verifier": {"v"},
 	}
 
 	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
@@ -429,15 +772,19 @@ func TestToken_RedirectURIMismatch(t *testing.T) {
 }
 
 func TestToken_JSONBody(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
+	verifier := "json-test-verifier"
+	challenge := pkceChallenge(verifier)
+
 	store.SaveCode(&AuthCode{
-		Code:      "json-code",
-		ExpiresAt: time.Now().Add(5 * time.Minute),
+		Code:          "json-code",
+		CodeChallenge: challenge,
+		ExpiresAt:     time.Now().Add(5 * time.Minute),
 	})
 
 	handler := HandleToken(store)
 
-	body := `{"grant_type":"authorization_code","code":"json-code"}`
+	body := `{"grant_type":"authorization_code","code":"json-code","code_verifier":"` + verifier + `"}`
 	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -461,7 +808,7 @@ func TestVerifyPKCE_Invalid(t *testing.T) {
 // --- Middleware ---
 
 func TestMiddleware_ValidToken(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
 	store.SaveToken(&TokenInfo{
 		Token:     "valid-token",
 		UserID:    "user1",
@@ -484,7 +831,7 @@ func TestMiddleware_ValidToken(t *testing.T) {
 }
 
 func TestMiddleware_MissingToken(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
 	mw := Middleware(store, "https://vault.example.com")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler should not be called")
@@ -501,7 +848,7 @@ func TestMiddleware_MissingToken(t *testing.T) {
 }
 
 func TestMiddleware_InvalidToken(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
 	mw := Middleware(store, "https://vault.example.com")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler should not be called")
@@ -516,7 +863,7 @@ func TestMiddleware_InvalidToken(t *testing.T) {
 }
 
 func TestMiddleware_ExpiredToken(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
 	store.SaveToken(&TokenInfo{
 		Token:     "expired-token",
 		ExpiresAt: time.Now().Add(-1 * time.Minute),
@@ -536,7 +883,7 @@ func TestMiddleware_ExpiredToken(t *testing.T) {
 }
 
 func TestMiddleware_NonBearerAuth(t *testing.T) {
-	store := NewStore()
+	store := testStore(t)
 	mw := Middleware(store, "https://vault.example.com")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler should not be called")

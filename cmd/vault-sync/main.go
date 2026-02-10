@@ -237,6 +237,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger) error 
 	}, nil)
 
 	store := auth.NewStore()
+	defer store.Stop()
 	authMiddleware := auth.Middleware(store, cfg.MCPServerURL)
 
 	mux := http.NewServeMux()

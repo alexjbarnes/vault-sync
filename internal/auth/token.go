@@ -32,6 +32,8 @@ func HandleToken(store *Store) http.HandlerFunc {
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+
 		// Support both JSON and form-encoded bodies.
 		var req tokenRequest
 		contentType := r.Header.Get("Content-Type")
@@ -70,22 +72,25 @@ func HandleToken(store *Store) http.HandlerFunc {
 			return
 		}
 
-		// Validate redirect_uri matches.
+		// Validate redirect_uri matches the one stored on the auth code.
 		if ac.RedirectURI != "" && req.RedirectURI != ac.RedirectURI {
 			writeJSONError(w, http.StatusBadRequest, "invalid_grant", "redirect_uri mismatch")
 			return
 		}
 
-		// PKCE verification.
-		if ac.CodeChallenge != "" {
-			if req.CodeVerifier == "" {
-				writeJSONError(w, http.StatusBadRequest, "invalid_grant", "code_verifier is required")
-				return
-			}
-			if !verifyPKCE(req.CodeVerifier, ac.CodeChallenge) {
-				writeJSONError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
-				return
-			}
+		// PKCE is mandatory. The authorize endpoint enforces that a
+		// code_challenge is present, so every auth code has one.
+		if ac.CodeChallenge == "" {
+			writeJSONError(w, http.StatusBadRequest, "invalid_grant", "authorization code was issued without PKCE")
+			return
+		}
+		if req.CodeVerifier == "" {
+			writeJSONError(w, http.StatusBadRequest, "invalid_grant", "code_verifier is required")
+			return
+		}
+		if !verifyPKCE(req.CodeVerifier, ac.CodeChallenge) {
+			writeJSONError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
+			return
 		}
 
 		// Issue access token.
