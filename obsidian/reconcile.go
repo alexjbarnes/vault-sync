@@ -159,18 +159,20 @@ type Reconciler struct {
 	state       *state.State
 	vaultID     string
 	cipher      *CipherV0
+	filter      *SyncFilter
 	logger      *slog.Logger
 	serverFiles map[string]state.ServerFile
 }
 
 // NewReconciler creates a reconciler with the given dependencies.
-func NewReconciler(vault *Vault, client *SyncClient, appState *state.State, vaultID string, cipher *CipherV0, logger *slog.Logger) *Reconciler {
+func NewReconciler(vault *Vault, client *SyncClient, appState *state.State, vaultID string, cipher *CipherV0, logger *slog.Logger, filter *SyncFilter) *Reconciler {
 	return &Reconciler{
 		vault:   vault,
 		client:  client,
 		state:   appState,
 		vaultID: vaultID,
 		cipher:  cipher,
+		filter:  filter,
 		logger:  logger,
 	}
 }
@@ -254,6 +256,11 @@ func (r *Reconciler) processServerPushes(ctx context.Context, pushes []ServerPus
 func (r *Reconciler) processOneServerPush(ctx context.Context, sp ServerPush, scan *ScanResult, serverFiles map[string]state.ServerFile) error {
 	path := sp.Path
 	push := sp.Msg
+
+	if r.filter != nil && !r.filter.AllowPath(path) {
+		r.logger.Debug("skipping filtered path", slog.String("path", path))
+		return nil
+	}
 
 	local, hasLocal := scan.Current[path]
 	prev, hasPrev := serverFiles[path]
@@ -682,6 +689,9 @@ func (r *Reconciler) deleteRemoteFiles(ctx context.Context, scan *ScanResult, se
 	// Collect files and folders separately.
 	var filePaths, folderPaths []string
 	for _, path := range scan.Deleted {
+		if r.filter != nil && !r.filter.AllowPath(path) {
+			continue
+		}
 		sf, ok := serverFiles[path]
 		if !ok {
 			// Not tracked on server -- clean up local state.
@@ -750,6 +760,9 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 	var files []string
 
 	for _, path := range scan.Changed {
+		if r.filter != nil && !r.filter.AllowPath(path) {
+			continue
+		}
 		lf, ok := scan.Current[path]
 		if !ok {
 			continue

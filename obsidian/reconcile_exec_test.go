@@ -24,7 +24,7 @@ func fullReconciler(t *testing.T, ctrl *gomock.Controller) (*Reconciler, *SyncCl
 	mock := NewMockWSConn(ctrl)
 	s.conn = mock
 
-	r := NewReconciler(vault, s, appState, testSyncVaultID, cipher, quietLogger)
+	r := NewReconciler(vault, s, appState, testSyncVaultID, cipher, quietLogger, nil)
 	return r, s, vault, appState, cipher, mock
 }
 

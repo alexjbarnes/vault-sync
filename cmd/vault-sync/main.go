@@ -168,6 +168,17 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error
 		return fmt.Errorf("creating vault directory: %w", err)
 	}
 
+	syncFilter := &obsidian.SyncFilter{
+		MainSettings:       cfg.SyncMainSettings,
+		Appearance:         cfg.SyncAppearance,
+		ThemesAndSnippets:  cfg.SyncThemesAndSnippets,
+		Hotkeys:            cfg.SyncHotkeys,
+		ActiveCorePlugins:  cfg.SyncActiveCorePlugins,
+		CorePluginSettings: cfg.SyncCorePluginSettings,
+		CommunityPlugins:   cfg.SyncCommunityPlugins,
+		InstalledPlugins:   cfg.SyncInstalledPlugins,
+	}
+
 	if err := appState.InitVaultBuckets(v.ID); err != nil {
 		return fmt.Errorf("initializing vault buckets: %w", err)
 	}
@@ -184,6 +195,7 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error
 		Cipher:            cipher,
 		Vault:             vaultFS,
 		State:             appState,
+		Filter:            syncFilter,
 		OnReady: func(version int64) {
 			if err := appState.SetVault(v.ID, state.VaultState{
 				Version: version,
@@ -206,12 +218,12 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error
 		return fmt.Errorf("waiting for server ready: %w", err)
 	}
 
-	scan, err := obsidian.ScanLocal(vaultFS, appState, v.ID, logger)
+	scan, err := obsidian.ScanLocal(vaultFS, appState, v.ID, logger, syncFilter)
 	if err != nil {
 		return fmt.Errorf("scanning local files: %w", err)
 	}
 
-	reconciler := obsidian.NewReconciler(vaultFS, syncClient, appState, v.ID, cipher, logger)
+	reconciler := obsidian.NewReconciler(vaultFS, syncClient, appState, v.ID, cipher, logger, syncFilter)
 	if err := reconciler.Phase1(ctx, serverPushes, scan); err != nil {
 		return fmt.Errorf("reconciliation phase 1 failed: %w", err)
 	}
@@ -226,7 +238,7 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error
 		logger.Warn("reconciliation phases 2-3 failed", slog.String("error", err.Error()))
 	}
 
-	watcher := obsidian.NewWatcher(vaultFS, syncClient, logger)
+	watcher := obsidian.NewWatcher(vaultFS, syncClient, logger, syncFilter)
 	sg.Go(func() error {
 		return watcher.Watch(sgctx)
 	})

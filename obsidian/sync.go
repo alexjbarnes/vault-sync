@@ -84,6 +84,7 @@ type SyncClient struct {
 	cipher     *CipherV0
 	vault      *Vault
 	state      *state.State
+	filter     *SyncFilter
 	perFileMax int
 
 	onReady func(version int64)
@@ -154,6 +155,7 @@ type SyncConfig struct {
 	Cipher            *CipherV0
 	Vault             *Vault
 	State             *state.State
+	Filter            *SyncFilter
 	OnReady           func(version int64)
 }
 
@@ -171,6 +173,7 @@ func NewSyncClient(cfg SyncConfig, logger *slog.Logger) *SyncClient {
 		cipher:            cfg.Cipher,
 		vault:             cfg.Vault,
 		state:             cfg.State,
+		filter:            cfg.Filter,
 		onReady:           cfg.OnReady,
 		perFileMax:        208_666_624, // ~199MB, matches Obsidian client default
 		opCh:              make(chan syncOp, 64),
@@ -942,6 +945,11 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 		return fmt.Errorf("decrypting path: %w", err)
 	}
 	path = normalizePath(path)
+
+	if s.filter != nil && !s.filter.AllowPath(path) {
+		s.logger.Debug("skipping filtered path", slog.String("path", path))
+		return nil
+	}
 
 	local, encLocalHash := s.resolveLocalState(path)
 	prev := s.ServerFileState(path)
@@ -1870,6 +1878,11 @@ func (s *SyncClient) processPushDirect(ctx context.Context, push PushMessage) er
 		return fmt.Errorf("decrypting path: %w", err)
 	}
 	path = normalizePath(path)
+
+	if s.filter != nil && !s.filter.AllowPath(path) {
+		s.logger.Debug("skipping filtered path", slog.String("path", path))
+		return nil
+	}
 
 	local, encLocalHash := s.resolveLocalState(path)
 	prev := s.ServerFileState(path)

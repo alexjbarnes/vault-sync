@@ -37,6 +37,17 @@ type Config struct {
 	// Device name this client identifies as
 	DeviceName string `env:"OBSIDIAN_DEVICE_NAME" envDefault:"vault-sync"`
 
+	// Config sync toggles. These match the Obsidian app's sync settings.
+	// All default to false (no .obsidian/ config synced unless opted in).
+	SyncMainSettings       bool `env:"SYNC_MAIN_SETTINGS" envDefault:"false"`
+	SyncAppearance         bool `env:"SYNC_APPEARANCE" envDefault:"false"`
+	SyncThemesAndSnippets  bool `env:"SYNC_THEMES_SNIPPETS" envDefault:"false"`
+	SyncHotkeys            bool `env:"SYNC_HOTKEYS" envDefault:"false"`
+	SyncActiveCorePlugins  bool `env:"SYNC_ACTIVE_CORE_PLUGINS" envDefault:"false"`
+	SyncCorePluginSettings bool `env:"SYNC_CORE_PLUGIN_SETTINGS" envDefault:"false"`
+	SyncCommunityPlugins   bool `env:"SYNC_COMMUNITY_PLUGINS" envDefault:"false"`
+	SyncInstalledPlugins   bool `env:"SYNC_INSTALLED_PLUGINS" envDefault:"false"`
+
 	// Environment controls log format
 	Environment string `env:"ENVIRONMENT" envDefault:"development"`
 

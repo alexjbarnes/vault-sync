@@ -34,6 +34,7 @@ type syncPusher interface {
 type Watcher struct {
 	vault   *Vault
 	pusher  syncPusher
+	filter  *SyncFilter
 	logger  *slog.Logger
 	watcher *fsnotify.Watcher
 
@@ -44,10 +45,13 @@ type Watcher struct {
 }
 
 // NewWatcher creates a file watcher for the given vault and sync client.
-func NewWatcher(vault *Vault, client *SyncClient, logger *slog.Logger) *Watcher {
+// If filter is non-nil, .obsidian/ paths not allowed by the filter are
+// ignored.
+func NewWatcher(vault *Vault, client *SyncClient, logger *slog.Logger, filter *SyncFilter) *Watcher {
 	return &Watcher{
 		vault:  vault,
 		pusher: client,
+		filter: filter,
 		logger: logger,
 		queued: make(map[string]pendingEvent),
 	}
@@ -314,6 +318,16 @@ func (w *Watcher) shouldIgnore(path string) bool {
 	// Obsidian never syncs workspace state files.
 	if base == "workspace.json" || base == "workspace-mobile.json" {
 		return true
+	}
+	// Apply config sync filter for .obsidian/ paths.
+	if w.filter != nil {
+		relPath, err := filepath.Rel(w.vault.Dir(), path)
+		if err == nil {
+			relPath = normalizePath(relPath)
+			if !w.filter.AllowPath(relPath) {
+				return true
+			}
+		}
 	}
 	return false
 }

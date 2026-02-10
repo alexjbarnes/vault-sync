@@ -29,8 +29,9 @@ type ScanResult struct {
 // persisted localFiles from bbolt. Files whose mtime or size changed get
 // their hash cleared (needs recomputation). New files get a fresh entry.
 // Files that existed in persisted state but are gone from disk are returned
-// in Deleted.
-func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog.Logger) (*ScanResult, error) {
+// in Deleted. If filter is non-nil, .obsidian/ paths not allowed by the
+// filter are skipped.
+func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog.Logger, filter *SyncFilter) (*ScanResult, error) {
 	persisted, err := appState.AllLocalFiles(vaultID)
 	if err != nil {
 		return nil, fmt.Errorf("loading persisted local files: %w", err)
@@ -74,6 +75,14 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 		}
 		// Obsidian never syncs workspace state files.
 		if base == "workspace.json" || base == "workspace-mobile.json" {
+			return nil
+		}
+
+		// Apply config sync filter for .obsidian/ paths.
+		if filter != nil && !filter.AllowPath(relPath) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 

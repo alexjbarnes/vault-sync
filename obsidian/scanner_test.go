@@ -46,7 +46,7 @@ func TestScanLocal_SkipsDotGit(t *testing.T) {
 	os.WriteFile(filepath.Join(v.Dir(), ".git", "HEAD"), []byte("ref: refs/heads/main"), 0644)
 	os.WriteFile(filepath.Join(v.Dir(), "notes.md"), []byte("hello"), 0644)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	_, hasGitHead := result.Current[".git/HEAD"]
@@ -64,7 +64,7 @@ func TestScanLocal_IncludesObsidianDir(t *testing.T) {
 	os.MkdirAll(filepath.Join(v.Dir(), ".obsidian", "plugins"), 0755)
 	os.WriteFile(filepath.Join(v.Dir(), ".obsidian", "app.json"), []byte(`{}`), 0644)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	_, hasDir := result.Current[".obsidian"]
@@ -81,7 +81,7 @@ func TestScanLocal_SkipsDotFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(v.Dir(), ".DS_Store"), []byte("junk"), 0644)
 	os.WriteFile(filepath.Join(v.Dir(), "visible.md"), []byte("ok"), 0644)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	_, hasHidden := result.Current[".hidden"]
@@ -99,7 +99,7 @@ func TestScanLocal_SkipsNodeModules(t *testing.T) {
 	os.MkdirAll(filepath.Join(v.Dir(), "node_modules", "pkg"), 0755)
 	os.WriteFile(filepath.Join(v.Dir(), "node_modules", "pkg", "index.js"), []byte("module"), 0644)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	for path := range result.Current {
@@ -115,7 +115,7 @@ func TestScanLocal_SkipsWorkspaceJSON(t *testing.T) {
 	os.WriteFile(filepath.Join(v.Dir(), "workspace-mobile.json"), []byte(`{}`), 0644)
 	os.WriteFile(filepath.Join(v.Dir(), "other.json"), []byte(`{}`), 0644)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	_, hasWorkspace := result.Current["workspace.json"]
@@ -135,7 +135,7 @@ func TestScanLocal_SkipsNestedDotDirs(t *testing.T) {
 	os.WriteFile(filepath.Join(v.Dir(), "notes", ".secret", "file.txt"), []byte("hidden"), 0644)
 	os.WriteFile(filepath.Join(v.Dir(), "notes", "visible.md"), []byte("ok"), 0644)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	_, hasSecret := result.Current["notes/.secret/file.txt"]
@@ -153,7 +153,7 @@ func TestScanLocal_NewFileIsChanged(t *testing.T) {
 	content := []byte("new file content")
 	os.WriteFile(filepath.Join(v.Dir(), "new.md"), content, 0644)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	assert.Contains(t, result.Changed, "new.md")
@@ -170,7 +170,7 @@ func TestScanLocal_NewFolderIsChanged(t *testing.T) {
 
 	os.MkdirAll(filepath.Join(v.Dir(), "notes", "sub"), 0755)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	assert.Contains(t, result.Changed, "notes")
@@ -203,7 +203,7 @@ func TestScanLocal_ModifiedFileIsChanged(t *testing.T) {
 	future := time.Now().Add(2 * time.Second)
 	os.Chtimes(filePath, future, future)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	assert.Contains(t, result.Changed, "doc.md")
@@ -231,7 +231,7 @@ func TestScanLocal_UnchangedFileCarriedForward(t *testing.T) {
 	}
 	require.NoError(t, s.SetLocalFile(testVaultID, persisted))
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	assert.NotContains(t, result.Changed, "stable.md")
@@ -257,7 +257,7 @@ func TestScanLocal_SameHashAfterMtimeChangeNotChanged(t *testing.T) {
 		Hash:  sha256Hex(content), // But hash matches.
 	}))
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	// mtime changed but content hash is the same, so not marked changed.
@@ -278,7 +278,7 @@ func TestScanLocal_DeletedFileInDeletedList(t *testing.T) {
 		Hash:  "deadbeef",
 	}))
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	assert.Contains(t, result.Deleted, "gone.md")
@@ -295,7 +295,7 @@ func TestScanLocal_DeletedFolderInDeletedList(t *testing.T) {
 		Folder: true,
 	}))
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	assert.Contains(t, result.Deleted, "old-folder")
@@ -312,7 +312,7 @@ func TestScanLocal_MultipleDeletedFiles(t *testing.T) {
 		}))
 	}
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	sort.Strings(result.Deleted)
@@ -330,7 +330,7 @@ func TestScanLocal_NFDPathNormalizedToNFC(t *testing.T) {
 	nfcName := "caf\u00e9.md"       // precomposed e-acute
 	os.WriteFile(filepath.Join(v.Dir(), nfdName), []byte("coffee"), 0644)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	// The scanner normalizes to NFC.
@@ -347,7 +347,7 @@ func TestScanLocal_DirectoriesInCurrent(t *testing.T) {
 	os.MkdirAll(filepath.Join(v.Dir(), "a", "b"), 0755)
 	os.WriteFile(filepath.Join(v.Dir(), "a", "b", "file.md"), []byte("leaf"), 0644)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	lfA := result.Current["a"]
@@ -371,7 +371,7 @@ func TestScanLocal_FolderBecameFile(t *testing.T) {
 	// On disk "thing" is now a file.
 	os.WriteFile(filepath.Join(v.Dir(), "thing"), []byte("file now"), 0644)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	// Should be marked as changed since it went from folder to file.
@@ -402,7 +402,7 @@ func TestScanLocal_ModifiedFilePreservesSyncFields(t *testing.T) {
 	future := time.Now().Add(2 * time.Second)
 	os.Chtimes(filePath, future, future)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	lf := result.Current["synced.md"]
@@ -416,7 +416,7 @@ func TestScanLocal_EmptyVault(t *testing.T) {
 	v := tempVault(t)
 	s := testState(t, testVaultID)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	assert.Empty(t, result.Current)
@@ -433,7 +433,7 @@ func TestScanLocal_NewFileHashIsCorrect(t *testing.T) {
 	content := []byte("hash me please")
 	os.WriteFile(filepath.Join(v.Dir(), "hashtest.md"), content, 0644)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	expected := sha256Hex(content)
@@ -446,7 +446,7 @@ func TestScanLocal_EmptyFileHashed(t *testing.T) {
 
 	os.WriteFile(filepath.Join(v.Dir(), "empty.md"), []byte{}, 0644)
 
-	result, err := ScanLocal(v, s, testVaultID, discardLogger)
+	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
 
 	lf := result.Current["empty.md"]
