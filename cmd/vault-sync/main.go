@@ -262,7 +262,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger) error 
 		slog.Int("users", len(users)),
 	)
 
-	// Shutdown when context is cancelled.
+	// Shutdown HTTP server when context is cancelled.
 	go func() {
 		<-ctx.Done()
 		mcpLogger.Info("shutting down MCP server")
@@ -271,11 +271,21 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger) error 
 		server.Shutdown(shutdownCtx)
 	}()
 
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("MCP server error: %w", err)
-	}
+	// Run the HTTP server and vault file watcher concurrently. The
+	// watcher keeps the in-memory search index fresh when the sync
+	// daemon (or any other process) writes files to the vault.
+	mg, mctx := errgroup.WithContext(ctx)
+	mg.Go(func() error {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			return fmt.Errorf("MCP server error: %w", err)
+		}
+		return nil
+	})
+	mg.Go(func() error {
+		return v.Watch(mctx)
+	})
 
-	return nil
+	return mg.Wait()
 }
 
 func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Config, appState *state.State, logger *slog.Logger) (string, *obsidian.VaultListResponse, error) {
