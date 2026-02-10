@@ -48,7 +48,7 @@ func fakeEventLoop(s *SyncClient) context.CancelFunc {
 // mockPullDirect sets up mock expectations for a pullDirect call that
 // returns the given encrypted content in a single piece.
 func mockPullDirect(mock *MockWSConn, encContent []byte) {
-	resp, _ := json.Marshal(PullResponse{Size: len(encContent), Pieces: 1})
+	resp, _ := json.Marshal(PullResponse{Size: int64(len(encContent)), Pieces: 1})
 	gomock.InOrder(
 		mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil),
 		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageText, resp, nil),
@@ -405,8 +405,8 @@ func TestThreeWayMerge_FullMerge(t *testing.T) {
 	encServer := encryptContent(t, cipher, []byte(server))
 
 	// Two pullDirect calls: first for base (prev.UID=100), then for server (push.UID=45).
-	baseResp, _ := json.Marshal(PullResponse{Size: len(encBase), Pieces: 1})
-	serverResp, _ := json.Marshal(PullResponse{Size: len(encServer), Pieces: 1})
+	baseResp, _ := json.Marshal(PullResponse{Size: int64(len(encBase)), Pieces: 1})
+	serverResp, _ := json.Marshal(PullResponse{Size: int64(len(encServer)), Pieces: 1})
 	gomock.InOrder(
 		// Pull base.
 		mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil),
@@ -445,7 +445,7 @@ func TestThreeWayMerge_PullBaseError_ServerWins(t *testing.T) {
 			Return(fmt.Errorf("connection lost")),
 		// Falls back to downloadServerFile which pulls again.
 		mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil),
-		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageText, mustJSON(PullResponse{Size: len(encServer), Pieces: 1}), nil),
+		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageText, mustJSON(PullResponse{Size: int64(len(encServer)), Pieces: 1}), nil),
 		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageBinary, encServer, nil),
 	)
 
@@ -822,8 +822,8 @@ func TestExecuteDecision_MergeMD_WithPrev(t *testing.T) {
 	encBase := encryptContent(t, cipher, []byte(base))
 	encServer := encryptContent(t, cipher, []byte(server))
 
-	baseResp, _ := json.Marshal(PullResponse{Size: len(encBase), Pieces: 1})
-	serverResp, _ := json.Marshal(PullResponse{Size: len(encServer), Pieces: 1})
+	baseResp, _ := json.Marshal(PullResponse{Size: int64(len(encBase)), Pieces: 1})
+	serverResp, _ := json.Marshal(PullResponse{Size: int64(len(encServer)), Pieces: 1})
 	gomock.InOrder(
 		mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil),
 		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageText, baseResp, nil),

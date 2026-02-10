@@ -722,7 +722,7 @@ func TestPull_Public_DelegatesToPullDirect(t *testing.T) {
 	plainContent := []byte("via-pull-public")
 	encContent := encryptContent(t, cipher, plainContent)
 
-	pullResp, _ := json.Marshal(PullResponse{Size: len(encContent), Pieces: 1})
+	pullResp, _ := json.Marshal(PullResponse{Size: int64(len(encContent)), Pieces: 1})
 	gomock.InOrder(
 		mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil),
 		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageText, pullResp, nil),

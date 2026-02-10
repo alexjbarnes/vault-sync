@@ -2,7 +2,9 @@ package auth
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
 )
 
 // registrationRequest is the DCR POST body (RFC 7591).
@@ -49,6 +51,13 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 			return
 		}
 
+		for _, uri := range req.RedirectURIs {
+			if err := validateRedirectScheme(uri); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid_redirect_uri", err.Error())
+				return
+			}
+		}
+
 		clientID := RandomHex(16)
 
 		grantTypes := req.GrantTypes
@@ -84,9 +93,31 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(resp)
 	}
+}
+
+// validateRedirectScheme checks that a redirect URI uses HTTPS or targets
+// localhost. Per RFC 8252, native apps may use http://localhost but all
+// other redirect URIs must use HTTPS to prevent code interception.
+func validateRedirectScheme(rawURI string) error {
+	u, err := url.Parse(rawURI)
+	if err != nil {
+		return fmt.Errorf("invalid URI: %s", rawURI)
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	// Allow http://localhost and http://127.0.0.1 for native app flows.
+	if u.Scheme == "http" {
+		host := u.Hostname()
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+			return nil
+		}
+	}
+	return fmt.Errorf("redirect_uri must use HTTPS (or http://localhost): %s", rawURI)
 }
 
 func writeJSONError(w http.ResponseWriter, status int, errCode, description string) {

@@ -79,14 +79,29 @@ func (rl *loginRateLimiter) check(ip string) bool {
 	now := time.Now()
 	cutoff := now.Add(-rateLimitWindow)
 
-	// Prune old entries.
+	// Prevent unbounded growth from many distinct source IPs. When
+	// the map gets large, prune all IPs whose most recent failure
+	// has expired beyond the window.
+	if len(rl.failures) > 1000 {
+		for k, times := range rl.failures {
+			if len(times) == 0 || times[len(times)-1].Before(cutoff) {
+				delete(rl.failures, k)
+			}
+		}
+	}
+
+	// Prune old entries for the requested IP.
 	recent := rl.failures[ip][:0]
 	for _, t := range rl.failures[ip] {
 		if t.After(cutoff) {
 			recent = append(recent, t)
 		}
 	}
-	rl.failures[ip] = recent
+	if len(recent) == 0 {
+		delete(rl.failures, ip)
+	} else {
+		rl.failures[ip] = recent
+	}
 
 	return len(recent) >= rateLimitMaxFail
 }

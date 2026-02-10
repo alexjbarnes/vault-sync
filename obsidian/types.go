@@ -104,9 +104,9 @@ type PullRequest struct {
 
 // PullResponse is the server reply to a pull request.
 type PullResponse struct {
-	Size    int  `json:"size"`
-	Pieces  int  `json:"pieces"`
-	Deleted bool `json:"deleted"`
+	Size    int64 `json:"size"`
+	Pieces  int   `json:"pieces"`
+	Deleted bool  `json:"deleted"`
 }
 
 // ClientPushMessage is sent by the client to upload a file change.
@@ -120,7 +120,7 @@ type ClientPushMessage struct {
 	MTime       int64   `json:"mtime"`
 	Folder      bool    `json:"folder"`
 	Deleted     bool    `json:"deleted"`
-	Size        int     `json:"size"`
+	Size        int64   `json:"size"`
 	Pieces      int     `json:"pieces"`
 }
 

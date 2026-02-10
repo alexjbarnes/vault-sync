@@ -118,7 +118,7 @@ func TestExecutePush_FileContent(t *testing.T) {
 				assert.Equal(t, "md", msg.Extension)
 				assert.False(t, msg.Folder)
 				assert.False(t, msg.Deleted)
-				assert.Greater(t, msg.Size, 0)
+				assert.Greater(t, msg.Size, int64(0))
 				assert.Greater(t, msg.Pieces, 0)
 			} else {
 				// Second write: binary chunk
@@ -452,7 +452,7 @@ func TestExecutePush_EmptyContentFile(t *testing.T) {
 		DoAndReturn(func(ctx context.Context, typ websocket.MessageType, data []byte) error {
 			var msg ClientPushMessage
 			require.NoError(t, json.Unmarshal(data, &msg))
-			assert.Equal(t, 0, msg.Size)
+			assert.Equal(t, int64(0), msg.Size)
 			assert.Equal(t, 0, msg.Pieces)
 			return nil
 		})

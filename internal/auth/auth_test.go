@@ -268,6 +268,7 @@ func TestRegistration_Success(t *testing.T) {
 	handler(rec, req)
 
 	assert.Equal(t, http.StatusCreated, rec.Code)
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
 
 	var resp registrationResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
@@ -321,6 +322,33 @@ func TestRegistration_ClientLimitReached(t *testing.T) {
 	handler(rec, req)
 
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+func TestRegistration_RejectsHTTPRedirectURI(t *testing.T) {
+	store := testStore(t)
+	handler := HandleRegistration(store)
+
+	body := `{"redirect_uris":["http://attacker.com/steal"]}`
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "HTTPS")
+}
+
+func TestRegistration_AllowsHTTPLocalhost(t *testing.T) {
+	store := testStore(t)
+	handler := HandleRegistration(store)
+
+	body := `{"redirect_uris":["http://localhost:8080/callback"]}`
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusCreated, rec.Code)
 }
 
 // --- Authorize ---
@@ -625,6 +653,7 @@ func TestToken_FullFlow(t *testing.T) {
 	handler(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
 
 	var resp tokenResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))

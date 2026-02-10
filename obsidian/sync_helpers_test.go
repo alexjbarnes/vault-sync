@@ -147,7 +147,7 @@ func TestProcessPushDirect_DownloadsNewFile(t *testing.T) {
 	}
 
 	// pullDirect sequence: write pull request, then read text response, then binary piece.
-	pullResp, _ := json.Marshal(PullResponse{Size: len(encContent), Pieces: 1})
+	pullResp, _ := json.Marshal(PullResponse{Size: int64(len(encContent)), Pieces: 1})
 	gomock.InOrder(
 		mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil),
 		mock.EXPECT().Read(gomock.Any()).Return(websocket.MessageText, pullResp, nil),
@@ -240,7 +240,7 @@ func TestPull_SinglePiece(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
-		resp, _ := json.Marshal(PullResponse{Size: len(encContent), Pieces: 1})
+		resp, _ := json.Marshal(PullResponse{Size: int64(len(encContent)), Pieces: 1})
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: resp}
 		s.inboundCh <- inboundMsg{typ: websocket.MessageBinary, data: encContent}
 	}()
@@ -264,7 +264,7 @@ func TestPull_MultiplePieces(t *testing.T) {
 	// Size must be large enough for validation: maxPieces = size/chunkSize + 1.
 	// Use a declared size of chunkSize+1 so maxPieces = 2, allowing 2 pieces.
 	// The actual data is smaller, but the server controls the declared size.
-	declaredSize := chunkSize + 1
+	declaredSize := int64(chunkSize) + 1
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
@@ -312,7 +312,7 @@ func TestPull_PongSkippedBeforeResponse(t *testing.T) {
 	go func() {
 		time.Sleep(5 * time.Millisecond)
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"op":"pong"}`)}
-		resp, _ := json.Marshal(PullResponse{Size: len(encContent), Pieces: 1})
+		resp, _ := json.Marshal(PullResponse{Size: int64(len(encContent)), Pieces: 1})
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: resp}
 		s.inboundCh <- inboundMsg{typ: websocket.MessageBinary, data: encContent}
 	}()
@@ -328,7 +328,7 @@ func TestPull_PongSkippedBetweenPieces(t *testing.T) {
 	ctx := context.Background()
 
 	chunk := []byte("chunk")
-	declaredSize := chunkSize + 1 // allows 2 pieces in validation
+	declaredSize := int64(chunkSize) + 1 // allows 2 pieces in validation
 
 	mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil)
 
@@ -362,7 +362,7 @@ func TestPull_PushHandledBetweenPieces(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
-		resp, _ := json.Marshal(PullResponse{Size: len(chunk), Pieces: 1})
+		resp, _ := json.Marshal(PullResponse{Size: int64(len(chunk)), Pieces: 1})
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: resp}
 		// Push arrives between response and piece.
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(pushJSON)}
@@ -407,7 +407,7 @@ func TestPull_ReadErrorDuringPieces(t *testing.T) {
 	s, mock := withMockConn(t, ctrl)
 	ctx := context.Background()
 
-	declaredSize := chunkSize + 1 // allows 2 pieces
+	declaredSize := int64(chunkSize) + 1 // allows 2 pieces
 
 	mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil)
 

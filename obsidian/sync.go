@@ -695,7 +695,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 		MTime:     op.mtime,
 		Folder:    false,
 		Deleted:   false,
-		Size:      len(encContent),
+		Size:      int64(len(encContent)),
 		Pieces:    pieces,
 	}
 
@@ -1651,14 +1651,14 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 	}
 
 	// Guard against a malicious or buggy server sending a huge Size.
-	maxSize := s.perFileMax * 2
+	maxSize := int64(s.perFileMax) * 2
 	if maxSize == 0 {
 		maxSize = 10 * 1024 * 1024
 	}
 	if resp.Size > maxSize {
 		return nil, fmt.Errorf("pull response size %d exceeds limit %d", resp.Size, maxSize)
 	}
-	maxPieces := resp.Size/chunkSize + 1
+	maxPieces := int(resp.Size)/chunkSize + 1
 	if resp.Pieces < 0 || resp.Pieces > maxPieces {
 		return nil, fmt.Errorf("pull response pieces %d out of range [0, %d] for size %d", resp.Pieces, maxPieces, resp.Size)
 	}
@@ -1790,6 +1790,12 @@ func (s *SyncClient) Close() error {
 // server pushes we missed while disconnected. The server replays all
 // changes since our last version, so no full reconciliation is needed.
 func (s *SyncClient) reconnect(ctx context.Context) error {
+	// Clear per-path retry backoff from the previous connection. Backoff
+	// state is connection-scoped: a fresh connection gets a clean slate.
+	s.retryBackoffMu.Lock()
+	clear(s.retryBackoff)
+	s.retryBackoffMu.Unlock()
+
 	if err := s.Connect(ctx); err != nil {
 		return err
 	}
@@ -1899,14 +1905,14 @@ func (s *SyncClient) pullDirect(ctx context.Context, uid int64) ([]byte, error) 
 		return nil, nil
 	}
 
-	maxSize := s.perFileMax * 2
+	maxSize := int64(s.perFileMax) * 2
 	if maxSize == 0 {
 		maxSize = 10 * 1024 * 1024
 	}
 	if resp.Size > maxSize {
 		return nil, fmt.Errorf("pull response size %d exceeds limit %d", resp.Size, maxSize)
 	}
-	maxPieces := resp.Size/chunkSize + 1
+	maxPieces := int(resp.Size)/chunkSize + 1
 	if resp.Pieces < 0 || resp.Pieces > maxPieces {
 		return nil, fmt.Errorf("pull response pieces %d out of range [0, %d] for size %d", resp.Pieces, maxPieces, resp.Size)
 	}
