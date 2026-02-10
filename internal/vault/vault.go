@@ -72,23 +72,61 @@ func (v *Vault) Root() string {
 }
 
 // resolve converts a vault-relative path to an absolute path, validating
-// that it stays within the vault root. Returns a *Error on violation.
+// that it stays within the vault root. It evaluates symlinks to prevent
+// symlink-based escape from the vault directory.
 func (v *Vault) resolve(relPath string) (string, error) {
 	if err := validatePath(relPath); err != nil {
 		return "", err
 	}
 	abs := filepath.Join(v.root, filepath.FromSlash(relPath))
-	// Ensure the resolved path is within the vault root.
+	// Ensure the joined path is within the vault root before touching disk.
 	if !strings.HasPrefix(abs, v.root+string(filepath.Separator)) && abs != v.root {
 		return "", &Error{
 			Code:    ErrCodePathNotAllowed,
 			Message: fmt.Sprintf("path escapes vault root: %s", relPath),
 		}
 	}
+	// Evaluate symlinks to catch symlink-based escape. We resolve the
+	// longest existing prefix so this works for paths where the final
+	// component doesn't exist yet (e.g. Write creating a new file).
+	real, err := evalExistingPrefix(abs)
+	if err != nil {
+		return "", fmt.Errorf("evaluating path: %w", err)
+	}
+	if !strings.HasPrefix(real, v.root+string(filepath.Separator)) && real != v.root {
+		return "", &Error{
+			Code:    ErrCodePathNotAllowed,
+			Message: fmt.Sprintf("path escapes vault root via symlink: %s", relPath),
+		}
+	}
 	return abs, nil
 }
 
-// validatePath checks for path traversal and protected directories.
+// evalExistingPrefix resolves symlinks for the longest existing prefix of
+// the path. For a path like /vault/newdir/newfile.md where newdir doesn't
+// exist, it evaluates /vault (which does exist) and appends the remaining
+// components. This lets us detect symlink escape even for not-yet-created
+// paths.
+func evalExistingPrefix(abs string) (string, error) {
+	real, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return real, nil
+	}
+	// Walk up until we find an existing directory, then append the rest.
+	dir := filepath.Dir(abs)
+	base := filepath.Base(abs)
+	if dir == abs {
+		// Reached filesystem root without finding anything.
+		return abs, nil
+	}
+	parentReal, err := evalExistingPrefix(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parentReal, base), nil
+}
+
+// validatePath checks for path traversal attempts.
 func validatePath(relPath string) error {
 	if strings.Contains(relPath, "..") {
 		return &Error{
@@ -99,8 +137,9 @@ func validatePath(relPath string) error {
 	return nil
 }
 
-// isProtectedWrite returns true if the path should not be written to.
-func isProtectedWrite(relPath string) bool {
+// isProtectedPath returns true if the path is in a protected directory
+// that should not be read from or written to via the MCP interface.
+func isProtectedPath(relPath string) bool {
 	normalized := filepath.ToSlash(relPath)
 	return strings.HasPrefix(normalized, ".obsidian/") || normalized == ".obsidian"
 }
@@ -143,6 +182,13 @@ type ListResult struct {
 func (v *Vault) List(dirPath string) (*ListResult, error) {
 	if dirPath == "" || dirPath == "/" {
 		dirPath = ""
+	}
+
+	if dirPath != "" && isProtectedPath(dirPath) {
+		return nil, &Error{
+			Code:    ErrCodePathNotAllowed,
+			Message: fmt.Sprintf("listing .obsidian/ is not allowed: %s", dirPath),
+		}
 	}
 
 	absDir, err := v.resolve(dirPath)
@@ -247,6 +293,13 @@ const DefaultReadLimit = 200
 // Read reads a file with optional line-range pagination.
 // offset is 1-indexed. limit of 0 means all remaining lines.
 func (v *Vault) Read(relPath string, offset, limit int) (*ReadResult, error) {
+	if isProtectedPath(relPath) {
+		return nil, &Error{
+			Code:    ErrCodePathNotAllowed,
+			Message: fmt.Sprintf("reading from .obsidian/ is not allowed: %s", relPath),
+		}
+	}
+
 	abs, err := v.resolve(relPath)
 	if err != nil {
 		return nil, err
@@ -316,7 +369,7 @@ func (v *Vault) Write(relPath string, content string, createDirs bool) (*WriteRe
 		return nil, err
 	}
 
-	if isProtectedWrite(relPath) {
+	if isProtectedPath(relPath) {
 		return nil, &Error{
 			Code:    ErrCodePathNotAllowed,
 			Message: fmt.Sprintf("writing to .obsidian/ is not allowed: %s", relPath),
@@ -409,7 +462,7 @@ func (v *Vault) Edit(relPath string, oldText string, newText string) (*EditResul
 		return nil, err
 	}
 
-	if isProtectedWrite(relPath) {
+	if isProtectedPath(relPath) {
 		return nil, &Error{
 			Code:    ErrCodePathNotAllowed,
 			Message: fmt.Sprintf("editing .obsidian/ is not allowed: %s", relPath),

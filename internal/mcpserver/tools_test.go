@@ -369,6 +369,78 @@ func TestEdit_DeleteText(t *testing.T) {
 	assert.NotContains(t, string(data), "Another note here.")
 }
 
+// --- Security: path traversal through MCP layer ---
+
+// traversalPaths exercises the most common directory traversal attack vectors.
+var traversalPaths = []string{
+	"../../../etc/passwd",
+	"../../etc/shadow",
+	"notes/../../etc/passwd",
+	"notes/../../../etc/passwd",
+	"..\\..\\etc\\passwd",
+}
+
+func TestList_PathTraversal(t *testing.T) {
+	session, _ := testSetup(t)
+	for _, p := range traversalPaths {
+		result := callTool(t, session, "vault_list", map[string]interface{}{
+			"path": p,
+		})
+		assert.True(t, result.IsError, "vault_list should reject %q", p)
+	}
+}
+
+func TestWrite_PathTraversal(t *testing.T) {
+	session, _ := testSetup(t)
+	for _, p := range traversalPaths {
+		result := callTool(t, session, "vault_write", map[string]interface{}{
+			"path":    p,
+			"content": "pwned",
+		})
+		assert.True(t, result.IsError, "vault_write should reject %q", p)
+	}
+}
+
+func TestEdit_PathTraversal(t *testing.T) {
+	session, _ := testSetup(t)
+	for _, p := range traversalPaths {
+		result := callTool(t, session, "vault_edit", map[string]interface{}{
+			"path":     p,
+			"old_text": "foo",
+			"new_text": "bar",
+		})
+		assert.True(t, result.IsError, "vault_edit should reject %q", p)
+	}
+}
+
+// --- Security: .obsidian protection through MCP layer ---
+
+func TestRead_ObsidianProtected(t *testing.T) {
+	session, _ := testSetup(t)
+	result := callTool(t, session, "vault_read", map[string]interface{}{
+		"path": ".obsidian/app.json",
+	})
+	assert.True(t, result.IsError, "vault_read should block .obsidian paths")
+}
+
+func TestList_ObsidianProtected(t *testing.T) {
+	session, _ := testSetup(t)
+	result := callTool(t, session, "vault_list", map[string]interface{}{
+		"path": ".obsidian",
+	})
+	assert.True(t, result.IsError, "vault_list should block .obsidian paths")
+}
+
+func TestEdit_ProtectedPath(t *testing.T) {
+	session, _ := testSetup(t)
+	result := callTool(t, session, "vault_edit", map[string]interface{}{
+		"path":     ".obsidian/app.json",
+		"old_text": "dark",
+		"new_text": "light",
+	})
+	assert.True(t, result.IsError, "vault_edit should block .obsidian paths")
+}
+
 // --- Tool listing ---
 
 func TestToolsRegistered(t *testing.T) {
