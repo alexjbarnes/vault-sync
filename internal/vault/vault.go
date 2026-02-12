@@ -17,6 +17,7 @@ import (
 const (
 	ErrCodeFileNotFound   = "FILE_NOT_FOUND"
 	ErrCodePathNotAllowed = "PATH_NOT_ALLOWED"
+	ErrCodeIsDirectory    = "IS_DIRECTORY"
 	ErrCodeTextNotFound   = "TEXT_NOT_FOUND"
 	ErrCodeTextNotUnique  = "TEXT_NOT_UNIQUE"
 	ErrCodeInvalidRange   = "INVALID_RANGE"
@@ -540,4 +541,103 @@ func (v *Vault) Edit(relPath string, oldText string, newText string) (*EditResul
 		Replaced:   true,
 		TotalLines: totalLines,
 	}, nil
+}
+
+// DeleteResult is the response for deleting a file.
+type DeleteResult struct {
+	Path    string `json:"path"`
+	Deleted bool   `json:"deleted"`
+}
+
+// Delete removes a single file from the vault. It refuses to delete
+// directories; only files can be deleted through this method.
+func (v *Vault) Delete(relPath string) (*DeleteResult, error) {
+	if err := validatePath(relPath); err != nil {
+		return nil, err
+	}
+
+	if isProtectedPath(relPath) {
+		return nil, &Error{
+			Code:    ErrCodePathNotAllowed,
+			Message: fmt.Sprintf("deleting from .obsidian/ is not allowed: %s", relPath),
+		}
+	}
+
+	abs, err := v.resolve(relPath)
+	if err != nil {
+		return nil, err
+	}
+
+	info, err := os.Stat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, &Error{
+				Code:    ErrCodeFileNotFound,
+				Message: fmt.Sprintf("file not found: %s", relPath),
+			}
+		}
+		return nil, fmt.Errorf("checking file: %w", err)
+	}
+
+	if info.IsDir() {
+		return nil, &Error{
+			Code:    ErrCodeIsDirectory,
+			Message: fmt.Sprintf("cannot delete directory: %s (delete individual files within it instead)", relPath),
+		}
+	}
+
+	if err := os.Remove(abs); err != nil {
+		return nil, fmt.Errorf("deleting file: %w", err)
+	}
+
+	v.index.Remove(relPath)
+
+	return &DeleteResult{
+		Path:    relPath,
+		Deleted: true,
+	}, nil
+}
+
+// DeleteBatchItem is the result for a single file in a batch delete.
+type DeleteBatchItem struct {
+	Path    string `json:"path"`
+	Deleted bool   `json:"deleted"`
+	Error   string `json:"error,omitempty"`
+}
+
+// DeleteBatchResult is the response for deleting multiple files.
+type DeleteBatchResult struct {
+	Deleted int               `json:"deleted"`
+	Failed  int               `json:"failed"`
+	Total   int               `json:"total"`
+	Results []DeleteBatchItem `json:"results"`
+}
+
+// DeleteBatch removes multiple files from the vault. It uses best-effort
+// semantics: each file is attempted independently and failures are reported
+// per-item rather than aborting the whole batch.
+func (v *Vault) DeleteBatch(paths []string) *DeleteBatchResult {
+	result := &DeleteBatchResult{
+		Total:   len(paths),
+		Results: make([]DeleteBatchItem, 0, len(paths)),
+	}
+
+	for _, relPath := range paths {
+		_, err := v.Delete(relPath)
+		if err != nil {
+			result.Failed++
+			result.Results = append(result.Results, DeleteBatchItem{
+				Path:  relPath,
+				Error: err.Error(),
+			})
+			continue
+		}
+		result.Deleted++
+		result.Results = append(result.Results, DeleteBatchItem{
+			Path:    relPath,
+			Deleted: true,
+		})
+	}
+
+	return result
 }

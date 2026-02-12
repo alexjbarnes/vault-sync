@@ -480,6 +480,103 @@ func TestEdit_UpdatesIndex(t *testing.T) {
 	assert.Greater(t, entry.Size, int64(0))
 }
 
+// --- Delete ---
+
+func TestDelete_ExistingFile(t *testing.T) {
+	v := testVault(t)
+	result, err := v.Delete("notes/second.md")
+	require.NoError(t, err)
+	assert.True(t, result.Deleted)
+	assert.Equal(t, "notes/second.md", result.Path)
+
+	_, err = os.Stat(filepath.Join(v.Root(), "notes/second.md"))
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestDelete_NonexistentFile(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Delete("nonexistent.md")
+	require.Error(t, err)
+	vErr, ok := err.(*Error)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodeFileNotFound, vErr.Code)
+}
+
+func TestDelete_Directory(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Delete("notes")
+	require.Error(t, err)
+	vErr, ok := err.(*Error)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodeIsDirectory, vErr.Code)
+}
+
+func TestDelete_ProtectedPath(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Delete(".obsidian/app.json")
+	require.Error(t, err)
+	vErr, ok := err.(*Error)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
+}
+
+func TestDelete_PathTraversal(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Delete("../etc/passwd")
+	require.Error(t, err)
+	vErr, ok := err.(*Error)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
+}
+
+func TestDelete_RemovesFromIndex(t *testing.T) {
+	v := testVault(t)
+	// Verify file is in the index before delete.
+	require.NotNil(t, v.index.Get("notes/second.md"))
+
+	_, err := v.Delete("notes/second.md")
+	require.NoError(t, err)
+
+	assert.Nil(t, v.index.Get("notes/second.md"))
+}
+
+// --- DeleteBatch ---
+
+func TestDeleteBatch_MultipleFiles(t *testing.T) {
+	v := testVault(t)
+	result := v.DeleteBatch([]string{"notes/hello.md", "notes/second.md"})
+	assert.Equal(t, 2, result.Deleted)
+	assert.Equal(t, 0, result.Failed)
+	assert.Equal(t, 2, result.Total)
+
+	for _, item := range result.Results {
+		assert.True(t, item.Deleted)
+		assert.Empty(t, item.Error)
+	}
+}
+
+func TestDeleteBatch_PartialFailure(t *testing.T) {
+	v := testVault(t)
+	result := v.DeleteBatch([]string{"notes/hello.md", "nonexistent.md", "notes/second.md"})
+	assert.Equal(t, 2, result.Deleted)
+	assert.Equal(t, 1, result.Failed)
+	assert.Equal(t, 3, result.Total)
+
+	// Check individual results.
+	assert.True(t, result.Results[0].Deleted)
+	assert.False(t, result.Results[1].Deleted)
+	assert.NotEmpty(t, result.Results[1].Error)
+	assert.True(t, result.Results[2].Deleted)
+}
+
+func TestDeleteBatch_Empty(t *testing.T) {
+	v := testVault(t)
+	result := v.DeleteBatch([]string{})
+	assert.Equal(t, 0, result.Deleted)
+	assert.Equal(t, 0, result.Failed)
+	assert.Equal(t, 0, result.Total)
+}
+
 // --- buildSnippet ---
 
 func TestBuildSnippet_ShortLine(t *testing.T) {

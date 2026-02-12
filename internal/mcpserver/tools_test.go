@@ -369,6 +369,134 @@ func TestEdit_DeleteText(t *testing.T) {
 	assert.NotContains(t, string(data), "Another note here.")
 }
 
+// --- vault_delete ---
+
+func TestDelete_SingleFile(t *testing.T) {
+	session, v := testSetup(t)
+	// Verify file exists before delete.
+	_, err := os.Stat(filepath.Join(v.Root(), "notes/second.md"))
+	require.NoError(t, err)
+
+	result := callTool(t, session, "vault_delete", map[string]interface{}{
+		"paths": []string{"notes/second.md"},
+	})
+	assert.False(t, result.IsError)
+
+	var out vault.DeleteBatchResult
+	extractJSON(t, result, &out)
+	assert.Equal(t, 1, out.Deleted)
+	assert.Equal(t, 0, out.Failed)
+	assert.Equal(t, 1, out.Total)
+
+	// Verify file is gone.
+	_, err = os.Stat(filepath.Join(v.Root(), "notes/second.md"))
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestDelete_MultipleFiles(t *testing.T) {
+	session, v := testSetup(t)
+	result := callTool(t, session, "vault_delete", map[string]interface{}{
+		"paths": []string{"notes/hello.md", "notes/second.md"},
+	})
+	assert.False(t, result.IsError)
+
+	var out vault.DeleteBatchResult
+	extractJSON(t, result, &out)
+	assert.Equal(t, 2, out.Deleted)
+	assert.Equal(t, 0, out.Failed)
+
+	for _, name := range []string{"notes/hello.md", "notes/second.md"} {
+		_, err := os.Stat(filepath.Join(v.Root(), name))
+		assert.True(t, os.IsNotExist(err))
+	}
+}
+
+func TestDelete_NonexistentFile(t *testing.T) {
+	session, _ := testSetup(t)
+	result := callTool(t, session, "vault_delete", map[string]interface{}{
+		"paths": []string{"nonexistent.md"},
+	})
+	// Best-effort: the call itself succeeds, but the item reports failure.
+	assert.False(t, result.IsError)
+
+	var out vault.DeleteBatchResult
+	extractJSON(t, result, &out)
+	assert.Equal(t, 0, out.Deleted)
+	assert.Equal(t, 1, out.Failed)
+	assert.NotEmpty(t, out.Results[0].Error)
+}
+
+func TestDelete_Directory(t *testing.T) {
+	session, _ := testSetup(t)
+	result := callTool(t, session, "vault_delete", map[string]interface{}{
+		"paths": []string{"notes"},
+	})
+	assert.False(t, result.IsError)
+
+	var out vault.DeleteBatchResult
+	extractJSON(t, result, &out)
+	assert.Equal(t, 0, out.Deleted)
+	assert.Equal(t, 1, out.Failed)
+	assert.Contains(t, out.Results[0].Error, "cannot delete directory")
+}
+
+func TestDelete_ProtectedPath(t *testing.T) {
+	session, _ := testSetup(t)
+	result := callTool(t, session, "vault_delete", map[string]interface{}{
+		"paths": []string{".obsidian/app.json"},
+	})
+	assert.False(t, result.IsError)
+
+	var out vault.DeleteBatchResult
+	extractJSON(t, result, &out)
+	assert.Equal(t, 0, out.Deleted)
+	assert.Equal(t, 1, out.Failed)
+	assert.Contains(t, out.Results[0].Error, ".obsidian/")
+}
+
+func TestDelete_PathTraversal(t *testing.T) {
+	session, _ := testSetup(t)
+	for _, p := range traversalPaths {
+		result := callTool(t, session, "vault_delete", map[string]interface{}{
+			"paths": []string{p},
+		})
+		assert.False(t, result.IsError, "vault_delete should not return protocol error for %q", p)
+
+		var out vault.DeleteBatchResult
+		extractJSON(t, result, &out)
+		assert.Equal(t, 0, out.Deleted, "vault_delete should not delete for %q", p)
+		assert.Equal(t, 1, out.Failed, "vault_delete should report failure for %q", p)
+	}
+}
+
+func TestDelete_PartialFailure(t *testing.T) {
+	session, v := testSetup(t)
+	result := callTool(t, session, "vault_delete", map[string]interface{}{
+		"paths": []string{"notes/hello.md", "nonexistent.md", "notes/second.md"},
+	})
+	assert.False(t, result.IsError)
+
+	var out vault.DeleteBatchResult
+	extractJSON(t, result, &out)
+	assert.Equal(t, 2, out.Deleted)
+	assert.Equal(t, 1, out.Failed)
+	assert.Equal(t, 3, out.Total)
+
+	// Valid files deleted.
+	_, err := os.Stat(filepath.Join(v.Root(), "notes/hello.md"))
+	assert.True(t, os.IsNotExist(err))
+	_, err = os.Stat(filepath.Join(v.Root(), "notes/second.md"))
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestDelete_EmptyPaths(t *testing.T) {
+	session, _ := testSetup(t)
+	result := callTool(t, session, "vault_delete", map[string]interface{}{
+		"paths": []string{},
+	})
+	assert.True(t, result.IsError)
+}
+
 // --- Security: path traversal through MCP layer ---
 
 // traversalPaths exercises the most common directory traversal attack vectors.
@@ -460,6 +588,7 @@ func TestToolsRegistered(t *testing.T) {
 		"vault_search",
 		"vault_write",
 		"vault_edit",
+		"vault_delete",
 	}
 	for _, name := range expected {
 		assert.Contains(t, names, name, "tool %s should be registered", name)

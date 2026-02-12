@@ -42,6 +42,11 @@ func RegisterTools(server *mcp.Server, v *vault.Vault) {
 		Name:        "vault_edit",
 		Description: "Find-and-replace edit on an existing file. The old_text must appear exactly once. Uses atomic write. Same semantics as str_replace.",
 	}, editHandler(v))
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "vault_delete",
+		Description: "Delete one or more files from the vault. Accepts an array of paths. Best-effort: each file is attempted independently, failures are reported per-item. Cannot delete directories or .obsidian/ paths.",
+	}, deleteHandler(v))
 }
 
 // --- Input types ---
@@ -80,6 +85,11 @@ type EditInput struct {
 	Path    string `json:"path" jsonschema:"required,file path relative to vault root"`
 	OldText string `json:"old_text" jsonschema:"required,exact text to find (must appear once)"`
 	NewText string `json:"new_text" jsonschema:"required,replacement text, empty to delete"`
+}
+
+// DeleteInput holds parameters for vault_delete.
+type DeleteInput struct {
+	Paths []string `json:"paths" jsonschema:"required,file paths relative to vault root"`
 }
 
 // --- Handlers ---
@@ -141,6 +151,19 @@ func editHandler(v *vault.Vault) mcp.ToolHandlerFor[EditInput, *vault.EditResult
 		if err != nil {
 			return nil, nil, err
 		}
+		return textResult(result), result, nil
+	}
+}
+
+func deleteHandler(v *vault.Vault) mcp.ToolHandlerFor[DeleteInput, *vault.DeleteBatchResult] {
+	return func(_ context.Context, _ *mcp.CallToolRequest, input DeleteInput) (*mcp.CallToolResult, *vault.DeleteBatchResult, error) {
+		if len(input.Paths) == 0 {
+			return nil, nil, &vault.Error{
+				Code:    vault.ErrCodePathNotAllowed,
+				Message: "paths must not be empty",
+			}
+		}
+		result := v.DeleteBatch(input.Paths)
 		return textResult(result), result, nil
 	}
 }
