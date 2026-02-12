@@ -47,6 +47,16 @@ func RegisterTools(server *mcp.Server, v *vault.Vault) {
 		Name:        "vault_delete",
 		Description: "Delete one or more files from the vault. Accepts an array of paths. Best-effort: each file is attempted independently, failures are reported per-item. Cannot delete directories or .obsidian/ paths.",
 	}, deleteHandler(v))
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "vault_move",
+		Description: "Move or rename a file within the vault. Creates destination parent directories automatically. Refuses to overwrite existing files. Cannot move directories or .obsidian/ paths.",
+	}, moveHandler(v))
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "vault_copy",
+		Description: "Copy a file within the vault. Creates destination parent directories automatically. Refuses to overwrite existing files. Uses atomic write. Cannot copy directories or .obsidian/ paths.",
+	}, copyHandler(v))
 }
 
 // --- Input types ---
@@ -90,6 +100,18 @@ type EditInput struct {
 // DeleteInput holds parameters for vault_delete.
 type DeleteInput struct {
 	Paths []string `json:"paths" jsonschema:"required,file paths relative to vault root"`
+}
+
+// MoveInput holds parameters for vault_move.
+type MoveInput struct {
+	Source      string `json:"source" jsonschema:"required,source file path relative to vault root"`
+	Destination string `json:"destination" jsonschema:"required,destination file path relative to vault root"`
+}
+
+// CopyInput holds parameters for vault_copy.
+type CopyInput struct {
+	Source      string `json:"source" jsonschema:"required,source file path relative to vault root"`
+	Destination string `json:"destination" jsonschema:"required,destination file path relative to vault root"`
 }
 
 // --- Handlers ---
@@ -164,6 +186,26 @@ func deleteHandler(v *vault.Vault) mcp.ToolHandlerFor[DeleteInput, *vault.Delete
 			}
 		}
 		result := v.DeleteBatch(input.Paths)
+		return textResult(result), result, nil
+	}
+}
+
+func moveHandler(v *vault.Vault) mcp.ToolHandlerFor[MoveInput, *vault.MoveResult] {
+	return func(_ context.Context, _ *mcp.CallToolRequest, input MoveInput) (*mcp.CallToolResult, *vault.MoveResult, error) {
+		result, err := v.Move(input.Source, input.Destination)
+		if err != nil {
+			return nil, nil, err
+		}
+		return textResult(result), result, nil
+	}
+}
+
+func copyHandler(v *vault.Vault) mcp.ToolHandlerFor[CopyInput, *vault.CopyResult] {
+	return func(_ context.Context, _ *mcp.CallToolRequest, input CopyInput) (*mcp.CallToolResult, *vault.CopyResult, error) {
+		result, err := v.Copy(input.Source, input.Destination)
+		if err != nil {
+			return nil, nil, err
+		}
 		return textResult(result), result, nil
 	}
 }

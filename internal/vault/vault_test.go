@@ -577,6 +577,191 @@ func TestDeleteBatch_Empty(t *testing.T) {
 	assert.Equal(t, 0, result.Total)
 }
 
+// --- Move ---
+
+func TestMove_ExistingFile(t *testing.T) {
+	v := testVault(t)
+	result, err := v.Move("notes/second.md", "archive/second.md")
+	require.NoError(t, err)
+	assert.True(t, result.Moved)
+	assert.Equal(t, "notes/second.md", result.Source)
+	assert.Equal(t, "archive/second.md", result.Destination)
+
+	// Source gone, destination exists.
+	_, err = os.Stat(filepath.Join(v.Root(), "notes/second.md"))
+	assert.True(t, os.IsNotExist(err))
+	data, err := os.ReadFile(filepath.Join(v.Root(), "archive/second.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "Second Note")
+}
+
+func TestMove_CreatesDstDirs(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Move("notes/hello.md", "deep/nested/hello.md")
+	require.NoError(t, err)
+
+	_, err = os.Stat(filepath.Join(v.Root(), "deep/nested/hello.md"))
+	require.NoError(t, err)
+}
+
+func TestMove_NonexistentSource(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Move("nonexistent.md", "dest.md")
+	require.Error(t, err)
+	vErr, ok := err.(*Error)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodeFileNotFound, vErr.Code)
+}
+
+func TestMove_DestinationExists(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Move("notes/hello.md", "notes/second.md")
+	require.Error(t, err)
+	vErr, ok := err.(*Error)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
+	assert.Contains(t, vErr.Message, "already exists")
+}
+
+func TestMove_Directory(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Move("notes", "archive")
+	require.Error(t, err)
+	vErr, ok := err.(*Error)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodeIsDirectory, vErr.Code)
+}
+
+func TestMove_ProtectedSource(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Move(".obsidian/app.json", "moved.json")
+	require.Error(t, err)
+	vErr, ok := err.(*Error)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
+}
+
+func TestMove_ProtectedDest(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Move("notes/hello.md", ".obsidian/hello.md")
+	require.Error(t, err)
+	vErr, ok := err.(*Error)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
+}
+
+func TestMove_PathTraversal(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Move("../etc/passwd", "stolen.txt")
+	require.Error(t, err)
+	_, err = v.Move("notes/hello.md", "../../etc/evil")
+	require.Error(t, err)
+}
+
+func TestMove_UpdatesIndex(t *testing.T) {
+	v := testVault(t)
+	require.NotNil(t, v.index.Get("notes/second.md"))
+
+	_, err := v.Move("notes/second.md", "moved.md")
+	require.NoError(t, err)
+
+	assert.Nil(t, v.index.Get("notes/second.md"))
+	assert.NotNil(t, v.index.Get("moved.md"))
+}
+
+// --- Copy ---
+
+func TestCopy_ExistingFile(t *testing.T) {
+	v := testVault(t)
+	result, err := v.Copy("notes/second.md", "archive/second.md")
+	require.NoError(t, err)
+	assert.True(t, result.Copied)
+	assert.Equal(t, "notes/second.md", result.Source)
+	assert.Equal(t, "archive/second.md", result.Destination)
+	assert.Greater(t, result.Size, int64(0))
+
+	// Both source and destination exist with same content.
+	srcData, err := os.ReadFile(filepath.Join(v.Root(), "notes/second.md"))
+	require.NoError(t, err)
+	dstData, err := os.ReadFile(filepath.Join(v.Root(), "archive/second.md"))
+	require.NoError(t, err)
+	assert.Equal(t, srcData, dstData)
+}
+
+func TestCopy_CreatesDstDirs(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Copy("notes/hello.md", "deep/nested/copy.md")
+	require.NoError(t, err)
+
+	_, err = os.Stat(filepath.Join(v.Root(), "deep/nested/copy.md"))
+	require.NoError(t, err)
+}
+
+func TestCopy_NonexistentSource(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Copy("nonexistent.md", "dest.md")
+	require.Error(t, err)
+	vErr, ok := err.(*Error)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodeFileNotFound, vErr.Code)
+}
+
+func TestCopy_DestinationExists(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Copy("notes/hello.md", "notes/second.md")
+	require.Error(t, err)
+	vErr, ok := err.(*Error)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
+	assert.Contains(t, vErr.Message, "already exists")
+}
+
+func TestCopy_Directory(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Copy("notes", "archive")
+	require.Error(t, err)
+	vErr, ok := err.(*Error)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodeIsDirectory, vErr.Code)
+}
+
+func TestCopy_ProtectedSource(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Copy(".obsidian/app.json", "copied.json")
+	require.Error(t, err)
+	vErr, ok := err.(*Error)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
+}
+
+func TestCopy_ProtectedDest(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Copy("notes/hello.md", ".obsidian/hello.md")
+	require.Error(t, err)
+	vErr, ok := err.(*Error)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
+}
+
+func TestCopy_PathTraversal(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Copy("../etc/passwd", "stolen.txt")
+	require.Error(t, err)
+	_, err = v.Copy("notes/hello.md", "../../etc/evil")
+	require.Error(t, err)
+}
+
+func TestCopy_UpdatesIndex(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Copy("notes/second.md", "copied.md")
+	require.NoError(t, err)
+
+	// Source still in index.
+	assert.NotNil(t, v.index.Get("notes/second.md"))
+	// Destination added to index.
+	assert.NotNil(t, v.index.Get("copied.md"))
+}
+
 // --- buildSnippet ---
 
 func TestBuildSnippet_ShortLine(t *testing.T) {

@@ -497,6 +497,138 @@ func TestDelete_EmptyPaths(t *testing.T) {
 	assert.True(t, result.IsError)
 }
 
+// --- vault_move ---
+
+func TestMove_Success(t *testing.T) {
+	session, v := testSetup(t)
+	result := callTool(t, session, "vault_move", map[string]interface{}{
+		"source":      "notes/second.md",
+		"destination": "archive/second.md",
+	})
+	assert.False(t, result.IsError)
+
+	var out vault.MoveResult
+	extractJSON(t, result, &out)
+	assert.True(t, out.Moved)
+	assert.Equal(t, "notes/second.md", out.Source)
+	assert.Equal(t, "archive/second.md", out.Destination)
+
+	_, err := os.Stat(filepath.Join(v.Root(), "notes/second.md"))
+	assert.True(t, os.IsNotExist(err))
+	_, err = os.Stat(filepath.Join(v.Root(), "archive/second.md"))
+	require.NoError(t, err)
+}
+
+func TestMove_NonexistentSource(t *testing.T) {
+	session, _ := testSetup(t)
+	result := callTool(t, session, "vault_move", map[string]interface{}{
+		"source":      "nonexistent.md",
+		"destination": "dest.md",
+	})
+	assert.True(t, result.IsError)
+}
+
+func TestMove_DestExists(t *testing.T) {
+	session, _ := testSetup(t)
+	result := callTool(t, session, "vault_move", map[string]interface{}{
+		"source":      "notes/hello.md",
+		"destination": "notes/second.md",
+	})
+	assert.True(t, result.IsError)
+}
+
+func TestMove_ProtectedPath(t *testing.T) {
+	session, _ := testSetup(t)
+	result := callTool(t, session, "vault_move", map[string]interface{}{
+		"source":      ".obsidian/app.json",
+		"destination": "moved.json",
+	})
+	assert.True(t, result.IsError)
+}
+
+func TestMove_PathTraversal(t *testing.T) {
+	session, _ := testSetup(t)
+	for _, p := range traversalPaths {
+		result := callTool(t, session, "vault_move", map[string]interface{}{
+			"source":      p,
+			"destination": "dest.md",
+		})
+		assert.True(t, result.IsError, "vault_move should reject source %q", p)
+
+		result = callTool(t, session, "vault_move", map[string]interface{}{
+			"source":      "notes/hello.md",
+			"destination": p,
+		})
+		assert.True(t, result.IsError, "vault_move should reject destination %q", p)
+	}
+}
+
+// --- vault_copy ---
+
+func TestCopy_Success(t *testing.T) {
+	session, v := testSetup(t)
+	result := callTool(t, session, "vault_copy", map[string]interface{}{
+		"source":      "notes/second.md",
+		"destination": "archive/second.md",
+	})
+	assert.False(t, result.IsError)
+
+	var out vault.CopyResult
+	extractJSON(t, result, &out)
+	assert.True(t, out.Copied)
+	assert.Greater(t, out.Size, int64(0))
+
+	// Both files exist.
+	_, err := os.Stat(filepath.Join(v.Root(), "notes/second.md"))
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(v.Root(), "archive/second.md"))
+	require.NoError(t, err)
+}
+
+func TestCopy_NonexistentSource(t *testing.T) {
+	session, _ := testSetup(t)
+	result := callTool(t, session, "vault_copy", map[string]interface{}{
+		"source":      "nonexistent.md",
+		"destination": "dest.md",
+	})
+	assert.True(t, result.IsError)
+}
+
+func TestCopy_DestExists(t *testing.T) {
+	session, _ := testSetup(t)
+	result := callTool(t, session, "vault_copy", map[string]interface{}{
+		"source":      "notes/hello.md",
+		"destination": "notes/second.md",
+	})
+	assert.True(t, result.IsError)
+}
+
+func TestCopy_ProtectedPath(t *testing.T) {
+	session, _ := testSetup(t)
+	result := callTool(t, session, "vault_copy", map[string]interface{}{
+		"source":      ".obsidian/app.json",
+		"destination": "copied.json",
+	})
+	assert.True(t, result.IsError)
+}
+
+func TestCopy_PathTraversal(t *testing.T) {
+	session, _ := testSetup(t)
+	for _, p := range traversalPaths {
+		result := callTool(t, session, "vault_copy", map[string]interface{}{
+			"source":      p,
+			"destination": "dest.md",
+		})
+		assert.True(t, result.IsError, "vault_copy should reject source %q", p)
+
+		result = callTool(t, session, "vault_copy", map[string]interface{}{
+			"source":      "notes/hello.md",
+			"destination": p,
+		})
+		assert.True(t, result.IsError, "vault_copy should reject destination %q", p)
+	}
+}
+
 // --- Security: path traversal through MCP layer ---
 
 // traversalPaths exercises the most common directory traversal attack vectors.
@@ -589,6 +721,8 @@ func TestToolsRegistered(t *testing.T) {
 		"vault_write",
 		"vault_edit",
 		"vault_delete",
+		"vault_move",
+		"vault_copy",
 	}
 	for _, name := range expected {
 		assert.Contains(t, names, name, "tool %s should be registered", name)

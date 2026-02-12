@@ -641,3 +641,201 @@ func (v *Vault) DeleteBatch(paths []string) *DeleteBatchResult {
 
 	return result
 }
+
+// MoveResult is the response for moving/renaming a file.
+type MoveResult struct {
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+	Moved       bool   `json:"moved"`
+}
+
+// Move renames a file within the vault. It creates parent directories for the
+// destination if they do not exist. Both source and destination must be files
+// (not directories) and must not be in .obsidian/.
+func (v *Vault) Move(srcPath, dstPath string) (*MoveResult, error) {
+	if err := validatePath(srcPath); err != nil {
+		return nil, err
+	}
+	if err := validatePath(dstPath); err != nil {
+		return nil, err
+	}
+
+	if isProtectedPath(srcPath) {
+		return nil, &Error{
+			Code:    ErrCodePathNotAllowed,
+			Message: fmt.Sprintf("moving from .obsidian/ is not allowed: %s", srcPath),
+		}
+	}
+	if isProtectedPath(dstPath) {
+		return nil, &Error{
+			Code:    ErrCodePathNotAllowed,
+			Message: fmt.Sprintf("moving to .obsidian/ is not allowed: %s", dstPath),
+		}
+	}
+
+	absSrc, err := v.resolve(srcPath)
+	if err != nil {
+		return nil, err
+	}
+	absDst, err := v.resolve(dstPath)
+	if err != nil {
+		return nil, err
+	}
+
+	srcInfo, err := os.Stat(absSrc)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, &Error{
+				Code:    ErrCodeFileNotFound,
+				Message: fmt.Sprintf("source file not found: %s", srcPath),
+			}
+		}
+		return nil, fmt.Errorf("checking source: %w", err)
+	}
+	if srcInfo.IsDir() {
+		return nil, &Error{
+			Code:    ErrCodeIsDirectory,
+			Message: fmt.Sprintf("cannot move directory: %s", srcPath),
+		}
+	}
+
+	// Refuse to overwrite an existing file.
+	if _, err := os.Stat(absDst); err == nil {
+		return nil, &Error{
+			Code:    ErrCodePathNotAllowed,
+			Message: fmt.Sprintf("destination already exists: %s", dstPath),
+		}
+	}
+
+	// Create parent directories for destination.
+	if err := os.MkdirAll(filepath.Dir(absDst), 0755); err != nil {
+		return nil, fmt.Errorf("creating destination directories: %w", err)
+	}
+
+	if err := os.Rename(absSrc, absDst); err != nil {
+		return nil, fmt.Errorf("moving file: %w", err)
+	}
+
+	v.index.Remove(srcPath)
+	v.index.Update(dstPath)
+
+	return &MoveResult{
+		Source:      srcPath,
+		Destination: dstPath,
+		Moved:       true,
+	}, nil
+}
+
+// CopyResult is the response for copying a file.
+type CopyResult struct {
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+	Copied      bool   `json:"copied"`
+	Size        int64  `json:"size"`
+}
+
+// Copy duplicates a file within the vault. It creates parent directories for
+// the destination if they do not exist. Both source and destination must be
+// files (not directories) and must not be in .obsidian/.
+func (v *Vault) Copy(srcPath, dstPath string) (*CopyResult, error) {
+	if err := validatePath(srcPath); err != nil {
+		return nil, err
+	}
+	if err := validatePath(dstPath); err != nil {
+		return nil, err
+	}
+
+	if isProtectedPath(srcPath) {
+		return nil, &Error{
+			Code:    ErrCodePathNotAllowed,
+			Message: fmt.Sprintf("copying from .obsidian/ is not allowed: %s", srcPath),
+		}
+	}
+	if isProtectedPath(dstPath) {
+		return nil, &Error{
+			Code:    ErrCodePathNotAllowed,
+			Message: fmt.Sprintf("copying to .obsidian/ is not allowed: %s", dstPath),
+		}
+	}
+
+	absSrc, err := v.resolve(srcPath)
+	if err != nil {
+		return nil, err
+	}
+	absDst, err := v.resolve(dstPath)
+	if err != nil {
+		return nil, err
+	}
+
+	srcInfo, err := os.Stat(absSrc)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, &Error{
+				Code:    ErrCodeFileNotFound,
+				Message: fmt.Sprintf("source file not found: %s", srcPath),
+			}
+		}
+		return nil, fmt.Errorf("checking source: %w", err)
+	}
+	if srcInfo.IsDir() {
+		return nil, &Error{
+			Code:    ErrCodeIsDirectory,
+			Message: fmt.Sprintf("cannot copy directory: %s", srcPath),
+		}
+	}
+
+	// Refuse to overwrite an existing file.
+	if _, err := os.Stat(absDst); err == nil {
+		return nil, &Error{
+			Code:    ErrCodePathNotAllowed,
+			Message: fmt.Sprintf("destination already exists: %s", dstPath),
+		}
+	}
+
+	data, err := os.ReadFile(absSrc)
+	if err != nil {
+		return nil, fmt.Errorf("reading source file: %w", err)
+	}
+
+	// Create parent directories for destination.
+	dstDir := filepath.Dir(absDst)
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		return nil, fmt.Errorf("creating destination directories: %w", err)
+	}
+
+	// Atomic write: temp file + rename.
+	tmp, err := os.CreateTemp(dstDir, ".vault-copy-*")
+	if err != nil {
+		return nil, fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return nil, fmt.Errorf("writing temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return nil, fmt.Errorf("closing temp file: %w", err)
+	}
+
+	if err := os.Chmod(tmpName, srcInfo.Mode()); err != nil {
+		os.Remove(tmpName)
+		return nil, fmt.Errorf("setting file permissions: %w", err)
+	}
+
+	if err := os.Rename(tmpName, absDst); err != nil {
+		os.Remove(tmpName)
+		return nil, fmt.Errorf("renaming temp file: %w", err)
+	}
+
+	v.index.Update(dstPath)
+
+	return &CopyResult{
+		Source:      srcPath,
+		Destination: dstPath,
+		Copied:      true,
+		Size:        int64(len(data)),
+	}, nil
+}
