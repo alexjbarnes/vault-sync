@@ -14,13 +14,8 @@ import (
 // RegisterTools adds all vault tools to the given MCP server.
 func RegisterTools(server *mcp.Server, v *vault.Vault) {
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "vault_list_all",
-		Description: "List every file in the vault with metadata (path, size, modified, tags). No file content. Use this as the first call to get a complete map of the vault.",
-	}, listAllHandler(v))
-
-	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vault_list",
-		Description: "List contents of a specific folder, one level deep. Returns files with size/modified and folders with child counts.",
+		Description: "List vault contents. Without a path: returns every file with metadata (path, size, modified, tags). With a path: lists one folder level deep, showing files with size/modified and folders with child counts.",
 	}, listHandler(v))
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -62,12 +57,23 @@ func RegisterTools(server *mcp.Server, v *vault.Vault) {
 // --- Input types ---
 // The MCP SDK infers JSON schema from these struct types via jsonschema tags.
 
-// ListAllInput has no parameters.
-type ListAllInput struct{}
-
 // ListInput holds parameters for vault_list.
 type ListInput struct {
-	Path string `json:"path,omitempty" jsonschema:"folder path relative to vault root, defaults to root"`
+	Path string `json:"path,omitempty" jsonschema:"folder path relative to vault root; omit to list all files"`
+}
+
+// listResult is the combined response for vault_list. When path is omitted,
+// TotalFiles and Files are populated. When path is provided, Path, Entries,
+// and TotalEntries are populated.
+type listResult struct {
+	// Fields for all-files mode (no path).
+	TotalFiles int               `json:"total_files,omitempty"`
+	Files      []vault.FileEntry `json:"files,omitempty"`
+
+	// Fields for directory mode (with path).
+	Path         string           `json:"path,omitempty"`
+	Entries      []vault.DirEntry `json:"entries,omitempty"`
+	TotalEntries int              `json:"total_entries,omitempty"`
 }
 
 // ReadInput holds parameters for vault_read.
@@ -116,20 +122,26 @@ type CopyInput struct {
 
 // --- Handlers ---
 
-func listAllHandler(v *vault.Vault) mcp.ToolHandlerFor[ListAllInput, *vault.ListAllResult] {
-	return func(_ context.Context, _ *mcp.CallToolRequest, _ ListAllInput) (*mcp.CallToolResult, *vault.ListAllResult, error) {
-		result := v.ListAll()
-		return textResult(result), result, nil
-	}
-}
-
-func listHandler(v *vault.Vault) mcp.ToolHandlerFor[ListInput, *vault.ListResult] {
-	return func(_ context.Context, _ *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, *vault.ListResult, error) {
-		result, err := v.List(input.Path)
+func listHandler(v *vault.Vault) mcp.ToolHandlerFor[ListInput, *listResult] {
+	return func(_ context.Context, _ *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, *listResult, error) {
+		if input.Path == "" {
+			all := v.ListAll()
+			r := &listResult{
+				TotalFiles: all.TotalFiles,
+				Files:      all.Files,
+			}
+			return textResult(r), r, nil
+		}
+		dir, err := v.List(input.Path)
 		if err != nil {
 			return nil, nil, err
 		}
-		return textResult(result), result, nil
+		r := &listResult{
+			Path:         dir.Path,
+			Entries:      dir.Entries,
+			TotalEntries: dir.TotalEntries,
+		}
+		return textResult(r), r, nil
 	}
 }
 

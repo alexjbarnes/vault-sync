@@ -79,32 +79,36 @@ func extractJSON(t *testing.T, result *mcp.CallToolResult, dest interface{}) {
 	require.NoError(t, json.Unmarshal([]byte(tc.Text), dest))
 }
 
-// --- vault_list_all ---
+// --- vault_list ---
 
-func TestListAll(t *testing.T) {
+func TestList_AllFiles(t *testing.T) {
 	session, _ := testSetup(t)
-	result := callTool(t, session, "vault_list_all", nil)
+	result := callTool(t, session, "vault_list", nil)
 	assert.False(t, result.IsError)
 
-	var out vault.ListAllResult
+	var out struct {
+		TotalFiles int               `json:"total_files"`
+		Files      []vault.FileEntry `json:"files"`
+	}
 	extractJSON(t, result, &out)
 	assert.Greater(t, out.TotalFiles, 0)
 
 	paths := make(map[string]bool)
 	for _, f := range out.Files {
 		paths[f.Path] = true
-		// .obsidian should be excluded.
 		assert.False(t, filepath.HasPrefix(f.Path, ".obsidian"), "should exclude .obsidian: %s", f.Path)
 	}
 	assert.True(t, paths["notes/hello.md"])
 	assert.True(t, paths["images/photo.png"])
 }
 
-func TestListAll_IncludesTags(t *testing.T) {
+func TestList_AllFilesIncludesTags(t *testing.T) {
 	session, _ := testSetup(t)
-	result := callTool(t, session, "vault_list_all", nil)
+	result := callTool(t, session, "vault_list", nil)
 
-	var out vault.ListAllResult
+	var out struct {
+		Files []vault.FileEntry `json:"files"`
+	}
 	extractJSON(t, result, &out)
 
 	for _, f := range out.Files {
@@ -116,11 +120,11 @@ func TestListAll_IncludesTags(t *testing.T) {
 	t.Fatal("notes/hello.md not found in results")
 }
 
-// --- vault_list ---
-
 func TestList_Root(t *testing.T) {
 	session, _ := testSetup(t)
-	result := callTool(t, session, "vault_list", map[string]interface{}{})
+	result := callTool(t, session, "vault_list", map[string]interface{}{
+		"path": "/",
+	})
 	assert.False(t, result.IsError)
 
 	var out vault.ListResult
@@ -714,7 +718,6 @@ func TestToolsRegistered(t *testing.T) {
 	}
 
 	expected := []string{
-		"vault_list_all",
 		"vault_list",
 		"vault_read",
 		"vault_search",
