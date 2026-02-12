@@ -3,7 +3,7 @@ services:
     image: ghcr.io/alexjbarnes/vault-sync:latest
     env_file: .env
     volumes:
-      - data:/home/nonroot/.vault-sync
+      - data:/root/.vault-sync
     restart: unless-stopped
 
 volumes:

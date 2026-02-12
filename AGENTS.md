@@ -2,7 +2,7 @@
 
 ## Project overview
 
-vault-sync is a headless CLI that syncs an Obsidian vault using the reverse-engineered Obsidian Sync protocol. Single binary, no subcommands. The protocol spec lives in `obsidian-sync-protocol.md` and the reference Obsidian app source is `app.js`.
+vault-sync is a headless CLI that syncs an Obsidian vault using the reverse-engineered Obsidian Sync protocol and optionally serves vault content over an MCP HTTP server with OAuth 2.1 auth. Single binary, no subcommands. The protocol spec lives in `obsidian-sync-protocol.md` and the reference Obsidian app source is `app.js`.
 
 ## Build and test commands
 
@@ -29,14 +29,18 @@ Go version: 1.25.3 (see go.mod). Build tool is `justfile`, not Makefile.
 ## Project structure
 
 ```
-cmd/vault-sync/main.go       Entry point, orchestration, signal handling
+cmd/vault-sync/main.go       Entry point, orchestration, signal handling, retry logic
 internal/
+  auth/                       OAuth 2.1 server (authorize, token, registration, middleware, store)
   config/                     Env var parsing (caarlos0/env + godotenv)
   errors/                     Sentinel errors
-  logging/                    slog setup
-  state/                      bbolt persistence (tokens, vault state, file tracking)
+  logging/                    slog setup (JSON for production, text for development)
+  mcpserver/                  MCP tool registration (vault_list, vault_read, etc.)
+  models/                     Shared types (OAuthToken, OAuthClient) to break circular deps
+  state/                      bbolt persistence (tokens, vault state, file tracking, OAuth)
+  vault/                      Read-only vault access for MCP (file listing, search, editing, index)
 obsidian/
-  client.go                   REST API client
+  client.go                   REST API client (signin, signout, list vaults, transient retry)
   types.go                    All JSON message types (REST + WebSocket)
   crypto.go                   scrypt key derivation, AES-GCM encrypt/decrypt
   sync.go                     WebSocket sync client, event loop, push/pull
@@ -44,6 +48,7 @@ obsidian/
   scanner.go                  Local filesystem scan + diff against persisted state
   vault.go                    Thread-safe filesystem operations + path normalization
   watcher.go                  fsnotify watcher with debounce + offline queue
+  filter.go                   Config sync filter (.obsidian/ path filtering)
   ctime_{linux,darwin,other}.go  Platform-specific ctime extraction
 ```
 
@@ -53,7 +58,7 @@ All domain logic lives in `obsidian/`. `internal/` is infrastructure. `cmd/` is 
 
 ### Imports
 
-Two groups separated by a blank line. Stdlib first, then external and internal mixed together, all alphabetical:
+Two groups separated by a blank line. Stdlib first, then external and internal mixed alphabetically:
 
 ```go
 import (
@@ -106,7 +111,7 @@ Errors are always `slog.String("error", err.Error())`, not `slog.Any`.
 
 ### Types
 
-- Never use `any`. The two places that use `interface{}` are JSON serialization boundaries.
+- Never use `any`. The few places that use `interface{}` are JSON serialization boundaries.
 - No generics.
 - Pointer receivers on all mutable structs.
 - Small structs passed by value to setters, returned as pointer from getters (nil = not found).
@@ -129,14 +134,26 @@ Errors are always `slog.String("error", err.Error())`, not `slog.Any`.
 - Blank lines between functions use zero whitespace characters.
 - `gofmt` standard formatting. No custom formatter config.
 
+## Testing
+
+- Table-driven tests with `t.Run` subtests are the primary pattern.
+- Use `stretchr/testify`: `require` for fatal preconditions, `assert` for assertions.
+- Test helpers call `t.Helper()` and use `t.TempDir()` for filesystem tests.
+- Mocks generated with `go.uber.org/mock` (gomock) for `wsConn` and `syncPusher` interfaces.
+- HTTP tests use `net/http/httptest` for server mocking.
+- Tests live in the same package (not `_test` package).
+- `Reconcile()` is a pure function; test it with values only, no I/O.
+
 ## Architecture notes
 
 - `SyncClient` owns the WebSocket connection. All writes go through the event loop goroutine. Reads go through a reader goroutine that posts to `inboundCh`.
 - `Reconcile()` is a pure function (no I/O) that returns a decision enum. Executors perform the I/O.
 - `Vault` serializes all filesystem access via `sync.RWMutex`.
 - Config is loaded from environment variables (or `.env` file). See `internal/config/config.go`.
-- State is persisted in `~/.vault-sync/state.db` (bbolt).
+- State is persisted in `~/.vault-sync/state.db` (bbolt). OAuth tokens and clients are also persisted there.
 - Constructor-based dependency injection, no frameworks.
+- Two `Vault` types exist: `obsidian.Vault` (sync-oriented, RWMutex) and `internal/vault.Vault` (MCP-oriented, with index and search).
+- Interfaces are only created when needed for testing. Both (`wsConn`, `syncPusher`) are unexported with minimal surface area.
 
 ## Dependencies
 
@@ -147,6 +164,9 @@ Errors are always `slog.String("error", err.Error())`, not `slog.Any`.
 - `fsnotify` for file watching
 - `golang.org/x/text` for Unicode normalization (NFC, NFKC)
 - `golang.org/x/crypto` for scrypt
+- `modelcontextprotocol/go-sdk` for MCP server
+- `go.uber.org/mock` for test mock generation
+- `stretchr/testify` for test assertions
 
 ## Things to avoid
 
