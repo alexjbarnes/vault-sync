@@ -6,7 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/alexjbarnes/vault-sync/internal/models"
 )
 
 const tokenExpiry = 24 * time.Hour
@@ -17,6 +20,7 @@ type tokenRequest struct {
 	RedirectURI  string `json:"redirect_uri"`
 	CodeVerifier string `json:"code_verifier"`
 	ClientID     string `json:"client_id"`
+	Resource     string `json:"resource"`
 }
 
 type tokenResponse struct {
@@ -25,8 +29,9 @@ type tokenResponse struct {
 	ExpiresIn   int    `json:"expires_in"`
 }
 
-// HandleToken returns the /oauth/token handler.
-func HandleToken(store *Store) http.HandlerFunc {
+// HandleToken returns the /oauth/token handler. The serverURL is the
+// canonical resource identifier used to validate the resource parameter.
+func HandleToken(store *Store, serverURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -54,6 +59,7 @@ func HandleToken(store *Store) http.HandlerFunc {
 				RedirectURI:  r.FormValue("redirect_uri"),
 				CodeVerifier: r.FormValue("code_verifier"),
 				ClientID:     r.FormValue("client_id"),
+				Resource:     r.FormValue("resource"),
 			}
 		}
 
@@ -79,6 +85,18 @@ func HandleToken(store *Store) http.HandlerFunc {
 			return
 		}
 
+		// RFC 8707: validate that the resource parameter matches what was
+		// bound to the authorization code. Tolerate omission for backward
+		// compatibility, but reject mismatches.
+		if req.Resource != "" && strings.TrimRight(req.Resource, "/") != strings.TrimRight(serverURL, "/") {
+			writeJSONError(w, http.StatusBadRequest, "invalid_target", "resource parameter does not match this server")
+			return
+		}
+		if ac.Resource != "" && req.Resource != "" && strings.TrimRight(req.Resource, "/") != strings.TrimRight(ac.Resource, "/") {
+			writeJSONError(w, http.StatusBadRequest, "invalid_target", "resource does not match authorization code")
+			return
+		}
+
 		// PKCE is mandatory. The authorize endpoint enforces that a
 		// code_challenge is present, so every auth code has one.
 		if ac.CodeChallenge == "" {
@@ -94,11 +112,16 @@ func HandleToken(store *Store) http.HandlerFunc {
 			return
 		}
 
-		// Issue access token.
+		// Issue access token bound to the resource.
+		resource := ac.Resource
+		if resource == "" {
+			resource = serverURL
+		}
 		token := RandomHex(32)
-		store.SaveToken(&TokenInfo{
+		store.SaveToken(&models.OAuthToken{
 			Token:     token,
 			UserID:    ac.UserID,
+			Resource:  resource,
 			ExpiresAt: time.Now().Add(tokenExpiry),
 		})
 

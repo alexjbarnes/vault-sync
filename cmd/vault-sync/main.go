@@ -1,10 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,39 +20,16 @@ import (
 	"github.com/alexjbarnes/vault-sync/internal/vault"
 	"github.com/alexjbarnes/vault-sync/obsidian"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/sync/errgroup"
 )
 
 var Version = "dev"
 
 func main() {
-	// Handle hash-password subcommand before config loading.
-	if len(os.Args) > 1 && os.Args[1] == "hash-password" {
-		hashPassword()
-		return
-	}
-
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-func hashPassword() {
-	fmt.Fprint(os.Stderr, "Enter password: ")
-	scanner := bufio.NewScanner(os.Stdin)
-	if !scanner.Scan() {
-		fmt.Fprintln(os.Stderr, "no input")
-		os.Exit(1)
-	}
-	password := scanner.Text()
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println(string(hash))
 }
 
 func run() error {
@@ -71,63 +48,100 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// When sync is enabled, perform authentication and vault selection
+	// before starting any services. This ensures cfg.SyncDir is resolved
+	// before the MCP server reads it, preventing the MCP server from
+	// serving the wrong directory.
+	var syncSetup *syncSetupResult
+	var appState *state.State
+
+	if cfg.EnableSync {
+		var err error
+		syncSetup, err = setupSync(ctx, cfg, logger)
+		if err != nil {
+			return err
+		}
+		defer syncSetup.cleanup()
+		appState = syncSetup.appState
+	} else if cfg.EnableMCP {
+		// MCP-only mode: load state for OAuth persistence.
+		var err error
+		appState, err = state.Load()
+		if err != nil {
+			return fmt.Errorf("loading state: %w", err)
+		}
+		defer appState.Close()
+	}
+
 	g, gctx := errgroup.WithContext(ctx)
 
 	if cfg.EnableSync {
 		g.Go(func() error {
-			return runSync(gctx, cfg, logger)
+			return runSync(gctx, cfg, logger, syncSetup)
 		})
 	}
 
 	if cfg.EnableMCP {
 		g.Go(func() error {
-			return runMCP(gctx, cfg, logger)
+			return runMCP(gctx, cfg, logger, appState)
 		})
 	}
 
 	return g.Wait()
 }
 
-// runSync starts the Obsidian sync daemon.
-func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
+// syncSetupResult holds state from the pre-sync setup phase. This is
+// performed in run() before any goroutines start, ensuring cfg.SyncDir
+// is resolved before the MCP server reads it.
+type syncSetupResult struct {
+	appState *state.State
+	client   *obsidian.Client
+	token    string
+	vault    *obsidian.VaultInfo
+	keyHash  string
+	cipher   *obsidian.CipherV0
+	logger   *slog.Logger
+}
+
+// cleanup releases resources acquired during setup. The session token
+// is intentionally kept valid so it can be reused on next launch,
+// matching the Obsidian app's behavior.
+func (s *syncSetupResult) cleanup() {
+	s.appState.Close()
+}
+
+// setupSync performs authentication, vault selection, SyncDir resolution,
+// and key derivation. It runs synchronously before any services start.
+func setupSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*syncSetupResult, error) {
 	appState, err := state.Load()
 	if err != nil {
-		return fmt.Errorf("loading state: %w", err)
+		return nil, fmt.Errorf("loading state: %w", err)
 	}
-	defer appState.Close()
 
 	client := obsidian.NewClient(nil)
 
 	token, vaultList, err := authenticate(ctx, client, cfg, appState, logger)
 	if err != nil {
-		return err
+		appState.Close()
+		return nil, err
 	}
-	// Best-effort signout on shutdown to invalidate the session token.
-	// Uses a detached context so the signout request can complete even
-	// after the parent context is cancelled by SIGINT/SIGTERM.
-	defer func() {
-		signoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := client.Signout(signoutCtx, token); err != nil {
-			logger.Debug("signout on shutdown", slog.String("error", err.Error()))
-		} else {
-			logger.Debug("signed out")
-		}
-	}()
 
 	v, err := selectVault(vaultList, cfg.VaultName)
 	if err != nil {
-		return err
+		appState.Close()
+		return nil, err
 	}
 
-	// If OBSIDIAN_SYNC_DIR was not set, derive it from the vault ID.
+	// Resolve SyncDir before any service starts.
 	if cfg.SyncDir == "" {
 		defaultDir, err := config.DefaultSyncDir(v.ID)
 		if err != nil {
-			return fmt.Errorf("determining default sync dir: %w", err)
+			appState.Close()
+			return nil, fmt.Errorf("determining default sync dir: %w", err)
 		}
 		if err := cfg.SetSyncDir(defaultDir); err != nil {
-			return err
+			appState.Close()
+			return nil, err
 		}
 		logger.Info("using default sync dir", slog.String("dir", cfg.SyncDir))
 	}
@@ -142,7 +156,8 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error
 	logger.Info("deriving encryption key")
 	key, err := obsidian.DeriveKey(cfg.VaultPassword, v.Salt)
 	if err != nil {
-		return fmt.Errorf("deriving key: %w", err)
+		appState.Close()
+		return nil, fmt.Errorf("deriving key: %w", err)
 	}
 	keyHash := obsidian.KeyHash(key)
 	logger.Debug("key derived")
@@ -150,9 +165,26 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error
 	cipher, err := obsidian.NewCipherV0(key)
 	if err != nil {
 		obsidian.ZeroKey(key)
-		return fmt.Errorf("creating cipher: %w", err)
+		appState.Close()
+		return nil, fmt.Errorf("creating cipher: %w", err)
 	}
 	obsidian.ZeroKey(key)
+
+	return &syncSetupResult{
+		appState: appState,
+		client:   client,
+		token:    token,
+		vault:    v,
+		keyHash:  keyHash,
+		cipher:   cipher,
+		logger:   logger,
+	}, nil
+}
+
+// runSync starts the Obsidian sync daemon using a pre-computed setup result.
+func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, setup *syncSetupResult) error {
+	v := setup.vault
+	appState := setup.appState
 
 	vs, err := appState.GetVault(v.ID)
 	if err != nil {
@@ -185,14 +217,14 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error
 
 	syncClient := obsidian.NewSyncClient(obsidian.SyncConfig{
 		Host:              v.Host,
-		Token:             token,
+		Token:             setup.token,
 		VaultID:           v.ID,
-		KeyHash:           keyHash,
+		KeyHash:           setup.keyHash,
 		Device:            cfg.DeviceName,
 		EncryptionVersion: v.EncryptionVersion,
 		Version:           vs.Version,
 		Initial:           vs.Initial,
-		Cipher:            cipher,
+		Cipher:            setup.cipher,
 		Vault:             vaultFS,
 		State:             appState,
 		Filter:            syncFilter,
@@ -223,7 +255,7 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error
 		return fmt.Errorf("scanning local files: %w", err)
 	}
 
-	reconciler := obsidian.NewReconciler(vaultFS, syncClient, appState, v.ID, cipher, logger, syncFilter)
+	reconciler := obsidian.NewReconciler(vaultFS, syncClient, appState, v.ID, setup.cipher, logger, syncFilter)
 	if err := reconciler.Phase1(ctx, serverPushes, scan); err != nil {
 		return fmt.Errorf("reconciliation phase 1 failed: %w", err)
 	}
@@ -246,8 +278,9 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) error
 	return sg.Wait()
 }
 
-// runMCP starts the MCP HTTP server.
-func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
+// runMCP starts the MCP HTTP server. When appState is non-nil, OAuth
+// tokens and client registrations are persisted across restarts.
+func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appState *state.State) error {
 	users, err := cfg.ParseMCPUsers()
 	if err != nil {
 		return fmt.Errorf("parsing MCP auth users: %w", err)
@@ -277,7 +310,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger) error 
 		return mcpServer
 	}, nil)
 
-	store := auth.NewStore()
+	store := auth.NewStore(appState, mcpLogger)
 	defer store.Stop()
 	authMiddleware := auth.Middleware(store, cfg.MCPServerURL)
 
@@ -285,8 +318,8 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger) error 
 	mux.HandleFunc("/.well-known/oauth-protected-resource", auth.HandleProtectedResourceMetadata(cfg.MCPServerURL))
 	mux.HandleFunc("/.well-known/oauth-authorization-server", auth.HandleAuthServerMetadata(cfg.MCPServerURL))
 	mux.HandleFunc("/oauth/register", auth.HandleRegistration(store))
-	mux.HandleFunc("/oauth/authorize", auth.HandleAuthorize(store, users, mcpLogger))
-	mux.HandleFunc("/oauth/token", auth.HandleToken(store))
+	mux.HandleFunc("/oauth/authorize", auth.HandleAuthorize(store, users, mcpLogger, cfg.MCPServerURL))
+	mux.HandleFunc("/oauth/token", auth.HandleToken(store, cfg.MCPServerURL))
 	mux.Handle("/mcp", authMiddleware(mcpHandler))
 
 	server := &http.Server{
@@ -329,6 +362,22 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger) error 
 	return mg.Wait()
 }
 
+const (
+	retryMaxAttempts = 5
+	retryBaseDelay   = 2 * time.Second
+	retryMaxDelay    = 30 * time.Second
+)
+
+// retryDelay returns the backoff delay for the given attempt (0-indexed).
+// Uses exponential backoff: 2s, 4s, 8s, 16s, 30s.
+func retryDelay(attempt int) time.Duration {
+	d := retryBaseDelay * time.Duration(math.Pow(2, float64(attempt)))
+	if d > retryMaxDelay {
+		d = retryMaxDelay
+	}
+	return d
+}
+
 func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Config, appState *state.State, logger *slog.Logger) (string, *obsidian.VaultListResponse, error) {
 	if token := appState.Token(); token != "" {
 		logger.Debug("trying cached token")
@@ -340,10 +389,28 @@ func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Conf
 		logger.Debug("cached token expired, signing in fresh")
 	}
 
-	logger.Debug("signing in", slog.String("email", cfg.Email))
-	authResp, err := client.Signin(ctx, cfg.Email, cfg.Password)
-	if err != nil {
-		return "", nil, fmt.Errorf("signing in: %w", err)
+	var err error
+	var authResp *obsidian.SigninResponse
+	for attempt := range retryMaxAttempts {
+		logger.Debug("signing in", slog.String("email", cfg.Email))
+		authResp, err = client.Signin(ctx, cfg.Email, cfg.Password)
+		if err == nil {
+			break
+		}
+		if !obsidian.IsTransient(err) || attempt == retryMaxAttempts-1 {
+			return "", nil, fmt.Errorf("signing in: %w", err)
+		}
+		delay := retryDelay(attempt)
+		logger.Warn("signin failed, retrying",
+			slog.String("error", err.Error()),
+			slog.Int("attempt", attempt+1),
+			slog.Duration("backoff", delay),
+		)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return "", nil, ctx.Err()
+		}
 	}
 	logger.Info("signed in")
 
@@ -351,9 +418,26 @@ func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Conf
 		logger.Warn("failed to save token", slog.String("error", err.Error()))
 	}
 
-	vaults, err := client.ListVaults(ctx, authResp.Token)
-	if err != nil {
-		return "", nil, fmt.Errorf("listing vaults: %w", err)
+	var vaults *obsidian.VaultListResponse
+	for attempt := range retryMaxAttempts {
+		vaults, err = client.ListVaults(ctx, authResp.Token)
+		if err == nil {
+			break
+		}
+		if !obsidian.IsTransient(err) || attempt == retryMaxAttempts-1 {
+			return "", nil, fmt.Errorf("listing vaults: %w", err)
+		}
+		delay := retryDelay(attempt)
+		logger.Warn("list vaults failed, retrying",
+			slog.String("error", err.Error()),
+			slog.Int("attempt", attempt+1),
+			slog.Duration("backoff", delay),
+		)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return "", nil, ctx.Err()
+		}
 	}
 
 	if len(vaults.Vaults) == 0 && len(vaults.Shared) == 0 {

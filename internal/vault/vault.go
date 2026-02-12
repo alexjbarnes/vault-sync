@@ -41,6 +41,10 @@ type Vault struct {
 // New creates a new Vault rooted at the given directory.
 // It builds the initial file index.
 func New(root string) (*Vault, error) {
+	if root == "" {
+		return nil, fmt.Errorf("vault path must not be empty")
+	}
+
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolving vault path: %w", err)

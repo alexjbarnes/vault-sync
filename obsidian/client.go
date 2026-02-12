@@ -8,9 +8,25 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
+
+// TransientError wraps an error that is likely temporary and safe to retry.
+type TransientError struct {
+	Err error
+}
+
+func (e *TransientError) Error() string { return e.Err.Error() }
+func (e *TransientError) Unwrap() error { return e.Err }
+
+// IsTransient reports whether err (or any error in its chain) is a
+// TransientError, meaning the caller should retry after a backoff.
+func IsTransient(err error) bool {
+	var te *TransientError
+	return errors.As(err, &te)
+}
 
 const baseURL = "https://api.obsidian.md"
 
@@ -95,7 +111,10 @@ func (c *Client) post(ctx context.Context, endpoint string, body, result interfa
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("sending request to %s: %w", endpoint, err)
+		wrapped := fmt.Errorf("sending request to %s: %w", endpoint, err)
+		// Network errors (timeouts, connection refused, DNS failures)
+		// are transient by nature.
+		return &TransientError{Err: wrapped}
 	}
 	defer resp.Body.Close()
 
@@ -108,15 +127,27 @@ func (c *Client) post(ctx context.Context, endpoint string, body, result interfa
 	if resp.StatusCode != http.StatusOK {
 		var apiErr APIError
 		if json.Unmarshal(respBody, &apiErr) == nil && apiErr.Error != "" {
-			return fmt.Errorf("API %s (%d): %s", endpoint, resp.StatusCode, apiErr.Error)
+			err := fmt.Errorf("API %s (%d): %s", endpoint, resp.StatusCode, apiErr.Error)
+			if isTransientStatus(resp.StatusCode) || isTransientMessage(apiErr.Error) {
+				return &TransientError{Err: err}
+			}
+			return err
 		}
-		return fmt.Errorf("API %s returned status %d: %s", endpoint, resp.StatusCode, sanitizeResponseBody(respBody))
+		err := fmt.Errorf("API %s returned status %d: %s", endpoint, resp.StatusCode, sanitizeResponseBody(respBody))
+		if isTransientStatus(resp.StatusCode) {
+			return &TransientError{Err: err}
+		}
+		return err
 	}
 
 	// Obsidian API returns errors as 200 with an "error" field in the body.
 	var apiErr APIError
 	if json.Unmarshal(respBody, &apiErr) == nil && apiErr.Error != "" {
-		return fmt.Errorf("API %s: %s", endpoint, apiErr.Error)
+		err := fmt.Errorf("API %s: %s", endpoint, apiErr.Error)
+		if isTransientMessage(apiErr.Error) {
+			return &TransientError{Err: err}
+		}
+		return err
 	}
 
 	if result != nil {
@@ -152,6 +183,30 @@ func (c *Client) Signout(ctx context.Context, token string) error {
 	}
 
 	return nil
+}
+
+// isTransientStatus returns true for HTTP status codes that indicate a
+// temporary server-side problem worth retrying.
+func isTransientStatus(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	}
+	return false
+}
+
+// isTransientMessage checks whether an API error message suggests a
+// temporary condition. Obsidian returns "Server overloaded, please try
+// again later." as a 200 with an error body, so we match on that.
+func isTransientMessage(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "overloaded") ||
+		strings.Contains(lower, "try again") ||
+		strings.Contains(lower, "temporarily unavailable")
 }
 
 // ListVaults returns all vaults accessible to the authenticated user.

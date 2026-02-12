@@ -36,7 +36,12 @@ func HandleProtectedResourceMetadata(serverURL string) http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=3600")
 		json.NewEncoder(w).Encode(meta)
 	}
 }
@@ -56,7 +61,12 @@ func HandleAuthServerMetadata(serverURL string) http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=3600")
 		json.NewEncoder(w).Encode(meta)
 	}
 }

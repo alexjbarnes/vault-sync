@@ -20,7 +20,6 @@ func clearConfigEnv(t *testing.T) {
 		"OBSIDIAN_VAULT_PASSWORD",
 		"OBSIDIAN_VAULT_NAME",
 		"OBSIDIAN_SYNC_DIR",
-		"OBSIDIAN_DEVICE_NAME",
 		"ENVIRONMENT",
 		"MCP_LISTEN_ADDR",
 		"MCP_SERVER_URL",
@@ -230,7 +229,13 @@ func TestLoad_DefaultDeviceName(t *testing.T) {
 
 	cfg, err := Load()
 	require.NoError(t, err)
-	assert.Equal(t, "vault-sync", cfg.DeviceName)
+
+	// Default should be the system hostname, matching Obsidian desktop behavior.
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "vault-sync"
+	}
+	assert.Equal(t, hostname, cfg.DeviceName)
 }
 
 func TestLoad_DefaultEnvironment(t *testing.T) {
@@ -250,16 +255,6 @@ func TestLoad_DefaultEnableSync(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	assert.True(t, cfg.EnableSync)
-}
-
-func TestLoad_CustomDeviceName(t *testing.T) {
-	clearConfigEnv(t)
-	setSyncEnv(t, t.TempDir())
-	t.Setenv("OBSIDIAN_DEVICE_NAME", "my-laptop")
-
-	cfg, err := Load()
-	require.NoError(t, err)
-	assert.Equal(t, "my-laptop", cfg.DeviceName)
 }
 
 func TestLoad_CustomEnvironment(t *testing.T) {
@@ -366,11 +361,11 @@ func TestParseMCPUsers_EmptyUsername(t *testing.T) {
 	assert.Contains(t, err.Error(), "empty username")
 }
 
-func TestParseMCPUsers_EmptyHash(t *testing.T) {
+func TestParseMCPUsers_EmptyPassword(t *testing.T) {
 	cfg := &Config{MCPAuthUsers: "user:"}
 	_, err := cfg.ParseMCPUsers()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "empty username or hash")
+	assert.Contains(t, err.Error(), "empty username or password")
 }
 
 // --- validate ---

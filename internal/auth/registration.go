@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+
+	"github.com/alexjbarnes/vault-sync/internal/models"
 )
 
 // registrationRequest is the DCR POST body (RFC 7591).
@@ -78,7 +80,7 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 			authMethod = "none"
 		}
 
-		ok := store.RegisterClient(&ClientInfo{
+		ok := store.RegisterClient(&models.OAuthClient{
 			ClientID:     clientID,
 			ClientName:   req.ClientName,
 			RedirectURIs: req.RedirectURIs,

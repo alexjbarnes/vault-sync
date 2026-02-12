@@ -7,12 +7,15 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/alexjbarnes/vault-sync/internal/models"
 	bolt "go.etcd.io/bbolt"
 )
 
 var (
-	appBucket = []byte("app")
-	tokenKey  = []byte("token")
+	appBucket         = []byte("app")
+	tokenKey          = []byte("token")
+	oauthTokensBucket = []byte("oauth_tokens")
+	oauthClientBucket = []byte("oauth_clients")
 )
 
 func vaultMetaBucket(vaultID string) []byte {
@@ -87,7 +90,13 @@ func LoadAt(path string) (*State, error) {
 	}
 
 	err = db.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(appBucket)
+		if _, err := tx.CreateBucketIfNotExists(appBucket); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists(oauthTokensBucket); err != nil {
+			return err
+		}
+		_, err := tx.CreateBucketIfNotExists(oauthClientBucket)
 		return err
 	})
 	if err != nil {
@@ -294,6 +303,112 @@ func (s *State) AllServerFiles(vaultID string) (map[string]ServerFile, error) {
 		})
 	})
 	return result, err
+}
+
+// SaveOAuthToken persists an OAuth access token.
+func (s *State) SaveOAuthToken(t models.OAuthToken) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(oauthTokensBucket)
+		data, err := json.Marshal(t)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(t.Token), data)
+	})
+}
+
+// GetOAuthToken returns an OAuth token by its value, or nil if not found.
+func (s *State) GetOAuthToken(token string) (*models.OAuthToken, error) {
+	var t *models.OAuthToken
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(oauthTokensBucket)
+		v := b.Get([]byte(token))
+		if v == nil {
+			return nil
+		}
+		t = &models.OAuthToken{}
+		return json.Unmarshal(v, t)
+	})
+	return t, err
+}
+
+// DeleteOAuthToken removes an OAuth token.
+func (s *State) DeleteOAuthToken(token string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(oauthTokensBucket).Delete([]byte(token))
+	})
+}
+
+// AllOAuthTokens returns all stored OAuth tokens.
+func (s *State) AllOAuthTokens() ([]models.OAuthToken, error) {
+	var tokens []models.OAuthToken
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(oauthTokensBucket)
+		return b.ForEach(func(k, v []byte) error {
+			var t models.OAuthToken
+			if err := json.Unmarshal(v, &t); err != nil {
+				return err
+			}
+			tokens = append(tokens, t)
+			return nil
+		})
+	})
+	return tokens, err
+}
+
+// SaveOAuthClient persists a registered OAuth client.
+func (s *State) SaveOAuthClient(c models.OAuthClient) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(oauthClientBucket)
+		data, err := json.Marshal(c)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(c.ClientID), data)
+	})
+}
+
+// GetOAuthClient returns a registered client by ID, or nil if not found.
+func (s *State) GetOAuthClient(clientID string) (*models.OAuthClient, error) {
+	var c *models.OAuthClient
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(oauthClientBucket)
+		v := b.Get([]byte(clientID))
+		if v == nil {
+			return nil
+		}
+		c = &models.OAuthClient{}
+		return json.Unmarshal(v, c)
+	})
+	return c, err
+}
+
+// AllOAuthClients returns all registered OAuth clients.
+func (s *State) AllOAuthClients() ([]models.OAuthClient, error) {
+	var clients []models.OAuthClient
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(oauthClientBucket)
+		return b.ForEach(func(k, v []byte) error {
+			var c models.OAuthClient
+			if err := json.Unmarshal(v, &c); err != nil {
+				return err
+			}
+			clients = append(clients, c)
+			return nil
+		})
+	})
+	return clients, err
+}
+
+// OAuthClientCount returns the number of registered OAuth clients.
+func (s *State) OAuthClientCount() int {
+	count := 0
+	s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(oauthClientBucket)
+		count = b.Stats().KeyN
+		return nil
+	})
+	return count
 }
 
 func dbPath() string {

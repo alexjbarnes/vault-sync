@@ -32,6 +32,9 @@ type Vault struct {
 // it does not exist. The directory must be an absolute path (resolved at
 // config load time).
 func NewVault(dir string) (*Vault, error) {
+	if dir == "" {
+		return nil, fmt.Errorf("vault directory must not be empty")
+	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("creating vault directory %s: %w", dir, err)
 	}

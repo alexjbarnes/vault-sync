@@ -1,39 +1,30 @@
 // Package auth implements OAuth 2.1 authorization for the MCP server.
 // It acts as both the authorization server and resource server.
-// All state is in-memory; tokens are invalidated on restart.
+// Tokens and client registrations are persisted in bbolt when a
+// *state.State is provided; otherwise all state is in-memory only.
 package auth
 
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/alexjbarnes/vault-sync/internal/models"
+	"github.com/alexjbarnes/vault-sync/internal/state"
 )
 
-// AuthCode represents a pending authorization code.
+// AuthCode represents a pending authorization code. Ephemeral, never persisted.
 type AuthCode struct {
 	Code          string
 	ClientID      string
 	RedirectURI   string
 	CodeChallenge string
+	Resource      string
 	UserID        string
 	Scopes        []string
 	ExpiresAt     time.Time
-}
-
-// TokenInfo represents an issued access token.
-type TokenInfo struct {
-	Token     string
-	UserID    string
-	Scopes    []string
-	ExpiresAt time.Time
-}
-
-// ClientInfo represents a dynamically registered client.
-type ClientInfo struct {
-	ClientID     string   `json:"client_id"`
-	ClientName   string   `json:"client_name,omitempty"`
-	RedirectURIs []string `json:"redirect_uris"`
 }
 
 const (
@@ -53,33 +44,79 @@ type csrfEntry struct {
 	expiresAt time.Time
 }
 
-// Store holds all in-memory OAuth state.
+// Store holds all OAuth state. Tokens and clients are backed by bbolt
+// when a persistence layer is provided; auth codes and CSRF tokens are
+// always in-memory only.
 type Store struct {
 	mu      sync.RWMutex
-	codes   map[string]*AuthCode   // code -> AuthCode
-	tokens  map[string]*TokenInfo  // token -> TokenInfo
-	clients map[string]*ClientInfo // client_id -> ClientInfo
-	csrf    map[string]csrfEntry   // csrf token -> expiry
+	codes   map[string]*AuthCode           // code -> AuthCode
+	tokens  map[string]*models.OAuthToken  // token -> OAuthToken
+	clients map[string]*models.OAuthClient // client_id -> OAuthClient
+	csrf    map[string]csrfEntry           // csrf token -> expiry
 	stopGC  chan struct{}
 
 	// registrationTimes tracks recent registration timestamps for
 	// rate limiting unauthenticated /oauth/register requests.
 	registrationTimes []time.Time
+
+	// persist is the bbolt-backed state for tokens and clients.
+	// Nil means in-memory only (used in tests).
+	persist *state.State
+	logger  *slog.Logger
 }
 
-// NewStore creates an empty OAuth store and starts a background
-// goroutine that periodically removes expired tokens and codes.
-// Call Stop() to clean up the goroutine.
-func NewStore() *Store {
+// NewStore creates an OAuth store. If persist is non-nil, existing tokens
+// and client registrations are loaded from bbolt and all mutations are
+// written through. Pass nil for in-memory-only operation (tests).
+func NewStore(persist *state.State, logger *slog.Logger) *Store {
 	s := &Store{
 		codes:   make(map[string]*AuthCode),
-		tokens:  make(map[string]*TokenInfo),
-		clients: make(map[string]*ClientInfo),
+		tokens:  make(map[string]*models.OAuthToken),
+		clients: make(map[string]*models.OAuthClient),
 		csrf:    make(map[string]csrfEntry),
 		stopGC:  make(chan struct{}),
+		persist: persist,
+		logger:  logger,
 	}
+
+	if persist != nil {
+		s.loadFromDisk()
+	}
+
 	go s.gcLoop()
 	return s
+}
+
+// loadFromDisk populates the in-memory maps from bbolt.
+func (s *Store) loadFromDisk() {
+	now := time.Now()
+
+	tokens, err := s.persist.AllOAuthTokens()
+	if err != nil {
+		s.logger.Warn("loading persisted OAuth tokens", slog.String("error", err.Error()))
+	}
+	for i := range tokens {
+		t := tokens[i]
+		if now.After(t.ExpiresAt) {
+			s.persist.DeleteOAuthToken(t.Token)
+			continue
+		}
+		s.tokens[t.Token] = &t
+	}
+
+	clients, err := s.persist.AllOAuthClients()
+	if err != nil {
+		s.logger.Warn("loading persisted OAuth clients", slog.String("error", err.Error()))
+	}
+	for i := range clients {
+		c := clients[i]
+		s.clients[c.ClientID] = &c
+	}
+
+	s.logger.Info("loaded OAuth state from disk",
+		slog.Int("tokens", len(s.tokens)),
+		slog.Int("clients", len(s.clients)),
+	)
 }
 
 // Stop terminates the background cleanup goroutine.
@@ -112,9 +149,12 @@ func (s *Store) cleanup() {
 			delete(s.codes, k)
 		}
 	}
-	for k, ti := range s.tokens {
-		if now.After(ti.ExpiresAt) {
+	for k, t := range s.tokens {
+		if now.After(t.ExpiresAt) {
 			delete(s.tokens, k)
+			if s.persist != nil {
+				s.persist.DeleteOAuthToken(k)
+			}
 		}
 	}
 	for k, entry := range s.csrf {
@@ -149,27 +189,33 @@ func (s *Store) ConsumeCode(code string) *AuthCode {
 	return ac
 }
 
-// SaveToken stores an access token.
-func (s *Store) SaveToken(ti *TokenInfo) {
+// SaveToken stores an access token in memory and persists it to disk.
+func (s *Store) SaveToken(t *models.OAuthToken) {
 	s.mu.Lock()
-	s.tokens[ti.Token] = ti
+	s.tokens[t.Token] = t
 	s.mu.Unlock()
+
+	if s.persist != nil {
+		if err := s.persist.SaveOAuthToken(*t); err != nil && s.logger != nil {
+			s.logger.Warn("persisting OAuth token", slog.String("error", err.Error()))
+		}
+	}
 }
 
 // ValidateToken checks if a token is valid and not expired.
 // Returns nil if invalid.
-func (s *Store) ValidateToken(token string) *TokenInfo {
+func (s *Store) ValidateToken(token string) *models.OAuthToken {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	ti, ok := s.tokens[token]
+	t, ok := s.tokens[token]
 	if !ok {
 		return nil
 	}
-	if time.Now().After(ti.ExpiresAt) {
+	if time.Now().After(t.ExpiresAt) {
 		return nil
 	}
-	return ti
+	return t
 }
 
 // RegistrationAllowed checks whether a new registration is allowed under
@@ -200,18 +246,24 @@ func (s *Store) RegistrationAllowed() bool {
 
 // RegisterClient stores a new client registration. Returns false if the
 // maximum number of registered clients has been reached.
-func (s *Store) RegisterClient(ci *ClientInfo) bool {
+func (s *Store) RegisterClient(ci *models.OAuthClient) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.clients) >= maxClients {
 		return false
 	}
 	s.clients[ci.ClientID] = ci
+
+	if s.persist != nil {
+		if err := s.persist.SaveOAuthClient(*ci); err != nil && s.logger != nil {
+			s.logger.Warn("persisting OAuth client", slog.String("error", err.Error()))
+		}
+	}
 	return true
 }
 
 // GetClient returns the client info for a given client_id, or nil.
-func (s *Store) GetClient(clientID string) *ClientInfo {
+func (s *Store) GetClient(clientID string) *models.OAuthClient {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.clients[clientID]

@@ -2,18 +2,27 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"html/template"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
+	"github.com/alexjbarnes/vault-sync/internal/models"
 )
 
-// UserCredentials maps usernames to bcrypt hashes.
+// resourceMatches compares a client-supplied resource URI against the
+// server's canonical URL. Trailing slashes are stripped before comparison
+// because clients may include them (both forms are valid per RFC 3986).
+func resourceMatches(resource, serverURL string) bool {
+	return strings.TrimRight(resource, "/") == strings.TrimRight(serverURL, "/")
+}
+
+// UserCredentials maps usernames to plain text passwords.
 type UserCredentials map[string]string
 
 const codeExpiry = 5 * time.Minute
@@ -34,6 +43,7 @@ var loginPage = template.Must(template.New("login").Parse(`<!DOCTYPE html>
 <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
 <input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMethod}}">
 <input type="hidden" name="scope" value="{{.Scope}}">
+<input type="hidden" name="resource" value="{{.Resource}}">
 <label>Username: <input type="text" name="username" required></label><br><br>
 <label>Password: <input type="password" name="password" required></label><br><br>
 <button type="submit">Login</button>
@@ -49,6 +59,7 @@ type loginData struct {
 	CodeChallenge       string
 	CodeChallengeMethod string
 	Scope               string
+	Resource            string
 	Error               string
 }
 
@@ -113,16 +124,18 @@ func (rl *loginRateLimiter) record(ip string) {
 	rl.mu.Unlock()
 }
 
-// HandleAuthorize returns the /oauth/authorize handler.
-func HandleAuthorize(store *Store, users UserCredentials, logger *slog.Logger) http.HandlerFunc {
+// HandleAuthorize returns the /oauth/authorize handler. The serverURL is
+// the canonical resource identifier (RFC 8707) used to validate the
+// resource parameter that clients include in authorization requests.
+func HandleAuthorize(store *Store, users UserCredentials, logger *slog.Logger, serverURL string) http.HandlerFunc {
 	limiter := newLoginRateLimiter()
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			handleAuthorizeGET(w, r, store)
+			handleAuthorizeGET(w, r, store, serverURL)
 		case http.MethodPost:
-			handleAuthorizePOST(w, r, store, users, logger, limiter)
+			handleAuthorizePOST(w, r, store, users, logger, limiter, serverURL)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -131,7 +144,7 @@ func HandleAuthorize(store *Store, users UserCredentials, logger *slog.Logger) h
 
 // validateRedirectURI checks that redirectURI matches one of the client's
 // registered redirect_uris. Returns true if valid.
-func validateRedirectURI(client *ClientInfo, redirectURI string) bool {
+func validateRedirectURI(client *models.OAuthClient, redirectURI string) bool {
 	for _, registered := range client.RedirectURIs {
 		if redirectURI == registered {
 			return true
@@ -151,7 +164,7 @@ func generateCSRFToken(store *Store) string {
 	return token
 }
 
-func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store) {
+func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, serverURL string) {
 	q := r.URL.Query()
 
 	clientID := q.Get("client_id")
@@ -184,6 +197,14 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store) {
 		return
 	}
 
+	// RFC 8707: accept the resource parameter. Clients MUST send it,
+	// but we tolerate its absence for backward compatibility.
+	resource := q.Get("resource")
+	if resource != "" && !resourceMatches(resource, serverURL) {
+		http.Error(w, "resource parameter does not match this server", http.StatusBadRequest)
+		return
+	}
+
 	data := loginData{
 		CSRFToken:           generateCSRFToken(store),
 		ClientID:            clientID,
@@ -192,13 +213,14 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store) {
 		CodeChallenge:       codeChallenge,
 		CodeChallengeMethod: codeChallengeMethod,
 		Scope:               q.Get("scope"),
+		Resource:            resource,
 	}
 
 	w.Header().Set("Content-Type", "text/html")
 	loginPage.Execute(w, data)
 }
 
-func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, users UserCredentials, logger *slog.Logger, limiter *loginRateLimiter) {
+func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, users UserCredentials, logger *slog.Logger, limiter *loginRateLimiter, serverURL string) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid form data", http.StatusBadRequest)
 		return
@@ -211,6 +233,7 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 	csrfToken := r.FormValue("csrf_token")
 	username := r.FormValue("username")
 	password := r.FormValue("password")
+	resource := r.FormValue("resource")
 
 	client := store.GetClient(clientID)
 	if client == nil {
@@ -230,6 +253,12 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		return
 	}
 
+	// RFC 8707: validate resource parameter matches this server.
+	if resource != "" && !resourceMatches(resource, serverURL) {
+		http.Error(w, "resource parameter does not match this server", http.StatusBadRequest)
+		return
+	}
+
 	// CSRF validation.
 	if !store.ConsumeCSRF(csrfToken) {
 		http.Error(w, "invalid or expired CSRF token", http.StatusForbidden)
@@ -244,9 +273,10 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		return
 	}
 
-	// Validate credentials.
-	hash, ok := users[username]
-	if !ok || bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
+	// Validate credentials using constant-time comparison to prevent
+	// timing side channels from leaking whether the username exists.
+	expected, ok := users[username]
+	if !ok || subtle.ConstantTimeCompare([]byte(expected), []byte(password)) != 1 {
 		logger.Warn("login failed", slog.String("username", username))
 		limiter.record(ip)
 
@@ -258,6 +288,7 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 			CodeChallenge:       codeChallenge,
 			CodeChallengeMethod: r.FormValue("code_challenge_method"),
 			Scope:               r.FormValue("scope"),
+			Resource:            resource,
 			Error:               "Invalid username or password",
 		}
 		w.Header().Set("Content-Type", "text/html")
@@ -268,13 +299,14 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 
 	logger.Info("login successful", slog.String("username", username))
 
-	// Issue authorization code.
+	// Issue authorization code bound to the resource (RFC 8707).
 	code := RandomHex(32)
 	store.SaveCode(&AuthCode{
 		Code:          code,
 		ClientID:      clientID,
 		RedirectURI:   redirectURI,
 		CodeChallenge: codeChallenge,
+		Resource:      resource,
 		UserID:        username,
 		ExpiresAt:     time.Now().Add(codeExpiry),
 	})

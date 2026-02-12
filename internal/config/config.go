@@ -34,8 +34,9 @@ type Config struct {
 	// available to derive a default).
 	SyncDir string `env:"OBSIDIAN_SYNC_DIR"`
 
-	// Device name this client identifies as
-	DeviceName string `env:"OBSIDIAN_DEVICE_NAME" envDefault:"vault-sync"`
+	// Device name this client identifies as. Uses the system hostname,
+	// matching the Obsidian desktop app behavior.
+	DeviceName string
 
 	// Config sync toggles. These match the Obsidian app's sync settings.
 	// All default to false (no .obsidian/ config synced unless opted in).
@@ -84,6 +85,14 @@ func Load() (*Config, error) {
 	cfg := &Config{}
 	if err := env.Parse(cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+
+	if cfg.DeviceName == "" {
+		hostname, err := os.Hostname()
+		if err != nil || hostname == "" {
+			hostname = "vault-sync"
+		}
+		cfg.DeviceName = hostname
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -171,7 +180,7 @@ func (c *Config) IsProduction() bool {
 }
 
 // ParseMCPUsers parses the MCP_AUTH_USERS string into a UserCredentials map.
-// Format: "user1:bcrypt_hash1,user2:bcrypt_hash2"
+// Format: "user1:password1,user2:password2"
 func (c *Config) ParseMCPUsers() (auth.UserCredentials, error) {
 	users := make(auth.UserCredentials)
 	if c.MCPAuthUsers == "" {
@@ -187,11 +196,11 @@ func (c *Config) ParseMCPUsers() (auth.UserCredentials, error) {
 			return nil, fmt.Errorf("invalid user entry (missing ':'): %s", pair)
 		}
 		username := pair[:idx]
-		hash := pair[idx+1:]
-		if username == "" || hash == "" {
-			return nil, fmt.Errorf("empty username or hash in: %s", pair)
+		password := pair[idx+1:]
+		if username == "" || password == "" {
+			return nil, fmt.Errorf("empty username or password in: %s", pair)
 		}
-		users[username] = hash
+		users[username] = password
 	}
 	return users, nil
 }
