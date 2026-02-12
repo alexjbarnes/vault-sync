@@ -1,0 +1,13 @@
+services:
+  vault-sync:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+    env_file: .env
+    volumes:
+      - data:/home/nonroot/.vault-sync
+    restart: unless-stopped
+
+volumes:
+  data:

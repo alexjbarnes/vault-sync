@@ -1,0 +1,6 @@
+bin/
+.env
+.git/
+coverage.out
+coverage.html
+vault/
