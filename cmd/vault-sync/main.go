@@ -146,6 +146,14 @@ func setupSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*s
 		logger.Info("using default sync dir", slog.String("dir", cfg.SyncDir))
 	}
 
+	// Ensure the vault directory exists before runSync and runMCP
+	// launch concurrently. Without this, runMCP can race ahead and
+	// fail opening the vault before runSync creates the directory.
+	if err := os.MkdirAll(cfg.SyncDir, 0755); err != nil {
+		appState.Close()
+		return nil, fmt.Errorf("creating vault directory: %w", err)
+	}
+
 	logger.Info("selected vault",
 		slog.String("name", v.Name),
 		slog.String("id", v.ID),
@@ -304,7 +312,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		&mcp.Implementation{Name: "vault-sync-mcp", Version: Version},
 		nil,
 	)
-	mcpserver.RegisterTools(mcpServer, v)
+	mcpserver.RegisterTools(mcpServer, v, mcpLogger)
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		return mcpServer

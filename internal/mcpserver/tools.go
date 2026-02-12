@@ -6,52 +6,72 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/alexjbarnes/vault-sync/internal/vault"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// logToolCall logs the start and end of a tool invocation. It returns a
+// function that should be deferred to log completion with duration.
+func logToolCall(logger *slog.Logger, tool string, args ...slog.Attr) func(error) {
+	attrs := make([]slog.Attr, 0, len(args)+1)
+	attrs = append(attrs, slog.String("tool", tool))
+	attrs = append(attrs, args...)
+	start := time.Now()
+	return func(err error) {
+		attrs = append(attrs, slog.Duration("duration", time.Since(start)))
+		if err != nil {
+			attrs = append(attrs, slog.String("error", err.Error()))
+			logger.LogAttrs(context.Background(), slog.LevelWarn, "tool call failed", attrs...)
+			return
+		}
+		logger.LogAttrs(context.Background(), slog.LevelInfo, "tool call", attrs...)
+	}
+}
+
 // RegisterTools adds all vault tools to the given MCP server.
-func RegisterTools(server *mcp.Server, v *vault.Vault) {
+func RegisterTools(server *mcp.Server, v *vault.Vault, logger *slog.Logger) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vault_list",
 		Description: "List vault contents. Without a path: returns every file with metadata (path, size, modified, tags). With a path: lists one folder level deep, showing files with size/modified and folders with child counts.",
-	}, listHandler(v))
+	}, listHandler(v, logger))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vault_read",
 		Description: "Read file content with optional line-range pagination. Lines are 1-indexed. Large files are auto-truncated at 200 lines unless a limit is specified.",
-	}, readHandler(v))
+	}, readHandler(v, logger))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vault_search",
 		Description: "Full-text search across file names, frontmatter tags, and file content. Case-insensitive. Returns matching files with context snippets and line numbers.",
-	}, searchHandler(v))
+	}, searchHandler(v, logger))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vault_write",
 		Description: "Create a new file or fully replace an existing file. Uses atomic write. Cannot write to .obsidian/ directory.",
-	}, writeHandler(v))
+	}, writeHandler(v, logger))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vault_edit",
 		Description: "Find-and-replace edit on an existing file. The old_text must appear exactly once. Uses atomic write. Same semantics as str_replace.",
-	}, editHandler(v))
+	}, editHandler(v, logger))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vault_delete",
 		Description: "Delete one or more files from the vault. Accepts an array of paths. Best-effort: each file is attempted independently, failures are reported per-item. Cannot delete directories or .obsidian/ paths.",
-	}, deleteHandler(v))
+	}, deleteHandler(v, logger))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vault_move",
 		Description: "Move or rename a file within the vault. Creates destination parent directories automatically. Refuses to overwrite existing files. Cannot move directories or .obsidian/ paths.",
-	}, moveHandler(v))
+	}, moveHandler(v, logger))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vault_copy",
 		Description: "Copy a file within the vault. Creates destination parent directories automatically. Refuses to overwrite existing files. Uses atomic write. Cannot copy directories or .obsidian/ paths.",
-	}, copyHandler(v))
+	}, copyHandler(v, logger))
 }
 
 // --- Input types ---
@@ -122,18 +142,21 @@ type CopyInput struct {
 
 // --- Handlers ---
 
-func listHandler(v *vault.Vault) mcp.ToolHandlerFor[ListInput, *listResult] {
+func listHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[ListInput, *listResult] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, *listResult, error) {
+		done := logToolCall(logger, "vault_list", slog.String("path", input.Path))
 		if input.Path == "" {
 			all := v.ListAll()
 			r := &listResult{
 				TotalFiles: all.TotalFiles,
 				Files:      all.Files,
 			}
+			done(nil)
 			return textResult(r), r, nil
 		}
 		dir, err := v.List(input.Path)
 		if err != nil {
+			done(err)
 			return nil, nil, err
 		}
 		r := &listResult{
@@ -141,83 +164,106 @@ func listHandler(v *vault.Vault) mcp.ToolHandlerFor[ListInput, *listResult] {
 			Entries:      dir.Entries,
 			TotalEntries: dir.TotalEntries,
 		}
+		done(nil)
 		return textResult(r), r, nil
 	}
 }
 
-func readHandler(v *vault.Vault) mcp.ToolHandlerFor[ReadInput, *vault.ReadResult] {
+func readHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[ReadInput, *vault.ReadResult] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, input ReadInput) (*mcp.CallToolResult, *vault.ReadResult, error) {
+		done := logToolCall(logger, "vault_read", slog.String("path", input.Path))
 		result, err := v.Read(input.Path, input.Offset, input.Limit)
 		if err != nil {
+			done(err)
 			return nil, nil, err
 		}
+		done(nil)
 		return textResult(result), result, nil
 	}
 }
 
-func searchHandler(v *vault.Vault) mcp.ToolHandlerFor[SearchInput, *vault.SearchResult] {
+func searchHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[SearchInput, *vault.SearchResult] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, input SearchInput) (*mcp.CallToolResult, *vault.SearchResult, error) {
+		done := logToolCall(logger, "vault_search", slog.String("query", input.Query))
 		result, err := v.Search(input.Query, input.MaxResults)
 		if err != nil {
+			done(err)
 			return nil, nil, err
 		}
+		done(nil)
 		return textResult(result), result, nil
 	}
 }
 
-func writeHandler(v *vault.Vault) mcp.ToolHandlerFor[WriteInput, *vault.WriteResult] {
+func writeHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[WriteInput, *vault.WriteResult] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, input WriteInput) (*mcp.CallToolResult, *vault.WriteResult, error) {
+		done := logToolCall(logger, "vault_write", slog.String("path", input.Path), slog.Int("bytes", len(input.Content)))
 		createDirs := true
 		if input.CreateDirs != nil {
 			createDirs = *input.CreateDirs
 		}
 		result, err := v.Write(input.Path, input.Content, createDirs)
 		if err != nil {
+			done(err)
 			return nil, nil, err
 		}
+		done(nil)
 		return textResult(result), result, nil
 	}
 }
 
-func editHandler(v *vault.Vault) mcp.ToolHandlerFor[EditInput, *vault.EditResult] {
+func editHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[EditInput, *vault.EditResult] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, input EditInput) (*mcp.CallToolResult, *vault.EditResult, error) {
+		done := logToolCall(logger, "vault_edit", slog.String("path", input.Path))
 		result, err := v.Edit(input.Path, input.OldText, input.NewText)
 		if err != nil {
+			done(err)
 			return nil, nil, err
 		}
+		done(nil)
 		return textResult(result), result, nil
 	}
 }
 
-func deleteHandler(v *vault.Vault) mcp.ToolHandlerFor[DeleteInput, *vault.DeleteBatchResult] {
+func deleteHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[DeleteInput, *vault.DeleteBatchResult] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, input DeleteInput) (*mcp.CallToolResult, *vault.DeleteBatchResult, error) {
+		done := logToolCall(logger, "vault_delete", slog.Int("paths", len(input.Paths)))
 		if len(input.Paths) == 0 {
-			return nil, nil, &vault.Error{
+			err := &vault.Error{
 				Code:    vault.ErrCodePathNotAllowed,
 				Message: "paths must not be empty",
 			}
+			done(err)
+			return nil, nil, err
 		}
 		result := v.DeleteBatch(input.Paths)
+		done(nil)
 		return textResult(result), result, nil
 	}
 }
 
-func moveHandler(v *vault.Vault) mcp.ToolHandlerFor[MoveInput, *vault.MoveResult] {
+func moveHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[MoveInput, *vault.MoveResult] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, input MoveInput) (*mcp.CallToolResult, *vault.MoveResult, error) {
+		done := logToolCall(logger, "vault_move", slog.String("source", input.Source), slog.String("destination", input.Destination))
 		result, err := v.Move(input.Source, input.Destination)
 		if err != nil {
+			done(err)
 			return nil, nil, err
 		}
+		done(nil)
 		return textResult(result), result, nil
 	}
 }
 
-func copyHandler(v *vault.Vault) mcp.ToolHandlerFor[CopyInput, *vault.CopyResult] {
+func copyHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[CopyInput, *vault.CopyResult] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, input CopyInput) (*mcp.CallToolResult, *vault.CopyResult, error) {
+		done := logToolCall(logger, "vault_copy", slog.String("source", input.Source), slog.String("destination", input.Destination))
 		result, err := v.Copy(input.Source, input.Destination)
 		if err != nil {
+			done(err)
 			return nil, nil, err
 		}
+		done(nil)
 		return textResult(result), result, nil
 	}
 }

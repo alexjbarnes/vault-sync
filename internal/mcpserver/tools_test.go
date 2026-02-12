@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,7 +41,7 @@ func testSetup(t *testing.T) (*mcp.ClientSession, *vault.Vault) {
 		&mcp.Implementation{Name: "vault-sync-mcp-test", Version: "test"},
 		nil,
 	)
-	RegisterTools(server, v)
+	RegisterTools(server, v, slog.Default())
 
 	ctx := context.Background()
 	t1, t2 := mcp.NewInMemoryTransports()
