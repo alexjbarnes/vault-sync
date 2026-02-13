@@ -28,8 +28,8 @@ func testVault(t *testing.T) *Vault {
 
 	for path, content := range files {
 		abs := filepath.Join(dir, filepath.FromSlash(path))
-		require.NoError(t, os.MkdirAll(filepath.Dir(abs), 0755))
-		require.NoError(t, os.WriteFile(abs, []byte(content), 0644))
+		require.NoError(t, os.MkdirAll(filepath.Dir(abs), 0o755))
+		require.NoError(t, os.WriteFile(abs, []byte(content), 0o644))
 	}
 
 	v, err := New(dir)
@@ -53,7 +53,7 @@ func TestNew_NonexistentDir(t *testing.T) {
 
 func TestNew_FileNotDir(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "file.txt")
-	require.NoError(t, os.WriteFile(f, []byte("x"), 0644))
+	require.NoError(t, os.WriteFile(f, []byte("x"), 0o644))
 	_, err := New(f)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a directory")
@@ -239,7 +239,7 @@ func TestRead_AutoTruncation(t *testing.T) {
 	for i := 0; i < 300; i++ {
 		content += "line\n"
 	}
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "big.md"), []byte(content), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "big.md"), []byte(content), 0o644))
 
 	v, err := New(dir)
 	require.NoError(t, err)
@@ -256,7 +256,7 @@ func TestRead_ExplicitLimitNoTruncation(t *testing.T) {
 	for i := 0; i < 300; i++ {
 		content += "line\n"
 	}
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "big.md"), []byte(content), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "big.md"), []byte(content), 0o644))
 
 	v, err := New(dir)
 	require.NoError(t, err)

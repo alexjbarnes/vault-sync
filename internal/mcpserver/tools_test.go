@@ -31,8 +31,8 @@ func testSetup(t *testing.T) (*mcp.ClientSession, *vault.Vault) {
 	}
 	for path, content := range files {
 		abs := filepath.Join(dir, filepath.FromSlash(path))
-		require.NoError(t, os.MkdirAll(filepath.Dir(abs), 0755))
-		require.NoError(t, os.WriteFile(abs, []byte(content), 0644))
+		require.NoError(t, os.MkdirAll(filepath.Dir(abs), 0o755))
+		require.NoError(t, os.WriteFile(abs, []byte(content), 0o644))
 	}
 
 	v, err := vault.New(dir)

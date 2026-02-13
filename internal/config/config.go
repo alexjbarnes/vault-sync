@@ -71,7 +71,7 @@ func warnInsecureEnvFile() {
 		return // file does not exist, nothing to check
 	}
 	mode := info.Mode().Perm()
-	if mode&0077 != 0 {
+	if mode&0o077 != 0 {
 		log.Printf("WARNING: .env file has insecure permissions %04o; recommended 0600", mode)
 	}
 }

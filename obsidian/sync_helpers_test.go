@@ -696,7 +696,7 @@ type fakeFileInfo struct {
 
 func (f fakeFileInfo) Name() string       { return f.name }
 func (f fakeFileInfo) Size() int64        { return f.size }
-func (f fakeFileInfo) Mode() os.FileMode  { return 0644 }
+func (f fakeFileInfo) Mode() os.FileMode  { return 0o644 }
 func (f fakeFileInfo) ModTime() time.Time { return f.mtime }
 func (f fakeFileInfo) IsDir() bool        { return false }
 func (f fakeFileInfo) Sys() interface{}   { return nil }
@@ -750,6 +750,7 @@ type fakeWriteConn struct{}
 func (f *fakeWriteConn) Read(_ context.Context) (websocket.MessageType, []byte, error) {
 	return 0, nil, fmt.Errorf("not implemented")
 }
+
 func (f *fakeWriteConn) Write(_ context.Context, _ websocket.MessageType, _ []byte) error {
 	return nil
 }

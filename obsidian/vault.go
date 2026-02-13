@@ -35,7 +35,7 @@ func NewVault(dir string) (*Vault, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("vault directory must not be empty")
 	}
-	if err := os.MkdirAll(dir, 0755); err != nil { //nolint:gosec // G301: vault root dir needs 0755 for Obsidian access
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: vault root dir needs 0755 for Obsidian access
 		return nil, fmt.Errorf("creating vault directory %s: %w", dir, err)
 	}
 	return &Vault{dir: dir}, nil
@@ -73,11 +73,11 @@ func (v *Vault) WriteFile(relPath string, data []byte, mtime time.Time) error {
 	defer v.mu.Unlock()
 
 	dir := filepath.Dir(absPath)
-	if err := os.MkdirAll(dir, 0755); err != nil { //nolint:gosec // G301: vault directories need group/other read+exec for shared access
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: vault directories need group/other read+exec for shared access
 		return fmt.Errorf("creating directory for %s: %w", relPath, err)
 	}
 
-	if err := os.WriteFile(absPath, data, 0644); err != nil { //nolint:gosec // G306: vault files need group/other read for shared access
+	if err := os.WriteFile(absPath, data, 0o644); err != nil { //nolint:gosec // G306: vault files need group/other read for shared access
 		return err
 	}
 
@@ -161,7 +161,7 @@ func (v *Vault) MkdirAll(relPath string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	return os.MkdirAll(absPath, 0755) //nolint:gosec // G301: vault content dirs need 0755
+	return os.MkdirAll(absPath, 0o755) //nolint:gosec // G301: vault content dirs need 0755
 }
 
 // Rename moves a file or directory from one relative path to another
@@ -180,7 +180,7 @@ func (v *Vault) Rename(oldRel, newRel string) error {
 	defer v.mu.Unlock()
 
 	// Ensure parent directory of destination exists.
-	if err := os.MkdirAll(filepath.Dir(newAbs), 0755); err != nil { //nolint:gosec // G301: vault content dirs need 0755
+	if err := os.MkdirAll(filepath.Dir(newAbs), 0o755); err != nil { //nolint:gosec // G301: vault content dirs need 0755
 		return fmt.Errorf("creating directory for %s: %w", newRel, err)
 	}
 
@@ -230,11 +230,11 @@ func (v *Vault) StatAndWriteFile(relPath string, data []byte, mtime time.Time, p
 	}
 
 	dir := filepath.Dir(absPath)
-	if err := os.MkdirAll(dir, 0755); err != nil { //nolint:gosec // G301: vault directories need group/other read+exec for shared access
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: vault directories need group/other read+exec for shared access
 		return fmt.Errorf("creating directory for %s: %w", relPath, err)
 	}
 
-	if err := os.WriteFile(absPath, data, 0644); err != nil { //nolint:gosec // G306: vault files need group/other read for shared access
+	if err := os.WriteFile(absPath, data, 0o644); err != nil { //nolint:gosec // G306: vault files need group/other read for shared access
 		return err
 	}
 

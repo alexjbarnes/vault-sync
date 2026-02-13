@@ -33,8 +33,10 @@ func sha256Hex(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-var testVaultID = "test-vault-001"
-var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+var (
+	testVaultID   = "test-vault-001"
+	discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+)
 
 // --- File filtering ---
 
@@ -42,9 +44,9 @@ func TestScanLocal_SkipsDotGit(t *testing.T) {
 	v := tempVault(t)
 	s := testState(t, testVaultID)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), ".git", "objects"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), ".git", "HEAD"), []byte("ref: refs/heads/main"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "notes.md"), []byte("hello"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), ".git", "objects"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), ".git", "HEAD"), []byte("ref: refs/heads/main"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "notes.md"), []byte("hello"), 0o644))
 
 	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
@@ -61,8 +63,8 @@ func TestScanLocal_IncludesObsidianDir(t *testing.T) {
 	v := tempVault(t)
 	s := testState(t, testVaultID)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), ".obsidian", "plugins"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), ".obsidian", "app.json"), []byte(`{}`), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), ".obsidian", "plugins"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), ".obsidian", "app.json"), []byte(`{}`), 0o644))
 
 	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
@@ -77,9 +79,9 @@ func TestScanLocal_SkipsDotFiles(t *testing.T) {
 	v := tempVault(t)
 	s := testState(t, testVaultID)
 
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), ".hidden"), []byte("secret"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), ".DS_Store"), []byte("junk"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "visible.md"), []byte("ok"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), ".hidden"), []byte("secret"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), ".DS_Store"), []byte("junk"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "visible.md"), []byte("ok"), 0o644))
 
 	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
@@ -96,8 +98,8 @@ func TestScanLocal_SkipsNodeModules(t *testing.T) {
 	v := tempVault(t)
 	s := testState(t, testVaultID)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), "node_modules", "pkg"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "node_modules", "pkg", "index.js"), []byte("module"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), "node_modules", "pkg"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "node_modules", "pkg", "index.js"), []byte("module"), 0o644))
 
 	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
@@ -111,9 +113,9 @@ func TestScanLocal_SkipsWorkspaceJSON(t *testing.T) {
 	v := tempVault(t)
 	s := testState(t, testVaultID)
 
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "workspace.json"), []byte(`{}`), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "workspace-mobile.json"), []byte(`{}`), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "other.json"), []byte(`{}`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "workspace.json"), []byte(`{}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "workspace-mobile.json"), []byte(`{}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "other.json"), []byte(`{}`), 0o644))
 
 	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
@@ -131,9 +133,9 @@ func TestScanLocal_SkipsNestedDotDirs(t *testing.T) {
 	s := testState(t, testVaultID)
 
 	// A dotdir nested inside a regular directory should be skipped.
-	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), "notes", ".secret"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "notes", ".secret", "file.txt"), []byte("hidden"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "notes", "visible.md"), []byte("ok"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), "notes", ".secret"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "notes", ".secret", "file.txt"), []byte("hidden"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "notes", "visible.md"), []byte("ok"), 0o644))
 
 	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
@@ -151,7 +153,7 @@ func TestScanLocal_NewFileIsChanged(t *testing.T) {
 	s := testState(t, testVaultID)
 
 	content := []byte("new file content")
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "new.md"), content, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "new.md"), content, 0o644))
 
 	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
@@ -168,7 +170,7 @@ func TestScanLocal_NewFolderIsChanged(t *testing.T) {
 	v := tempVault(t)
 	s := testState(t, testVaultID)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), "notes", "sub"), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), "notes", "sub"), 0o755))
 
 	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
@@ -185,7 +187,7 @@ func TestScanLocal_ModifiedFileIsChanged(t *testing.T) {
 
 	originalContent := []byte("original")
 	filePath := filepath.Join(v.Dir(), "doc.md")
-	require.NoError(t, os.WriteFile(filePath, originalContent, 0644))
+	require.NoError(t, os.WriteFile(filePath, originalContent, 0o644))
 
 	// Persist initial state so the scanner has something to compare against.
 	info, _ := os.Stat(filePath)
@@ -198,7 +200,7 @@ func TestScanLocal_ModifiedFileIsChanged(t *testing.T) {
 
 	// Modify the file. Use a different mtime to trigger change detection.
 	newContent := []byte("modified content that is different")
-	require.NoError(t, os.WriteFile(filePath, newContent, 0644))
+	require.NoError(t, os.WriteFile(filePath, newContent, 0o644))
 	// Ensure mtime differs (filesystem resolution can be 1s on some FS).
 	future := time.Now().Add(2 * time.Second)
 	require.NoError(t, os.Chtimes(filePath, future, future))
@@ -218,7 +220,7 @@ func TestScanLocal_UnchangedFileCarriedForward(t *testing.T) {
 
 	content := []byte("stable content")
 	filePath := filepath.Join(v.Dir(), "stable.md")
-	require.NoError(t, os.WriteFile(filePath, content, 0644))
+	require.NoError(t, os.WriteFile(filePath, content, 0o644))
 
 	info, _ := os.Stat(filePath)
 	persisted := state.LocalFile{
@@ -247,7 +249,7 @@ func TestScanLocal_SameHashAfterMtimeChangeNotChanged(t *testing.T) {
 
 	content := []byte("same content")
 	filePath := filepath.Join(v.Dir(), "touched.md")
-	require.NoError(t, os.WriteFile(filePath, content, 0644))
+	require.NoError(t, os.WriteFile(filePath, content, 0o644))
 
 	info, _ := os.Stat(filePath)
 	require.NoError(t, s.SetLocalFile(testVaultID, state.LocalFile{
@@ -328,7 +330,7 @@ func TestScanLocal_NFDPathNormalizedToNFC(t *testing.T) {
 	// Create file with NFD e-acute (e + combining acute U+0301).
 	nfdName := "caf\u0065\u0301.md" // e + combining acute
 	nfcName := "caf\u00e9.md"       // precomposed e-acute
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), nfdName), []byte("coffee"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), nfdName), []byte("coffee"), 0o644))
 
 	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
@@ -344,8 +346,8 @@ func TestScanLocal_DirectoriesInCurrent(t *testing.T) {
 	v := tempVault(t)
 	s := testState(t, testVaultID)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), "a", "b"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "a", "b", "file.md"), []byte("leaf"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), "a", "b"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "a", "b", "file.md"), []byte("leaf"), 0o644))
 
 	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
@@ -369,7 +371,7 @@ func TestScanLocal_FolderBecameFile(t *testing.T) {
 	}))
 
 	// On disk "thing" is now a file.
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "thing"), []byte("file now"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "thing"), []byte("file now"), 0o644))
 
 	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
@@ -385,7 +387,7 @@ func TestScanLocal_ModifiedFilePreservesSyncFields(t *testing.T) {
 	s := testState(t, testVaultID)
 
 	filePath := filepath.Join(v.Dir(), "synced.md")
-	require.NoError(t, os.WriteFile(filePath, []byte("v1"), 0644))
+	require.NoError(t, os.WriteFile(filePath, []byte("v1"), 0o644))
 	info, _ := os.Stat(filePath)
 
 	require.NoError(t, s.SetLocalFile(testVaultID, state.LocalFile{
@@ -398,7 +400,7 @@ func TestScanLocal_ModifiedFilePreservesSyncFields(t *testing.T) {
 	}))
 
 	// Modify the file.
-	require.NoError(t, os.WriteFile(filePath, []byte("v2 longer"), 0644))
+	require.NoError(t, os.WriteFile(filePath, []byte("v2 longer"), 0o644))
 	future := time.Now().Add(2 * time.Second)
 	require.NoError(t, os.Chtimes(filePath, future, future))
 
@@ -431,7 +433,7 @@ func TestScanLocal_NewFileHashIsCorrect(t *testing.T) {
 	s := testState(t, testVaultID)
 
 	content := []byte("hash me please")
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "hashtest.md"), content, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "hashtest.md"), content, 0o644))
 
 	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)
@@ -444,7 +446,7 @@ func TestScanLocal_EmptyFileHashed(t *testing.T) {
 	v := tempVault(t)
 	s := testState(t, testVaultID)
 
-	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "empty.md"), []byte{}, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), "empty.md"), []byte{}, 0o644))
 
 	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
 	require.NoError(t, err)

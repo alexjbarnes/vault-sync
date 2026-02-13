@@ -23,8 +23,8 @@ func securityVault(t *testing.T) *Vault {
 	}
 	for path, content := range files {
 		abs := filepath.Join(dir, filepath.FromSlash(path))
-		require.NoError(t, os.MkdirAll(filepath.Dir(abs), 0755))
-		require.NoError(t, os.WriteFile(abs, []byte(content), 0644))
+		require.NoError(t, os.MkdirAll(filepath.Dir(abs), 0o755))
+		require.NoError(t, os.WriteFile(abs, []byte(content), 0o644))
 	}
 
 	v, err := New(dir)
@@ -116,13 +116,13 @@ func TestRead_SymlinkEscape(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "notes"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "notes/safe.md"), []byte("safe"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "notes"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "notes/safe.md"), []byte("safe"), 0o644))
 
 	// Create a target file outside the vault.
 	outsideDir := t.TempDir()
 	outsideFile := filepath.Join(outsideDir, "secret.txt")
-	require.NoError(t, os.WriteFile(outsideFile, []byte("top secret"), 0644))
+	require.NoError(t, os.WriteFile(outsideFile, []byte("top secret"), 0o644))
 
 	// Create a symlink inside the vault pointing outside.
 	symlinkPath := filepath.Join(dir, "notes/escape")
@@ -146,7 +146,7 @@ func TestList_SymlinkEscape(t *testing.T) {
 
 	dir := t.TempDir()
 	outsideDir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("secret"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("secret"), 0o644))
 	require.NoError(t, os.Symlink(outsideDir, filepath.Join(dir, "escape")))
 
 	v, err := New(dir)
@@ -190,10 +190,10 @@ func TestEdit_SymlinkEscape(t *testing.T) {
 	dir := t.TempDir()
 	outsideDir := t.TempDir()
 	outsideFile := filepath.Join(outsideDir, "target.md")
-	require.NoError(t, os.WriteFile(outsideFile, []byte("original content"), 0644))
+	require.NoError(t, os.WriteFile(outsideFile, []byte("original content"), 0o644))
 
 	// Symlink a file directly.
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "notes"), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "notes"), 0o755))
 	require.NoError(t, os.Symlink(outsideFile, filepath.Join(dir, "notes/linked.md")))
 
 	v, err := New(dir)

@@ -393,7 +393,7 @@ func (v *Vault) Write(relPath string, content string, createDirs bool) (*WriteRe
 	// Create parent directories if requested.
 	dir := filepath.Dir(abs)
 	if createDirs {
-		if err := os.MkdirAll(dir, 0755); err != nil { //nolint:gosec // G301: vault content dirs need 0755
+		if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: vault content dirs need 0755
 			return nil, fmt.Errorf("creating directories: %w", err)
 		}
 	} else {
@@ -423,7 +423,7 @@ func (v *Vault) Write(relPath string, content string, createDirs bool) (*WriteRe
 	}
 
 	// Preserve permissions of existing file, or use default.
-	perm := fs.FileMode(0644)
+	perm := fs.FileMode(0o644)
 	if !created {
 		if info, err := os.Stat(abs); err == nil {
 			perm = info.Mode()
@@ -708,7 +708,7 @@ func (v *Vault) Move(srcPath, dstPath string) (*MoveResult, error) {
 	}
 
 	// Create parent directories for destination.
-	if err := os.MkdirAll(filepath.Dir(absDst), 0755); err != nil { //nolint:gosec // G301: vault content dirs need 0755
+	if err := os.MkdirAll(filepath.Dir(absDst), 0o755); err != nil { //nolint:gosec // G301: vault content dirs need 0755
 		return nil, fmt.Errorf("creating destination directories: %w", err)
 	}
 
@@ -799,7 +799,7 @@ func (v *Vault) Copy(srcPath, dstPath string) (*CopyResult, error) {
 
 	// Create parent directories for destination.
 	dstDir := filepath.Dir(absDst)
-	if err := os.MkdirAll(dstDir, 0755); err != nil { //nolint:gosec // G301: vault content dirs need 0755
+	if err := os.MkdirAll(dstDir, 0o755); err != nil { //nolint:gosec // G301: vault content dirs need 0755
 		return nil, fmt.Errorf("creating destination directories: %w", err)
 	}
 

@@ -80,11 +80,11 @@ func Load() (*State, error) {
 // LoadAt opens a state database at the given path, creating it if it
 // does not exist. Useful for tests that need an isolated database.
 func LoadAt(path string) (*State, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("creating state directory: %w", err)
 	}
 
-	db, err := bolt.Open(path, 0600, &bolt.Options{Timeout: 5 * time.Second})
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("opening state db: %w", err)
 	}

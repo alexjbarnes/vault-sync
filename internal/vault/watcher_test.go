@@ -31,8 +31,8 @@ func watchedVault(t *testing.T) *Vault {
 	dir := t.TempDir()
 
 	// Seed with one file so the index is non-empty.
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "notes"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "notes", "existing.md"), []byte("# Existing\n"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "notes"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "notes", "existing.md"), []byte("# Existing\n"), 0o644))
 
 	v, err := New(dir)
 	require.NoError(t, err)
@@ -65,7 +65,7 @@ func TestWatch_NewFileIndexed(t *testing.T) {
 
 	// Create a new file.
 	abs := filepath.Join(v.Root(), "notes", "new.md")
-	require.NoError(t, os.WriteFile(abs, []byte("# New Note\n"), 0644))
+	require.NoError(t, os.WriteFile(abs, []byte("# New Note\n"), 0o644))
 
 	waitFor(t, 2*time.Second, func() bool {
 		return v.index.Get("notes/new.md") != nil
@@ -85,7 +85,7 @@ func TestWatch_ModifiedFileUpdated(t *testing.T) {
 
 	// Overwrite with larger content.
 	abs := filepath.Join(v.Root(), "notes", "existing.md")
-	require.NoError(t, os.WriteFile(abs, []byte("# Existing\n\nWith more content now.\n"), 0644))
+	require.NoError(t, os.WriteFile(abs, []byte("# Existing\n\nWith more content now.\n"), 0o644))
 
 	waitFor(t, 2*time.Second, func() bool {
 		e := v.index.Get("notes/existing.md")
@@ -115,14 +115,14 @@ func TestWatch_NewDirAndFile(t *testing.T) {
 
 	// Create a new directory and file inside it.
 	newDir := filepath.Join(v.Root(), "journal")
-	require.NoError(t, os.MkdirAll(newDir, 0755))
+	require.NoError(t, os.MkdirAll(newDir, 0o755))
 
 	// Small delay so the watcher picks up the new directory before
 	// we write files into it.
 	time.Sleep(100 * time.Millisecond)
 
 	abs := filepath.Join(newDir, "entry.md")
-	require.NoError(t, os.WriteFile(abs, []byte("# Journal Entry\n"), 0644))
+	require.NoError(t, os.WriteFile(abs, []byte("# Journal Entry\n"), 0o644))
 
 	waitFor(t, 2*time.Second, func() bool {
 		return v.index.Get("journal/entry.md") != nil
@@ -134,7 +134,7 @@ func TestWatch_FrontmatterTagsParsed(t *testing.T) {
 
 	content := "---\ntags:\n  - travel\n  - 2026\n---\n# Trip Notes\n"
 	abs := filepath.Join(v.Root(), "notes", "trip.md")
-	require.NoError(t, os.WriteFile(abs, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(abs, []byte(content), 0o644))
 
 	waitFor(t, 2*time.Second, func() bool {
 		e := v.index.Get("notes/trip.md")
@@ -150,7 +150,7 @@ func TestWatch_HiddenFilesIgnored(t *testing.T) {
 	v := watchedVault(t)
 
 	abs := filepath.Join(v.Root(), "notes", ".hidden.md")
-	require.NoError(t, os.WriteFile(abs, []byte("secret"), 0644))
+	require.NoError(t, os.WriteFile(abs, []byte("secret"), 0o644))
 
 	// Wait a bit then verify it was never indexed.
 	time.Sleep(200 * time.Millisecond)
@@ -163,7 +163,7 @@ func TestWatch_TempFilesIgnored(t *testing.T) {
 	// Editor backup files.
 	for _, name := range []string{"file.md~", "file.md.swp", ".vault-write-123", ".vault-edit-456"} {
 		abs := filepath.Join(v.Root(), "notes", name)
-		require.NoError(t, os.WriteFile(abs, []byte("tmp"), 0644))
+		require.NoError(t, os.WriteFile(abs, []byte("tmp"), 0o644))
 	}
 
 	time.Sleep(200 * time.Millisecond)

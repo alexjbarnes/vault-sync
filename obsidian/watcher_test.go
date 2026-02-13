@@ -73,7 +73,7 @@ func TestHandleWrite_DisconnectedQueuesEvent(t *testing.T) {
 	mock.EXPECT().Connected().Return(false)
 
 	absPath := filepath.Join(v.Dir(), "test.md")
-	require.NoError(t, os.WriteFile(absPath, []byte("content"), 0644))
+	require.NoError(t, os.WriteFile(absPath, []byte("content"), 0o644))
 
 	w.handleWrite(context.Background(), absPath)
 
@@ -90,7 +90,7 @@ func TestHandleWrite_PushesFile(t *testing.T) {
 
 	content := []byte("hello world")
 	absPath := filepath.Join(v.Dir(), "test.md")
-	require.NoError(t, os.WriteFile(absPath, content, 0644))
+	require.NoError(t, os.WriteFile(absPath, content, 0o644))
 
 	mock.EXPECT().Connected().Return(true)
 	mock.EXPECT().ContentHash("test.md").Return("")
@@ -111,7 +111,7 @@ func TestHandleWrite_PushesFolder(t *testing.T) {
 	w := newTestWatcher(t, v, mock)
 
 	dirPath := filepath.Join(v.Dir(), "subfolder")
-	require.NoError(t, os.MkdirAll(dirPath, 0755))
+	require.NoError(t, os.MkdirAll(dirPath, 0o755))
 
 	mock.EXPECT().Connected().Return(true)
 	mock.EXPECT().Push(
@@ -131,7 +131,7 @@ func TestHandleWrite_SkipsWhenContentHashMatches(t *testing.T) {
 
 	content := []byte("same content")
 	absPath := filepath.Join(v.Dir(), "cached.md")
-	require.NoError(t, os.WriteFile(absPath, content, 0644))
+	require.NoError(t, os.WriteFile(absPath, content, 0o644))
 
 	hash := sha256Hex(content)
 
@@ -190,7 +190,7 @@ func TestHandleWrite_PushFailureRequeuesIfDisconnected(t *testing.T) {
 
 	content := []byte("will fail")
 	absPath := filepath.Join(v.Dir(), "fail.md")
-	require.NoError(t, os.WriteFile(absPath, content, 0644))
+	require.NoError(t, os.WriteFile(absPath, content, 0o644))
 
 	gomock.InOrder(
 		mock.EXPECT().Connected().Return(true),
@@ -219,7 +219,7 @@ func TestHandleWrite_PushFailureNotRequeuedIfStillConnected(t *testing.T) {
 
 	content := []byte("rejected")
 	absPath := filepath.Join(v.Dir(), "rejected.md")
-	require.NoError(t, os.WriteFile(absPath, content, 0644))
+	require.NoError(t, os.WriteFile(absPath, content, 0o644))
 
 	gomock.InOrder(
 		mock.EXPECT().Connected().Return(true),
@@ -248,7 +248,7 @@ func TestHandleWrite_AdoptsServerCtimeWhenOlder(t *testing.T) {
 
 	content := []byte("with ctime")
 	absPath := filepath.Join(v.Dir(), "ctime.md")
-	require.NoError(t, os.WriteFile(absPath, content, 0644))
+	require.NoError(t, os.WriteFile(absPath, content, 0o644))
 
 	// Server has an older ctime that should be adopted.
 	serverCtime := int64(1000)
@@ -408,7 +408,7 @@ func TestDrainQueue_ProcessesWriteEvents(t *testing.T) {
 
 	content := []byte("queued write")
 	absPath := filepath.Join(v.Dir(), "queued.md")
-	require.NoError(t, os.WriteFile(absPath, content, 0644))
+	require.NoError(t, os.WriteFile(absPath, content, 0o644))
 	w.queued[absPath] = pendingEvent{absPath: absPath, isDelete: false}
 
 	// drainQueue checks Connected(), then handleWrite checks Connected() again.
@@ -457,8 +457,8 @@ func TestDrainQueue_StopsWhenDisconnectedMidDrain(t *testing.T) {
 	// Queue two events. After the first is processed, connection drops.
 	abs1 := filepath.Join(v.Dir(), "a.md")
 	abs2 := filepath.Join(v.Dir(), "b.md")
-	require.NoError(t, os.WriteFile(abs1, []byte("a"), 0644))
-	require.NoError(t, os.WriteFile(abs2, []byte("b"), 0644))
+	require.NoError(t, os.WriteFile(abs1, []byte("a"), 0o644))
+	require.NoError(t, os.WriteFile(abs2, []byte("b"), 0o644))
 	w.queued[abs1] = pendingEvent{absPath: abs1, isDelete: false}
 	w.queued[abs2] = pendingEvent{absPath: abs2, isDelete: false}
 
@@ -523,10 +523,10 @@ func TestHandleWrite_NormalizesPath(t *testing.T) {
 	w := newTestWatcher(t, v, mock)
 
 	// Create a file in a subdirectory.
-	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), "sub"), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), "sub"), 0o755))
 	content := []byte("nested")
 	absPath := filepath.Join(v.Dir(), "sub", "note.md")
-	require.NoError(t, os.WriteFile(absPath, content, 0644))
+	require.NoError(t, os.WriteFile(absPath, content, 0o644))
 
 	mock.EXPECT().Connected().Return(true)
 	mock.EXPECT().ContentHash("sub/note.md").Return("")

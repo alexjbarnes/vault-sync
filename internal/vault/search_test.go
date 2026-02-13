@@ -260,9 +260,9 @@ func TestSearch_GoFallback_SkipsBinaryFiles(t *testing.T) {
 	dir := t.TempDir()
 	// Create a binary file containing the search term but with null bytes.
 	binContent := []byte("some text with keyword\x00 and more binary\x00 data")
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "binary.dat"), binContent, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "binary.dat"), binContent, 0o644))
 	// Create a text file with the same term.
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "text.md"), []byte("has keyword here"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "text.md"), []byte("has keyword here"), 0o644))
 
 	v, err := New(dir)
 	require.NoError(t, err)
@@ -298,11 +298,11 @@ func TestSearch_FilenameMatchTakesPrecedence(t *testing.T) {
 
 	dir := t.TempDir()
 	// File whose name contains "report" and whose content also contains "report".
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs"), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs"), 0o755))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "docs/report.md"),
 		[]byte("This report covers the quarterly results."),
-		0644,
+		0o644,
 	))
 
 	v, err := New(dir)
@@ -328,7 +328,7 @@ func TestSearch_TagMatchNotDuplicatedByContent(t *testing.T) {
 
 	dir := t.TempDir()
 	content := "---\ntags:\n  - cooking\n---\n# Recipe\n\nThis is about cooking pasta.\n"
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "pasta.md"), []byte(content), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "pasta.md"), []byte(content), 0o644))
 
 	v, err := New(dir)
 	require.NoError(t, err)
