@@ -69,7 +69,7 @@ func (w *Watcher) Watch(ctx context.Context) error {
 
 	syncDir := w.vault.Dir()
 
-	if err := os.MkdirAll(syncDir, 0755); err != nil {
+	if err := os.MkdirAll(syncDir, 0755); err != nil { //nolint:gosec // G301: vault sync directory needs group/other read+exec for shared access
 		return fmt.Errorf("creating sync dir: %w", err)
 	}
 

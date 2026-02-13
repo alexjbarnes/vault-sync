@@ -149,7 +149,7 @@ func setupSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*s
 	// Ensure the vault directory exists before runSync and runMCP
 	// launch concurrently. Without this, runMCP can race ahead and
 	// fail opening the vault before runSync creates the directory.
-	if err := os.MkdirAll(cfg.SyncDir, 0755); err != nil {
+	if err := os.MkdirAll(cfg.SyncDir, 0755); err != nil { //nolint:gosec // G301: vault dir needs 0755 for Obsidian access
 		appState.Close()
 		return nil, fmt.Errorf("creating vault directory: %w", err)
 	}

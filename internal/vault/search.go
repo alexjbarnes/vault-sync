@@ -145,7 +145,7 @@ func searchContentRg(vaultRoot, query string, seen map[string]bool, maxResults i
 		"--", query, vaultRoot,
 	}
 
-	cmd := exec.CommandContext(ctx, rgPath, args...)
+	cmd := exec.CommandContext(ctx, rgPath, args...) //nolint:gosec // G204: rgPath from exec.LookPath, args not shell-interpreted
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil
@@ -315,7 +315,7 @@ func searchContentGo(vaultRoot, lowerQuery string, files []FileEntry, seen map[s
 		}
 
 		abs := filepath.Join(vaultRoot, filepath.FromSlash(f.Path))
-		data, err := os.ReadFile(abs)
+		data, err := os.ReadFile(abs) //nolint:gosec // G304: abs built from vaultRoot + validated index path
 		if err != nil {
 			continue
 		}

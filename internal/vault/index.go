@@ -82,7 +82,7 @@ func (idx *Index) Build() error {
 
 		// Parse frontmatter for markdown files.
 		if isMarkdown(rel) {
-			data, readErr := os.ReadFile(path)
+			data, readErr := os.ReadFile(path) //nolint:gosec // G304: path from filepath.WalkDir within vault root
 			if readErr == nil {
 				if fm := parseFrontmatter(data); fm != nil {
 					entry.Tags = fm.Tags
@@ -152,7 +152,7 @@ func (idx *Index) Update(relPath string) {
 	}
 
 	if isMarkdown(relPath) {
-		data, readErr := os.ReadFile(absPath)
+		data, readErr := os.ReadFile(absPath) //nolint:gosec // G304: absPath validated by Vault.absPath
 		if readErr == nil {
 			if fm := parseFrontmatter(data); fm != nil {
 				entry.Tags = fm.Tags

@@ -440,7 +440,7 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 			slog.Duration("backoff", backoff),
 		)
 
-		jitter := time.Duration(rand.Int64N(int64(backoff) / 2))
+		jitter := time.Duration(rand.Int64N(int64(backoff) / 2)) //nolint:gosec // G404: math/rand is fine for reconnect jitter, no security impact
 		timer := time.NewTimer(backoff + jitter)
 		select {
 		case <-ctx.Done():

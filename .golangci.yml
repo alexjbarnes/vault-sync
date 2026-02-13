@@ -1,0 +1,22 @@
+version: "2"
+
+linters:
+  enable:
+    - gosec
+  exclusions:
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # G104 is redundant with the errcheck linter.
+      - linters:
+          - gosec
+        text: "G104:"
+      # Test files use standard 0644/0755 permissions for setup fixtures.
+      - path: _test\.go
+        linters:
+          - gosec
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
