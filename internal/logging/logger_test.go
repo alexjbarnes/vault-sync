@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"context"
 	"log/slog"
 	"testing"
 
@@ -47,13 +48,13 @@ func TestNewLogger_UnknownEnv_TextHandler(t *testing.T) {
 func TestNewLogger_Production_InfoLevel(t *testing.T) {
 	logger := NewLogger("production")
 	// Production should log at Info but not Debug.
-	assert.True(t, logger.Handler().Enabled(nil, slog.LevelInfo))
-	assert.False(t, logger.Handler().Enabled(nil, slog.LevelDebug))
+	assert.True(t, logger.Handler().Enabled(context.TODO(), slog.LevelInfo))
+	assert.False(t, logger.Handler().Enabled(context.TODO(), slog.LevelDebug))
 }
 
 func TestNewLogger_Development_DebugLevel(t *testing.T) {
 	logger := NewLogger("development")
 	// Development should log at Debug level.
-	assert.True(t, logger.Handler().Enabled(nil, slog.LevelDebug))
-	assert.True(t, logger.Handler().Enabled(nil, slog.LevelInfo))
+	assert.True(t, logger.Handler().Enabled(context.TODO(), slog.LevelDebug))
+	assert.True(t, logger.Handler().Enabled(context.TODO(), slog.LevelInfo))
 }

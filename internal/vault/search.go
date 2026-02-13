@@ -179,7 +179,7 @@ func searchContentRg(vaultRoot, query string, seen map[string]bool, maxResults i
 	// Wait for the process to finish. Exit code 1 means no matches (not
 	// an error). Exit code 2 means a real error, but we already collected
 	// whatever output we got.
-	cmd.Wait()
+	_ = cmd.Wait()
 
 	return matches
 }

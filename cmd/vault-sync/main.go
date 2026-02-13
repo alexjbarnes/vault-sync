@@ -350,7 +350,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		mcpLogger.Info("shutting down MCP server")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		server.Shutdown(shutdownCtx)
+		_ = server.Shutdown(shutdownCtx)
 	}()
 
 	// Run the HTTP server and vault file watcher concurrently. The

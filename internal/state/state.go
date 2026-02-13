@@ -115,7 +115,7 @@ func (s *State) Close() error {
 // Token returns the cached authentication token, or empty string.
 func (s *State) Token() string {
 	var token string
-	s.db.View(func(tx *bolt.Tx) error {
+	_ = s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(appBucket)
 		v := b.Get(tokenKey)
 		if v != nil {
@@ -403,7 +403,7 @@ func (s *State) AllOAuthClients() ([]models.OAuthClient, error) {
 // OAuthClientCount returns the number of registered OAuth clients.
 func (s *State) OAuthClientCount() int {
 	count := 0
-	s.db.View(func(tx *bolt.Tx) error {
+	_ = s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(oauthClientBucket)
 		count = b.Stats().KeyN
 		return nil

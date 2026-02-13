@@ -29,7 +29,7 @@ func TestPost_SetsContentTypeAndOrigin(t *testing.T) {
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		assert.Equal(t, "app://obsidian.md", r.Header.Get("Origin"))
 		assert.Equal(t, http.MethodPost, r.Method)
-		w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer srv.Close()
 
@@ -45,7 +45,7 @@ func TestPost_MarshalsRequestBody(t *testing.T) {
 		require.NoError(t, json.Unmarshal(body, &req))
 		assert.Equal(t, "user@example.com", req.Email)
 		assert.Equal(t, "secret", req.Password)
-		w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer srv.Close()
 
@@ -59,7 +59,7 @@ func TestPost_MarshalsRequestBody(t *testing.T) {
 
 func TestPost_DecodesResponseIntoResult(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"token":"abc123","email":"u@e.com","name":"Test","license":"sync"}`))
+		_, _ = w.Write([]byte(`{"token":"abc123","email":"u@e.com","name":"Test","license":"sync"}`))
 	}))
 	defer srv.Close()
 
@@ -74,7 +74,7 @@ func TestPost_DecodesResponseIntoResult(t *testing.T) {
 
 func TestPost_NilResultSkipsDecode(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"some":"data"}`))
+		_, _ = w.Write([]byte(`{"some":"data"}`))
 	}))
 	defer srv.Close()
 
@@ -86,7 +86,7 @@ func TestPost_NilResultSkipsDecode(t *testing.T) {
 func TestPost_NonOKStatusWithAPIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"invalid token"}`))
+		_, _ = w.Write([]byte(`{"error":"invalid token"}`))
 	}))
 	defer srv.Close()
 
@@ -100,7 +100,7 @@ func TestPost_NonOKStatusWithAPIError(t *testing.T) {
 func TestPost_NonOKStatusWithoutAPIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`Internal Server Error`))
+		_, _ = w.Write([]byte(`Internal Server Error`))
 	}))
 	defer srv.Close()
 
@@ -114,7 +114,7 @@ func TestPost_NonOKStatusWithoutAPIError(t *testing.T) {
 func TestPost_OKStatusWithAPIError(t *testing.T) {
 	// Obsidian's quirk: 200 OK with an error field in the body.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"error":"subscription expired"}`))
+		_, _ = w.Write([]byte(`{"error":"subscription expired"}`))
 	}))
 	defer srv.Close()
 
@@ -126,7 +126,7 @@ func TestPost_OKStatusWithAPIError(t *testing.T) {
 
 func TestPost_OKStatusEmptyErrorFieldNotTreatedAsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"error":"","token":"good"}`))
+		_, _ = w.Write([]byte(`{"error":"","token":"good"}`))
 	}))
 	defer srv.Close()
 
@@ -139,7 +139,7 @@ func TestPost_OKStatusEmptyErrorFieldNotTreatedAsError(t *testing.T) {
 
 func TestPost_MalformedResponseJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{not json`))
+		_, _ = w.Write([]byte(`{not json`))
 	}))
 	defer srv.Close()
 
@@ -152,7 +152,7 @@ func TestPost_MalformedResponseJSON(t *testing.T) {
 
 func TestPost_ContextCancelled(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer srv.Close()
 
@@ -168,7 +168,7 @@ func TestPost_ContextCancelled(t *testing.T) {
 func TestPost_EndpointAppendsToBaseURL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/user/signin", r.URL.Path)
-		w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer srv.Close()
 
@@ -211,7 +211,7 @@ func TestSignin_Success(t *testing.T) {
 			Name:    "Test User",
 			License: "sync",
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -225,7 +225,7 @@ func TestSignin_Success(t *testing.T) {
 
 func TestSignin_APIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"error":"invalid credentials"}`))
+		_, _ = w.Write([]byte(`{"error":"invalid credentials"}`))
 	}))
 	defer srv.Close()
 
@@ -257,7 +257,7 @@ func TestSignout_Success(t *testing.T) {
 		require.NoError(t, json.Unmarshal(body, &req))
 		assert.Equal(t, "tok_xyz", req.Token)
 
-		w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer srv.Close()
 
@@ -269,7 +269,7 @@ func TestSignout_Success(t *testing.T) {
 func TestSignout_APIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"token expired"}`))
+		_, _ = w.Write([]byte(`{"error":"token expired"}`))
 	}))
 	defer srv.Close()
 
@@ -299,7 +299,7 @@ func TestListVaults_Success(t *testing.T) {
 				{ID: "v2", Name: "Shared Vault", Size: 512},
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -316,7 +316,7 @@ func TestListVaults_Success(t *testing.T) {
 
 func TestListVaults_EmptyVaults(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"vaults":[],"shared":[]}`))
+		_, _ = w.Write([]byte(`{"vaults":[],"shared":[]}`))
 	}))
 	defer srv.Close()
 
@@ -329,7 +329,7 @@ func TestListVaults_EmptyVaults(t *testing.T) {
 
 func TestListVaults_APIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"error":"unauthorized"}`))
+		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 	}))
 	defer srv.Close()
 
@@ -345,7 +345,7 @@ func TestListVaults_SetsEncryptionVersion(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		assert.True(t, strings.Contains(string(body), `"supported_encryption_version":3`),
 			"request should include supported_encryption_version=3")
-		w.Write([]byte(`{"vaults":[],"shared":[]}`))
+		_, _ = w.Write([]byte(`{"vaults":[],"shared":[]}`))
 	}))
 	defer srv.Close()
 
@@ -361,7 +361,7 @@ func TestPost_NonOKStatusWithMalformedErrorJSON(t *testing.T) {
 	// the raw body in the error.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
-		w.Write([]byte(`<html>Bad Gateway</html>`))
+		_, _ = w.Write([]byte(`<html>Bad Gateway</html>`))
 	}))
 	defer srv.Close()
 
@@ -376,7 +376,7 @@ func TestPost_OKStatusWithNonErrorJSON(t *testing.T) {
 	// 200 with body that has no "error" field -- should decode into result
 	// and not treat it as an error.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"vaults":[{"id":"v1","name":"test"}],"shared":[]}`))
+		_, _ = w.Write([]byte(`{"vaults":[{"id":"v1","name":"test"}],"shared":[]}`))
 	}))
 	defer srv.Close()
 

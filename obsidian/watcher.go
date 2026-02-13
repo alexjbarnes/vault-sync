@@ -106,7 +106,7 @@ func (w *Watcher) Watch(ctx context.Context) error {
 				if event.Has(fsnotify.Create) {
 					info, err := os.Lstat(event.Name)
 					if err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-						w.addRecursive(event.Name)
+						_ = w.addRecursive(event.Name)
 					}
 				}
 			}

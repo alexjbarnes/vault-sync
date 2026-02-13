@@ -523,7 +523,7 @@ func (v *Vault) Edit(relPath string, oldText string, newText string) (*EditResul
 
 	// Preserve original permissions.
 	if info, err := os.Stat(abs); err == nil {
-		os.Chmod(tmpName, info.Mode())
+		_ = os.Chmod(tmpName, info.Mode())
 	}
 
 	if err := os.Rename(tmpName, abs); err != nil {

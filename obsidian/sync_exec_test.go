@@ -455,7 +455,7 @@ func TestLiveDownload_FileChangedDuringDownload(t *testing.T) {
 	// Use a pull that modifies the file mid-download.
 	modifyingPull := func(ctx context.Context, uid int64) ([]byte, error) {
 		// Simulate local modification during download.
-		vault.WriteFile("racing.md", []byte("modified locally while downloading"), time.Time{})
+		_ = vault.WriteFile("racing.md", []byte("modified locally while downloading"), time.Time{})
 		return encContent, nil
 	}
 
@@ -789,7 +789,7 @@ func TestResolveLocalState_ReadFileError_WithPersistedState(t *testing.T) {
 	// Make the file unreadable so ReadFile fails after Stat succeeds.
 	realPath := filepath.Join(vault.Dir(), "readable.md")
 	require.NoError(t, os.Chmod(realPath, 0o000))
-	t.Cleanup(func() { os.Chmod(realPath, 0o644) })
+	t.Cleanup(func() { _ = os.Chmod(realPath, 0o644) })
 
 	lf, enc := s.resolveLocalState("readable.md")
 	require.NotNil(t, lf)
@@ -806,7 +806,7 @@ func TestResolveLocalState_ReadFileError_NoPersistedState(t *testing.T) {
 	// Make the file unreadable so ReadFile fails.
 	realPath := filepath.Join(vault.Dir(), "nostate.md")
 	require.NoError(t, os.Chmod(realPath, 0o000))
-	t.Cleanup(func() { os.Chmod(realPath, 0o644) })
+	t.Cleanup(func() { _ = os.Chmod(realPath, 0o644) })
 
 	lf, enc := s.resolveLocalState("nostate.md")
 	require.NotNil(t, lf)

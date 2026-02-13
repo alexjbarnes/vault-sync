@@ -99,7 +99,7 @@ func (s *Store) loadFromDisk() {
 	for i := range tokens {
 		t := tokens[i]
 		if now.After(t.ExpiresAt) {
-			s.persist.DeleteOAuthToken(t.Token)
+			_ = s.persist.DeleteOAuthToken(t.Token)
 			continue
 		}
 		s.tokens[t.Token] = &t
@@ -154,7 +154,7 @@ func (s *Store) cleanup() {
 		if now.After(t.ExpiresAt) {
 			delete(s.tokens, k)
 			if s.persist != nil {
-				s.persist.DeleteOAuthToken(k)
+				_ = s.persist.DeleteOAuthToken(k)
 			}
 		}
 	}
@@ -286,7 +286,7 @@ func (s *Store) DeleteToken(token string) {
 	s.mu.Unlock()
 
 	if s.persist != nil {
-		s.persist.DeleteOAuthToken(token)
+		_ = s.persist.DeleteOAuthToken(token)
 	}
 }
 

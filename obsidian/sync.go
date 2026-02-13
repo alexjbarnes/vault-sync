@@ -1106,7 +1106,7 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 			)
 			return s.liveDownload(ctx, path, push, pull)
 		}
-		if baseEnc != nil && len(baseEnc) > 0 {
+		if len(baseEnc) > 0 {
 			basePlain, err := s.cipher.DecryptContent(baseEnc)
 			if err != nil {
 				s.logger.Warn("failed to decrypt base, falling back",

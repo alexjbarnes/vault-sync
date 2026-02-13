@@ -418,7 +418,7 @@ func TestVault_ConcurrentReadWrite(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		go func() {
 			defer func() { done <- struct{}{} }()
-			v.WriteFile("shared.md", []byte("updated"), time.Time{})
+			_ = v.WriteFile("shared.md", []byte("updated"), time.Time{})
 		}()
 	}
 
@@ -426,7 +426,7 @@ func TestVault_ConcurrentReadWrite(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		go func() {
 			defer func() { done <- struct{}{} }()
-			v.ReadFile("shared.md")
+			_, _ = v.ReadFile("shared.md")
 		}()
 	}
 

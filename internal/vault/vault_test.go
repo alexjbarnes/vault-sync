@@ -67,7 +67,7 @@ func TestListAll_ReturnsAllFiles(t *testing.T) {
 
 	// .obsidian/ should be excluded.
 	for _, f := range result.Files {
-		assert.False(t, filepath.HasPrefix(f.Path, ".obsidian"), "should exclude .obsidian: %s", f.Path)
+		assert.False(t, strings.HasPrefix(f.Path, ".obsidian"), "should exclude .obsidian: %s", f.Path)
 	}
 
 	// Should include markdown and non-markdown files.

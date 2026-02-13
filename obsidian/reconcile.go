@@ -391,7 +391,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 			)
 			return r.downloadServerFile(ctx, path, push)
 		}
-		if baseEnc != nil && len(baseEnc) > 0 {
+		if len(baseEnc) > 0 {
 			basePlain, err := r.cipher.DecryptContent(baseEnc)
 			if err != nil {
 				r.logger.Warn("reconcile: failed to decrypt base, server wins",

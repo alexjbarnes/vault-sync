@@ -2,7 +2,6 @@ package vault
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -470,7 +469,7 @@ func TestSetRgPath(t *testing.T) {
 
 // Verify interface{} isn't used anywhere by checking mustMarshal accepts concrete types.
 func TestParseRgMatchLine_MalformedData(t *testing.T) {
-	msg := fmt.Sprintf(`{"type":"match","data":"not an object"}`)
+	msg := `{"type":"match","data":"not an object"}`
 	_, ok := parseRgMatchLine([]byte(msg), "/vault")
 	assert.False(t, ok)
 }

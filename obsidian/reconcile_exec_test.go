@@ -1498,7 +1498,7 @@ func TestWriteServerContent_WriteFileError(t *testing.T) {
 
 	// Make vault read-only to cause WriteFile to fail.
 	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
-	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(vault.Dir(), 0o755) })
 
 	push := PushMessage{UID: 500, Hash: "h", MTime: 1000}
 	err := r.writeServerContent("sub/fail.md", push, []byte("data"))
@@ -1573,7 +1573,7 @@ func TestDownloadServerFile_FolderMkdirError(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
-	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(vault.Dir(), 0o755) })
 
 	push := PushMessage{UID: 900, Folder: true}
 	err := r.downloadServerFile(ctx, "newdir", push)
@@ -1706,7 +1706,7 @@ func TestHandleTypeConflict_FolderRenameError(t *testing.T) {
 
 	// Make vault read-only so Rename fails.
 	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
-	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(vault.Dir(), 0o755) })
 
 	push := PushMessage{UID: 900, Hash: "h", MTime: 1000}
 	local := state.LocalFile{Path: "myfolder", Folder: true}
@@ -1729,7 +1729,7 @@ func TestHandleTypeConflict_WriteConflictCopyError(t *testing.T) {
 
 	// Make vault read-only so WriteFile for conflict copy fails.
 	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
-	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(vault.Dir(), 0o755) })
 
 	push := PushMessage{UID: 901}
 	local := state.LocalFile{Path: "wce.md", Folder: false}

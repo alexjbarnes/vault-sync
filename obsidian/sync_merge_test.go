@@ -799,7 +799,7 @@ func TestLiveDownload_WriteFileError(t *testing.T) {
 	// non-existent subdirectory path to trigger an error.
 	// Use a path that requires creating a directory vault can't create.
 	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
-	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(vault.Dir(), 0o755) })
 
 	push := PushMessage{UID: 1, Hash: "h", MTime: 1000}
 	err := s.liveDownload(ctx, "sub/file.md", push, pull)
@@ -813,7 +813,7 @@ func TestLiveWriteContent_WriteFileError(t *testing.T) {
 	s, vault, _, _ := fullSyncClient(t)
 
 	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
-	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(vault.Dir(), 0o755) })
 
 	push := PushMessage{UID: 1, Hash: "h", MTime: 1000}
 	err := s.liveWriteContent("sub/new.md", push, []byte("data"))
@@ -939,7 +939,7 @@ func TestLiveTypeConflict_LocalFile_WriteConflictCopyError(t *testing.T) {
 
 	// Make vault read-only so WriteFile for conflict copy fails.
 	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
-	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(vault.Dir(), 0o755) })
 
 	push := PushMessage{UID: 1}
 	local := &state.LocalFile{Path: "wc.md", Folder: false}
@@ -956,7 +956,7 @@ func TestLiveDownload_MkdirAllError(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, os.Chmod(vault.Dir(), 0o555))
-	t.Cleanup(func() { os.Chmod(vault.Dir(), 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(vault.Dir(), 0o755) })
 
 	push := PushMessage{UID: 1, Folder: true}
 	err := s.liveDownload(ctx, "newdir", push, nil)

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alexjbarnes/vault-sync/internal/vault"
@@ -97,7 +98,7 @@ func TestList_AllFiles(t *testing.T) {
 	paths := make(map[string]bool)
 	for _, f := range out.Files {
 		paths[f.Path] = true
-		assert.False(t, filepath.HasPrefix(f.Path, ".obsidian"), "should exclude .obsidian: %s", f.Path)
+		assert.False(t, strings.HasPrefix(f.Path, ".obsidian"), "should exclude .obsidian: %s", f.Path)
 	}
 	assert.True(t, paths["notes/hello.md"])
 	assert.True(t, paths["images/photo.png"])

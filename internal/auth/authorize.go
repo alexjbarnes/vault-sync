@@ -217,7 +217,7 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, se
 	}
 
 	w.Header().Set("Content-Type", "text/html")
-	loginPage.Execute(w, data)
+	_ = loginPage.Execute(w, data)
 }
 
 func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, users UserCredentials, logger *slog.Logger, limiter *loginRateLimiter, serverURL string) {
@@ -293,7 +293,7 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		}
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusUnauthorized)
-		loginPage.Execute(w, data)
+		_ = loginPage.Execute(w, data)
 		return
 	}
 

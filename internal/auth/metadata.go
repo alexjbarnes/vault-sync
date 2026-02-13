@@ -42,7 +42,7 @@ func HandleProtectedResourceMetadata(serverURL string) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
-		json.NewEncoder(w).Encode(meta)
+		_ = json.NewEncoder(w).Encode(meta)
 	}
 }
 
@@ -67,6 +67,6 @@ func HandleAuthServerMetadata(serverURL string) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
-		json.NewEncoder(w).Encode(meta)
+		_ = json.NewEncoder(w).Encode(meta)
 	}
 }
