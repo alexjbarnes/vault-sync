@@ -6,7 +6,12 @@ formatters:
 
 linters:
   enable:
+    - errcheck
+    - govet
     - gosec
+    - ineffassign
+    - staticcheck
+    - unused
   exclusions:
     presets:
       - comments
