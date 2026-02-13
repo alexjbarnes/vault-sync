@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -189,7 +190,7 @@ func (s *Store) ConsumeCode(code string) *AuthCode {
 	return ac
 }
 
-// SaveToken stores an access token in memory and persists it to disk.
+// SaveToken stores a token in memory and persists it to disk.
 func (s *Store) SaveToken(t *models.OAuthToken) {
 	s.mu.Lock()
 	s.tokens[t.Token] = t
@@ -202,8 +203,8 @@ func (s *Store) SaveToken(t *models.OAuthToken) {
 	}
 }
 
-// ValidateToken checks if a token is valid and not expired.
-// Returns nil if invalid.
+// ValidateToken checks if an access token is valid and not expired.
+// Returns nil if invalid. Refresh tokens are rejected.
 func (s *Store) ValidateToken(token string) *models.OAuthToken {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -215,7 +216,78 @@ func (s *Store) ValidateToken(token string) *models.OAuthToken {
 	if time.Now().After(t.ExpiresAt) {
 		return nil
 	}
+	// Reject refresh tokens used as bearer tokens.
+	if t.Kind == "refresh" {
+		return nil
+	}
 	return t
+}
+
+// ValidateRefreshToken checks if a refresh token is valid for the given
+// client_id and resource. Returns nil if invalid.
+func (s *Store) ValidateRefreshToken(token, clientID, resource string) *models.OAuthToken {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.validateRefreshTokenLocked(token, clientID, resource)
+}
+
+// validateRefreshTokenLocked performs refresh token validation without locking.
+// Caller must hold at least s.mu.RLock().
+func (s *Store) validateRefreshTokenLocked(token, clientID, resource string) *models.OAuthToken {
+	t, ok := s.tokens[token]
+	if !ok {
+		return nil
+	}
+	if time.Now().After(t.ExpiresAt) {
+		return nil
+	}
+	if t.Kind != "refresh" {
+		return nil
+	}
+	// If the refresh token was issued to a specific client, require client_id match.
+	// For tokens without ClientID (legacy), accept any client_id or none.
+	if t.ClientID != "" {
+		if clientID == "" || t.ClientID != clientID {
+			return nil
+		}
+	}
+	if resource != "" && strings.TrimRight(t.Resource, "/") != strings.TrimRight(resource, "/") {
+		return nil
+	}
+	return t
+}
+
+// ConsumeRefreshToken atomically validates and deletes a refresh token.
+// Returns nil if the token is invalid. This prevents TOCTOU races where
+// two concurrent refresh requests could both succeed with the same token.
+func (s *Store) ConsumeRefreshToken(token, clientID, resource string) *models.OAuthToken {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	t := s.validateRefreshTokenLocked(token, clientID, resource)
+	if t == nil {
+		return nil
+	}
+
+	delete(s.tokens, token)
+
+	if s.persist != nil {
+		_ = s.persist.DeleteOAuthToken(token)
+	}
+
+	return t
+}
+
+// DeleteToken removes a token from the store and persistent storage.
+func (s *Store) DeleteToken(token string) {
+	s.mu.Lock()
+	delete(s.tokens, token)
+	s.mu.Unlock()
+
+	if s.persist != nil {
+		s.persist.DeleteOAuthToken(token)
+	}
 }
 
 // RegistrationAllowed checks whether a new registration is allowed under

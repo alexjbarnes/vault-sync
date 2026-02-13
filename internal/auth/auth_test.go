@@ -1073,6 +1073,8 @@ func TestMiddleware_MissingToken(t *testing.T) {
 	wwwAuth := rec.Header().Get("WWW-Authenticate")
 	assert.Contains(t, wwwAuth, "resource_metadata")
 	assert.Contains(t, wwwAuth, "https://vault.example.com")
+	// RFC 6750: no error attribute when no token was provided
+	assert.NotContains(t, wwwAuth, "invalid_token")
 }
 
 func TestMiddleware_InvalidToken(t *testing.T) {
@@ -1088,6 +1090,8 @@ func TestMiddleware_InvalidToken(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	wwwAuth := rec.Header().Get("WWW-Authenticate")
+	assert.Contains(t, wwwAuth, `error="invalid_token"`)
 }
 
 func TestMiddleware_ExpiredToken(t *testing.T) {
@@ -1119,6 +1123,556 @@ func TestMiddleware_NonBearerAuth(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/mcp", nil)
 	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// --- Refresh Token ---
+
+func TestToken_FullFlowWithRefresh(t *testing.T) {
+	store := testStore(t)
+	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	challenge := pkceChallenge(verifier)
+
+	store.SaveCode(&AuthCode{
+		Code:          "authcode-with-refresh",
+		ClientID:      "client1",
+		RedirectURI:   "https://example.com/callback",
+		CodeChallenge: challenge,
+		UserID:        "testuser",
+		ExpiresAt:     time.Now().Add(5 * time.Minute),
+	})
+
+	handler := HandleToken(store, testServerURL)
+
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {"authcode-with-refresh"},
+		"redirect_uri":  {"https://example.com/callback"},
+		"code_verifier": {verifier},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp tokenResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.NotEmpty(t, resp.AccessToken)
+	assert.NotEmpty(t, resp.RefreshToken)
+	assert.Equal(t, "Bearer", resp.TokenType)
+	assert.Equal(t, 3600, resp.ExpiresIn) // 1 hour
+
+	// Validate the issued tokens.
+	ti := store.ValidateToken(resp.AccessToken)
+	require.NotNil(t, ti)
+	assert.Equal(t, "testuser", ti.UserID)
+	assert.Equal(t, "access", ti.Kind)
+	assert.Equal(t, resp.RefreshToken, ti.RefreshToken)
+	assert.Equal(t, "client1", ti.ClientID)
+
+	// Validate the refresh token exists.
+	rt := store.ValidateRefreshToken(resp.RefreshToken, "client1", "")
+	require.NotNil(t, rt)
+	assert.Equal(t, "refresh", rt.Kind)
+	assert.Equal(t, "testuser", rt.UserID)
+}
+
+func TestToken_RefreshGrant(t *testing.T) {
+	store := testStore(t)
+
+	// Create an existing refresh token.
+	refreshToken := RandomHex(32)
+	accessToken := RandomHex(32)
+	store.SaveToken(&models.OAuthToken{
+		Token:        refreshToken,
+		Kind:         "refresh",
+		UserID:       "testuser",
+		Resource:     testServerURL,
+		Scopes:       []string{"vault:read"},
+		ExpiresAt:    time.Now().Add(30 * 24 * time.Hour),
+		RefreshToken: accessToken,
+		ClientID:     "client1",
+	})
+
+	handler := HandleToken(store, testServerURL)
+
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {"client1"},
+		"resource":      {testServerURL},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp tokenResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.NotEmpty(t, resp.AccessToken)
+	assert.NotEmpty(t, resp.RefreshToken)
+	assert.NotEqual(t, refreshToken, resp.RefreshToken)
+
+	// Old refresh token should be deleted.
+	assert.Nil(t, store.ValidateRefreshToken(refreshToken, "client1", ""))
+
+	// New tokens should work.
+	ti := store.ValidateToken(resp.AccessToken)
+	require.NotNil(t, ti)
+	assert.Equal(t, "testuser", ti.UserID)
+	assert.Equal(t, "client1", ti.ClientID)
+}
+
+func TestToken_RefreshRotation(t *testing.T) {
+	store := testStore(t)
+
+	// Create existing tokens.
+	refreshToken := RandomHex(32)
+	store.SaveToken(&models.OAuthToken{
+		Token:     refreshToken,
+		Kind:      "refresh",
+		UserID:    "testuser",
+		Resource:  testServerURL,
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+		ClientID:  "client1",
+	})
+
+	handler := HandleToken(store, testServerURL)
+
+	// First refresh.
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {"client1"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp1 tokenResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp1))
+
+	// Old refresh token should be invalid.
+	assert.Nil(t, store.ValidateRefreshToken(refreshToken, "client1", ""))
+
+	// Second refresh with old token should fail.
+	form2 := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {"client1"},
+	}
+
+	req2 := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form2.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec2 := httptest.NewRecorder()
+	handler(rec2, req2)
+
+	assert.Equal(t, http.StatusBadRequest, rec2.Code)
+	assert.Contains(t, rec2.Body.String(), "invalid or expired refresh token")
+}
+
+func TestToken_RefreshExpired(t *testing.T) {
+	store := testStore(t)
+
+	// Create an expired refresh token.
+	refreshToken := RandomHex(32)
+	store.SaveToken(&models.OAuthToken{
+		Token:     refreshToken,
+		Kind:      "refresh",
+		UserID:    "testuser",
+		ExpiresAt: time.Now().Add(-1 * time.Hour), // Expired
+	})
+
+	handler := HandleToken(store, testServerURL)
+
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid or expired refresh token")
+}
+
+func TestToken_RefreshWrongClient(t *testing.T) {
+	store := testStore(t)
+
+	// Create refresh token for client1.
+	refreshToken := RandomHex(32)
+	store.SaveToken(&models.OAuthToken{
+		Token:     refreshToken,
+		Kind:      "refresh",
+		UserID:    "testuser",
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+		ClientID:  "client1",
+	})
+
+	handler := HandleToken(store, testServerURL)
+
+	// Try to refresh with different client_id.
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {"client2"}, // Different client
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid or expired refresh token")
+}
+
+func TestToken_RefreshWrongResource(t *testing.T) {
+	store := testStore(t)
+
+	// Create refresh token for a different resource.
+	refreshToken := RandomHex(32)
+	store.SaveToken(&models.OAuthToken{
+		Token:     refreshToken,
+		Kind:      "refresh",
+		UserID:    "testuser",
+		Resource:  "https://other-server.example.com",
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+		ClientID:  "client1",
+	})
+
+	handler := HandleToken(store, testServerURL)
+
+	// Try to refresh with different resource.
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"resource":      {testServerURL},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid or expired refresh token")
+}
+
+func TestToken_RefreshMissingToken(t *testing.T) {
+	store := testStore(t)
+	handler := HandleToken(store, testServerURL)
+
+	form := url.Values{
+		"grant_type": {"refresh_token"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "refresh_token is required")
+}
+
+func TestMiddleware_ExpiredTokenHeader(t *testing.T) {
+	store := testStore(t)
+	store.SaveToken(&models.OAuthToken{
+		Token:     "expired-token",
+		ExpiresAt: time.Now().Add(-1 * time.Minute),
+	})
+
+	mw := Middleware(store, "https://vault.example.com")
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be called")
+	}))
+
+	req := httptest.NewRequest("GET", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer expired-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	wwwAuth := rec.Header().Get("WWW-Authenticate")
+	assert.Contains(t, wwwAuth, `error="invalid_token"`)
+	assert.Contains(t, wwwAuth, "resource_metadata")
+}
+
+func TestStore_ValidateRefreshToken(t *testing.T) {
+	store := testStore(t)
+
+	// Valid refresh token.
+	store.SaveToken(&models.OAuthToken{
+		Token:     "valid-refresh",
+		Kind:      "refresh",
+		UserID:    "user1",
+		Resource:  testServerURL,
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+		ClientID:  "client1",
+	})
+
+	rt := store.ValidateRefreshToken("valid-refresh", "client1", testServerURL)
+	require.NotNil(t, rt)
+	assert.Equal(t, "user1", rt.UserID)
+
+	// Wrong kind (access token).
+	store.SaveToken(&models.OAuthToken{
+		Token:     "access-token",
+		Kind:      "access",
+		UserID:    "user1",
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+	assert.Nil(t, store.ValidateRefreshToken("access-token", "", ""))
+
+	// Expired.
+	store.SaveToken(&models.OAuthToken{
+		Token:     "expired-refresh",
+		Kind:      "refresh",
+		ExpiresAt: time.Now().Add(-time.Hour),
+	})
+	assert.Nil(t, store.ValidateRefreshToken("expired-refresh", "", ""))
+
+	// Not found.
+	assert.Nil(t, store.ValidateRefreshToken("nonexistent", "", ""))
+}
+
+func TestStore_DeleteToken(t *testing.T) {
+	store := testStore(t)
+
+	store.SaveToken(&models.OAuthToken{
+		Token:     "token-to-delete",
+		UserID:    "user1",
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+
+	// Verify token exists.
+	require.NotNil(t, store.ValidateToken("token-to-delete"))
+
+	// Delete it.
+	store.DeleteToken("token-to-delete")
+
+	// Verify it's gone.
+	assert.Nil(t, store.ValidateToken("token-to-delete"))
+}
+
+func TestAuthServerMetadata_RefreshTokenGrant(t *testing.T) {
+	handler := HandleAuthServerMetadata("https://vault.example.com")
+	req := httptest.NewRequest("GET", "/.well-known/oauth-authorization-server", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var meta AuthServerMetadata
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&meta))
+	assert.Contains(t, meta.GrantTypesSupported, "authorization_code")
+	assert.Contains(t, meta.GrantTypesSupported, "refresh_token")
+}
+
+func TestToken_RefreshWithoutClientID(t *testing.T) {
+	store := testStore(t)
+
+	// Create refresh token for a specific client.
+	refreshToken := RandomHex(32)
+	store.SaveToken(&models.OAuthToken{
+		Token:     refreshToken,
+		Kind:      "refresh",
+		UserID:    "testuser",
+		Resource:  testServerURL,
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+		ClientID:  "client1",
+	})
+
+	handler := HandleToken(store, testServerURL)
+
+	// Try to refresh WITHOUT client_id - should fail because client_id is required
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		// NO client_id!
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	// This should fail because client_id is required to match
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestToken_RefreshDeletesOldAccessToken(t *testing.T) {
+	store := testStore(t)
+
+	// Create an access token and refresh token pair the way the actual code does.
+	// Access token has RefreshToken pointing to refresh token.
+	// Refresh token does NOT have RefreshToken set.
+	refreshToken := RandomHex(32)
+	accessToken := RandomHex(32)
+
+	// Save refresh token (no RefreshToken field set - this is how it's created)
+	store.SaveToken(&models.OAuthToken{
+		Token:     refreshToken,
+		Kind:      "refresh",
+		UserID:    "testuser",
+		Resource:  testServerURL,
+		Scopes:    []string{"vault:read"},
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+		ClientID:  "client1",
+	})
+
+	// Save access token (has RefreshToken pointing to refresh token)
+	store.SaveToken(&models.OAuthToken{
+		Token:        accessToken,
+		Kind:         "access",
+		UserID:       "testuser",
+		Resource:     testServerURL,
+		Scopes:       []string{"vault:read"},
+		ExpiresAt:    time.Now().Add(time.Hour), // Still valid
+		RefreshToken: refreshToken,
+		ClientID:     "client1",
+	})
+
+	handler := HandleToken(store, testServerURL)
+
+	// Refresh the token
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {"client1"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// The old refresh token should be deleted (rotated)
+	assert.Nil(t, store.ValidateRefreshToken(refreshToken, "client1", ""))
+
+	// The old access token is NOT deleted because rt.RefreshToken is empty on refresh tokens.
+	// This is acceptable because access tokens have short lifetime (1 hour).
+	// The token will expire naturally.
+	ti := store.ValidateToken(accessToken)
+	require.NotNil(t, ti, "old access token still exists (will expire naturally)")
+}
+
+func TestToken_AccessTokenUsedAsRefresh(t *testing.T) {
+	store := testStore(t)
+
+	// Create an access token
+	accessToken := RandomHex(32)
+	store.SaveToken(&models.OAuthToken{
+		Token:     accessToken,
+		Kind:      "access",
+		UserID:    "testuser",
+		ExpiresAt: time.Now().Add(time.Hour),
+		ClientID:  "client1",
+	})
+
+	handler := HandleToken(store, testServerURL)
+
+	// Try to use access token as refresh token
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {accessToken},
+		"client_id":     {"client1"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	// Should fail because it's an access token, not a refresh token
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid or expired refresh token")
+}
+
+func TestToken_RefreshTokenReuseFails(t *testing.T) {
+	store := testStore(t)
+
+	// Create a refresh token
+	refreshToken := RandomHex(32)
+	store.SaveToken(&models.OAuthToken{
+		Token:     refreshToken,
+		Kind:      "refresh",
+		UserID:    "testuser",
+		Resource:  testServerURL,
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+		ClientID:  "client1",
+	})
+
+	handler := HandleToken(store, testServerURL)
+
+	// First refresh should succeed
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {"client1"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Second refresh with same token should fail (token was rotated)
+	form2 := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {"client1"},
+	}
+
+	req2 := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form2.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec2 := httptest.NewRecorder()
+	handler(rec2, req2)
+
+	assert.Equal(t, http.StatusBadRequest, rec2.Code)
+	assert.Contains(t, rec2.Body.String(), "invalid or expired refresh token")
+}
+
+func TestMiddleware_RefreshTokenAsBearer(t *testing.T) {
+	store := testStore(t)
+
+	// Save a refresh token
+	store.SaveToken(&models.OAuthToken{
+		Token:     "refresh-as-bearer",
+		Kind:      "refresh",
+		UserID:    "testuser",
+		Resource:  "https://vault.example.com",
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+		ClientID:  "client1",
+	})
+
+	mw := Middleware(store, "https://vault.example.com")
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be called")
+	}))
+
+	req := httptest.NewRequest("GET", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer refresh-as-bearer")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

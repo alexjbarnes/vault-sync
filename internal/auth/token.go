@@ -12,7 +12,10 @@ import (
 	"github.com/alexjbarnes/vault-sync/internal/models"
 )
 
-const tokenExpiry = 24 * time.Hour
+const (
+	tokenExpiry        = time.Hour
+	refreshTokenExpiry = 30 * 24 * time.Hour
+)
 
 type tokenRequest struct {
 	GrantType    string `json:"grant_type"`
@@ -21,12 +24,14 @@ type tokenRequest struct {
 	CodeVerifier string `json:"code_verifier"`
 	ClientID     string `json:"client_id"`
 	Resource     string `json:"resource"`
+	RefreshToken string `json:"refresh_token"`
 }
 
 type tokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   int    `json:"expires_in"`
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
+	RefreshToken string `json:"refresh_token,omitempty"`
 }
 
 // HandleToken returns the /oauth/token handler. The serverURL is the
@@ -60,14 +65,77 @@ func HandleToken(store *Store, serverURL string) http.HandlerFunc {
 				CodeVerifier: r.FormValue("code_verifier"),
 				ClientID:     r.FormValue("client_id"),
 				Resource:     r.FormValue("resource"),
+				RefreshToken: r.FormValue("refresh_token"),
 			}
 		}
 
-		if req.GrantType != "authorization_code" {
-			writeJSONError(w, http.StatusBadRequest, "unsupported_grant_type", "only authorization_code is supported")
+		if req.GrantType != "authorization_code" && req.GrantType != "refresh_token" {
+			writeJSONError(w, http.StatusBadRequest, "unsupported_grant_type", "only authorization_code and refresh_token are supported")
 			return
 		}
 
+		// Handle refresh_token grant
+		if req.GrantType == "refresh_token" {
+			if req.RefreshToken == "" {
+				writeJSONError(w, http.StatusBadRequest, "invalid_request", "refresh_token is required")
+				return
+			}
+
+			rt := store.ConsumeRefreshToken(req.RefreshToken, req.ClientID, req.Resource)
+			if rt == nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid_grant", "invalid or expired refresh token")
+				return
+			}
+
+			// Delete old access token if still present
+			if rt.RefreshToken != "" {
+				store.DeleteToken(rt.RefreshToken)
+			}
+
+			// Issue new access token + new refresh token
+			resource := rt.Resource
+			if resource == "" {
+				resource = serverURL
+			}
+
+			newAccessToken := RandomHex(32)
+			newRefreshToken := RandomHex(32)
+
+			store.SaveToken(&models.OAuthToken{
+				Token:        newAccessToken,
+				Kind:         "access",
+				UserID:       rt.UserID,
+				Resource:     resource,
+				Scopes:       rt.Scopes,
+				ExpiresAt:    time.Now().Add(tokenExpiry),
+				RefreshToken: newRefreshToken,
+				ClientID:     rt.ClientID,
+			})
+
+			store.SaveToken(&models.OAuthToken{
+				Token:     newRefreshToken,
+				Kind:      "refresh",
+				UserID:    rt.UserID,
+				Resource:  resource,
+				Scopes:    rt.Scopes,
+				ExpiresAt: time.Now().Add(refreshTokenExpiry),
+				ClientID:  rt.ClientID,
+			})
+
+			resp := tokenResponse{
+				AccessToken:  newAccessToken,
+				TokenType:    "Bearer",
+				ExpiresIn:    int(tokenExpiry.Seconds()),
+				RefreshToken: newRefreshToken,
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		// Handle authorization_code grant
 		if req.Code == "" {
 			writeJSONError(w, http.StatusBadRequest, "invalid_request", "code is required")
 			return
@@ -117,18 +185,45 @@ func HandleToken(store *Store, serverURL string) http.HandlerFunc {
 		if resource == "" {
 			resource = serverURL
 		}
-		token := RandomHex(32)
+
+		// Get client ID from the auth code or request
+		clientID := ac.ClientID
+		if clientID == "" {
+			clientID = req.ClientID
+		}
+
+		// Generate both access and refresh tokens
+		accessToken := RandomHex(32)
+		refreshToken := RandomHex(32)
+
+		// Save access token
 		store.SaveToken(&models.OAuthToken{
-			Token:     token,
+			Token:        accessToken,
+			Kind:         "access",
+			UserID:       ac.UserID,
+			Resource:     resource,
+			Scopes:       ac.Scopes,
+			ExpiresAt:    time.Now().Add(tokenExpiry),
+			RefreshToken: refreshToken,
+			ClientID:     clientID,
+		})
+
+		// Save refresh token
+		store.SaveToken(&models.OAuthToken{
+			Token:     refreshToken,
+			Kind:      "refresh",
 			UserID:    ac.UserID,
 			Resource:  resource,
-			ExpiresAt: time.Now().Add(tokenExpiry),
+			Scopes:    ac.Scopes,
+			ExpiresAt: time.Now().Add(refreshTokenExpiry),
+			ClientID:  clientID,
 		})
 
 		resp := tokenResponse{
-			AccessToken: token,
-			TokenType:   "Bearer",
-			ExpiresIn:   int(tokenExpiry.Seconds()),
+			AccessToken:  accessToken,
+			TokenType:    "Bearer",
+			ExpiresIn:    int(tokenExpiry.Seconds()),
+			RefreshToken: refreshToken,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
