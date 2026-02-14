@@ -24,6 +24,10 @@ test-coverage:
 lint:
     golangci-lint run
 
+# Run linter with auto-fix
+lint-fix:
+    golangci-lint run --fix
+
 # Clean build artifacts
 clean:
     rm -rf bin/ coverage.out coverage.html
