@@ -23,14 +23,17 @@ func Middleware(store *Store, serverURL string) func(http.Handler) http.Handler 
 			if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
 				w.Header().Set("WWW-Authenticate", wwwAuthNoToken)
 				w.WriteHeader(http.StatusUnauthorized)
+
 				return
 			}
 
 			token := strings.TrimPrefix(authHeader, "Bearer ")
+
 			ti := store.ValidateToken(token)
 			if ti == nil {
 				w.Header().Set("WWW-Authenticate", wwwAuthInvalid)
 				w.WriteHeader(http.StatusUnauthorized)
+
 				return
 			}
 
@@ -38,6 +41,7 @@ func Middleware(store *Store, serverURL string) func(http.Handler) http.Handler 
 			if ti.Resource != "" && strings.TrimRight(ti.Resource, "/") != strings.TrimRight(serverURL, "/") {
 				w.Header().Set("WWW-Authenticate", wwwAuthInvalid)
 				w.WriteHeader(http.StatusUnauthorized)
+
 				return
 			}
 

@@ -206,6 +206,7 @@ func TestDrainPendingPulls_ProcessesEntries(t *testing.T) {
 	// Server state should reflect the deletes (entries removed).
 	sf1, _ := appState.GetServerFile(testSyncVaultID, "a.md")
 	sf2, _ := appState.GetServerFile(testSyncVaultID, "b.md")
+
 	assert.Nil(t, sf1)
 	assert.Nil(t, sf2)
 }
@@ -240,8 +241,10 @@ func TestPull_SinglePiece(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		resp, _ := json.Marshal(PullResponse{Size: int64(len(encContent)), Pieces: 1})
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: resp}
+
 		s.inboundCh <- inboundMsg{typ: websocket.MessageBinary, data: encContent}
 	}()
 
@@ -268,9 +271,12 @@ func TestPull_MultiplePieces(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		resp, _ := json.Marshal(PullResponse{Size: declaredSize, Pieces: 2})
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: resp}
+
 		s.inboundCh <- inboundMsg{typ: websocket.MessageBinary, data: chunk1}
+
 		s.inboundCh <- inboundMsg{typ: websocket.MessageBinary, data: chunk2}
 	}()
 
@@ -289,6 +295,7 @@ func TestPull_DeletedResponse(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		s.inboundCh <- inboundMsg{
 			typ:  websocket.MessageText,
 			data: []byte(`{"deleted":true}`),
@@ -311,9 +318,12 @@ func TestPull_PongSkippedBeforeResponse(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"op":"pong"}`)}
+
 		resp, _ := json.Marshal(PullResponse{Size: int64(len(encContent)), Pieces: 1})
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: resp}
+
 		s.inboundCh <- inboundMsg{typ: websocket.MessageBinary, data: encContent}
 	}()
 
@@ -334,11 +344,14 @@ func TestPull_PongSkippedBetweenPieces(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		resp, _ := json.Marshal(PullResponse{Size: declaredSize, Pieces: 2})
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: resp}
+
 		s.inboundCh <- inboundMsg{typ: websocket.MessageBinary, data: chunk}
 		// Pong between pieces.
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"op":"pong"}`)}
+
 		s.inboundCh <- inboundMsg{typ: websocket.MessageBinary, data: chunk}
 	}()
 
@@ -362,10 +375,12 @@ func TestPull_PushHandledBetweenPieces(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		resp, _ := json.Marshal(PullResponse{Size: int64(len(chunk)), Pieces: 1})
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: resp}
 		// Push arrives between response and piece.
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(pushJSON)}
+
 		s.inboundCh <- inboundMsg{typ: websocket.MessageBinary, data: chunk}
 	}()
 
@@ -395,6 +410,7 @@ func TestPull_ReadErrorDuringResponse(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		s.inboundCh <- inboundMsg{err: fmt.Errorf("read failed")}
 	}()
 
@@ -413,9 +429,12 @@ func TestPull_ReadErrorDuringPieces(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		resp, _ := json.Marshal(PullResponse{Size: declaredSize, Pieces: 2})
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: resp}
+
 		s.inboundCh <- inboundMsg{typ: websocket.MessageBinary, data: []byte("a")}
+
 		s.inboundCh <- inboundMsg{err: fmt.Errorf("read failed")}
 	}()
 
@@ -435,6 +454,7 @@ func TestPull_OversizedResponse(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		resp, _ := json.Marshal(PullResponse{Size: 999, Pieces: 1})
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: resp}
 	}()
@@ -452,6 +472,7 @@ func TestPull_BadPiecesCount(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		resp, _ := json.Marshal(PullResponse{Size: 10, Pieces: -1})
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: resp}
 	}()
@@ -469,6 +490,7 @@ func TestPull_ZeroPieces(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		resp, _ := json.Marshal(PullResponse{Size: 0, Pieces: 0})
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: resp}
 	}()
@@ -487,6 +509,7 @@ func TestPull_UnexpectedTextDuringPieces(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		resp, _ := json.Marshal(PullResponse{Size: 10, Pieces: 1})
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: resp}
 		// Unexpected text that is not pong or push.
@@ -710,6 +733,7 @@ func TestPull_PushHandledDuringPull(t *testing.T) {
 
 	// Queue: push message, then actual pull response.
 	encPath := encryptPath(t, s.cipher, "pushed.md")
+
 	pushJSON, _ := json.Marshal(PushMessage{
 		Op:      "push",
 		UID:     999,
@@ -717,6 +741,7 @@ func TestPull_PushHandledDuringPull(t *testing.T) {
 		Deleted: true,
 	})
 	s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: pushJSON}
+
 	s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"deleted":true}`)}
 
 	// pull writes the request first.

@@ -34,6 +34,7 @@ func (v *Vault) Watch(ctx context.Context) error {
 			if !ok {
 				return fmt.Errorf("fsnotify events channel closed")
 			}
+
 			v.handleEvent(watcher, event)
 
 		case err, ok := <-watcher.Errors:
@@ -59,6 +60,7 @@ func (v *Vault) handleEvent(watcher *fsnotify.Watcher, event fsnotify.Event) {
 	if err != nil {
 		return
 	}
+
 	relPath = filepath.ToSlash(relPath)
 
 	if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) {
@@ -70,6 +72,7 @@ func (v *Vault) handleEvent(watcher *fsnotify.Watcher, event fsnotify.Event) {
 				return
 			}
 		}
+
 		v.index.Update(relPath)
 	}
 
@@ -88,16 +91,20 @@ func (v *Vault) addRecursive(watcher *fsnotify.Watcher) error {
 		if err != nil {
 			return err
 		}
+
 		if !d.IsDir() {
 			return nil
 		}
+
 		name := d.Name()
 		if strings.HasPrefix(name, ".") {
 			return filepath.SkipDir
 		}
+
 		if name == "node_modules" {
 			return filepath.SkipDir
 		}
+
 		return watcher.Add(path)
 	})
 }
@@ -108,6 +115,7 @@ func (v *Vault) shouldIgnore(absPath string) bool {
 	if err != nil {
 		return true
 	}
+
 	name := filepath.Base(absPath)
 
 	// Hidden files and directories.

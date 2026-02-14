@@ -47,6 +47,7 @@ func HandleToken(store *Store, serverURL string) http.HandlerFunc {
 
 		// Support both JSON and form-encoded bodies.
 		var req tokenRequest
+
 		contentType := r.Header.Get("Content-Type")
 		if contentType == "application/json" {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -58,6 +59,7 @@ func HandleToken(store *Store, serverURL string) http.HandlerFunc {
 				writeJSONError(w, http.StatusBadRequest, "invalid_request", "invalid form data")
 				return
 			}
+
 			req = tokenRequest{
 				GrantType:    r.FormValue("grant_type"),
 				Code:         r.FormValue("code"),
@@ -132,6 +134,7 @@ func HandleToken(store *Store, serverURL string) http.HandlerFunc {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Cache-Control", "no-store")
 			_ = json.NewEncoder(w).Encode(resp)
+
 			return
 		}
 
@@ -160,6 +163,7 @@ func HandleToken(store *Store, serverURL string) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "invalid_target", "resource parameter does not match this server")
 			return
 		}
+
 		if ac.Resource != "" && req.Resource != "" && strings.TrimRight(req.Resource, "/") != strings.TrimRight(ac.Resource, "/") {
 			writeJSONError(w, http.StatusBadRequest, "invalid_target", "resource does not match authorization code")
 			return
@@ -171,10 +175,12 @@ func HandleToken(store *Store, serverURL string) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "invalid_grant", "authorization code was issued without PKCE")
 			return
 		}
+
 		if req.CodeVerifier == "" {
 			writeJSONError(w, http.StatusBadRequest, "invalid_grant", "code_verifier is required")
 			return
 		}
+
 		if !verifyPKCE(req.CodeVerifier, ac.CodeChallenge) {
 			writeJSONError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
 			return
@@ -237,5 +243,6 @@ func HandleToken(store *Store, serverURL string) http.HandlerFunc {
 func verifyPKCE(verifier, challenge string) bool {
 	h := sha256.Sum256([]byte(verifier))
 	computed := base64.RawURLEncoding.EncodeToString(h[:])
+
 	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 }

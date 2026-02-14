@@ -18,8 +18,10 @@ func testKey() []byte {
 
 func testCipher(t *testing.T) *CipherV0 {
 	t.Helper()
+
 	c, err := NewCipherV0(testKey())
 	require.NoError(t, err)
+
 	return c
 }
 

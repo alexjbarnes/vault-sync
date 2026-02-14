@@ -62,6 +62,7 @@ func TestClose_ConnCloseError(t *testing.T) {
 
 func TestPush_SubmitsToEventLoop(t *testing.T) {
 	s, _, _, _ := fullSyncClient(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -74,6 +75,7 @@ func TestPush_SubmitsToEventLoop(t *testing.T) {
 		assert.True(t, op.isDeleted)
 		assert.Equal(t, int64(100), op.mtime)
 		assert.Equal(t, int64(50), op.ctime)
+
 		op.result <- nil
 	}()
 
@@ -83,6 +85,7 @@ func TestPush_SubmitsToEventLoop(t *testing.T) {
 
 func TestPush_PropagatesError(t *testing.T) {
 	s, _, _, _ := fullSyncClient(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -128,6 +131,7 @@ func TestPush_ContextCancelledWhileWaitingForResult(t *testing.T) {
 func TestStartReader_FeedsInboundCh(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	s, mock := withMockConn(t, ctrl)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -158,6 +162,7 @@ func TestStartReader_FeedsInboundCh(t *testing.T) {
 func TestStartReader_DeliverReadError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	s, mock := withMockConn(t, ctrl)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -195,6 +200,7 @@ func TestStartReader_NewChannelPerCall(t *testing.T) {
 
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
+
 	s.startReader(ctx2)
 	ch2 := s.inboundCh
 
@@ -220,7 +226,9 @@ func TestEventLoop_InboundPush(t *testing.T) {
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
+
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: pushJSON}
+
 		time.Sleep(10 * time.Millisecond)
 		cancel()
 	}()
@@ -239,11 +247,13 @@ func TestEventLoop_InboundReadError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	s, _ := withMockConn(t, ctrl)
 	ctx := context.Background()
+
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
+
 		s.inboundCh <- inboundMsg{err: fmt.Errorf("connection lost")}
 	}()
 
@@ -270,9 +280,11 @@ func TestEventLoop_OpChannelPush(t *testing.T) {
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
+
 		s.opCh <- op
 		// Feed the response after a brief delay.
 		time.Sleep(5 * time.Millisecond)
+
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"op":"ok"}`)}
 		// Wait for the push to complete, then cancel.
 		time.Sleep(20 * time.Millisecond)
@@ -294,6 +306,7 @@ func TestEventLoop_OpConnectionError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	s, mock := withMockConn(t, ctrl)
 	ctx := context.Background()
+
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
 
@@ -308,6 +321,7 @@ func TestEventLoop_OpConnectionError(t *testing.T) {
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
+
 		s.opCh <- op
 	}()
 
@@ -334,6 +348,7 @@ func TestEventLoop_BinaryFrameSkipped(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	s, _ := withMockConn(t, ctrl)
 	ctx, cancel := context.WithCancel(context.Background())
+
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
 
@@ -341,6 +356,7 @@ func TestEventLoop_BinaryFrameSkipped(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		// Binary frame should be skipped.
 		s.inboundCh <- inboundMsg{typ: websocket.MessageBinary, data: []byte("binary")}
+
 		time.Sleep(10 * time.Millisecond)
 		cancel()
 	}()
@@ -353,12 +369,15 @@ func TestEventLoop_PongHandled(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	s, _ := withMockConn(t, ctrl)
 	ctx, cancel := context.WithCancel(context.Background())
+
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
+
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"op":"pong"}`)}
+
 		time.Sleep(10 * time.Millisecond)
 		cancel()
 	}()
@@ -391,6 +410,7 @@ func TestEventLoop_SendsPingAfterIdle(t *testing.T) {
 			})
 
 		connCtx, connCancel := context.WithCancel(ctx)
+
 		t.Cleanup(func() { connCancel() })
 
 		err := s.eventLoop(ctx, connCtx)
@@ -409,6 +429,7 @@ func TestEventLoop_HeartbeatTimeout(t *testing.T) {
 		mock.EXPECT().Close(websocket.StatusGoingAway, "timeout").Return(nil)
 
 		connCtx, connCancel := context.WithCancel(ctx)
+
 		t.Cleanup(func() { connCancel() })
 
 		err := s.eventLoop(ctx, connCtx)
@@ -432,6 +453,7 @@ func TestEventLoop_PingWriteError(t *testing.T) {
 			Return(fmt.Errorf("broken pipe"))
 
 		connCtx, connCancel := context.WithCancel(ctx)
+
 		t.Cleanup(func() { connCancel() })
 
 		err := s.eventLoop(ctx, connCtx)
@@ -537,6 +559,7 @@ func TestHandshake_Success(t *testing.T) {
 	authData, _ := json.Marshal(authResp)
 
 	var sentInit InitMessage
+
 	gomock.InOrder(
 		mock.EXPECT().SetReadLimit(int64(16*1024*1024)),
 		mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).
@@ -705,6 +728,7 @@ func TestHandshake_CancelsPreviousConnCancel(t *testing.T) {
 	if s.connCancel != nil {
 		s.connCancel()
 	}
+
 	assert.Error(t, prevCtx.Err(), "previous connCancel should be called")
 
 	err := s.handshake(context.Background(), mock)

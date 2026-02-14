@@ -12,6 +12,7 @@ linters:
     - ineffassign
     - staticcheck
     - unused
+    - wsl_v5
   exclusions:
     presets:
       - comments

@@ -80,6 +80,7 @@ func Reconcile(local *state.LocalFile, prev *state.ServerFile, push PushMessage,
 		if push.Deleted {
 			return DecisionSkip
 		}
+
 		return DecisionDownload
 	}
 
@@ -88,6 +89,7 @@ func Reconcile(local *state.LocalFile, prev *state.ServerFile, push PushMessage,
 		if push.Deleted {
 			return DecisionDeleteLocal
 		}
+
 		return DecisionSkip
 	}
 
@@ -105,6 +107,7 @@ func Reconcile(local *state.LocalFile, prev *state.ServerFile, push PushMessage,
 			if push.Deleted {
 				return DecisionDeleteLocal
 			}
+
 			return DecisionDownload
 		}
 	}
@@ -116,6 +119,7 @@ func Reconcile(local *state.LocalFile, prev *state.ServerFile, push PushMessage,
 		if push.Deleted {
 			return DecisionSkip
 		}
+
 		return DecisionTypeConflict
 	}
 
@@ -131,6 +135,7 @@ func Reconcile(local *state.LocalFile, prev *state.ServerFile, push PushMessage,
 		if push.MTime > local.MTime {
 			return DecisionDownload
 		}
+
 		return DecisionSkip
 	}
 
@@ -209,6 +214,7 @@ func (r *Reconciler) Phase1(ctx context.Context, serverPushes []ServerPush, scan
 	r.serverFiles = serverFiles
 
 	r.logger.Info("reconciliation phase 1 complete")
+
 	return nil
 }
 
@@ -232,24 +238,29 @@ func (r *Reconciler) Phase2And3(ctx context.Context, scan *ScanResult) error {
 	}
 
 	r.logger.Info("reconciliation complete")
+
 	return nil
 }
 
 // processServerPushes is Phase 1: handle each queued server push.
 func (r *Reconciler) processServerPushes(ctx context.Context, pushes []ServerPush, scan *ScanResult, serverFiles map[string]state.ServerFile) error {
 	var failures int
+
 	for _, sp := range pushes {
 		if err := r.processOneServerPush(ctx, sp, scan, serverFiles); err != nil {
 			failures++
+
 			r.logger.Warn("reconcile server push",
 				slog.String("path", sp.Path),
 				slog.String("error", err.Error()),
 			)
 		}
 	}
+
 	if failures > 0 {
 		return fmt.Errorf("%d of %d server pushes failed to reconcile", failures, len(pushes))
 	}
+
 	return nil
 }
 
@@ -269,6 +280,7 @@ func (r *Reconciler) processOneServerPush(ctx context.Context, sp ServerPush, sc
 	if hasLocal {
 		localPtr = &local
 	}
+
 	var prevPtr *state.ServerFile
 	if hasPrev {
 		prevPtr = &prev
@@ -286,10 +298,12 @@ func (r *Reconciler) encryptLocalHash(local *state.LocalFile) string {
 	if local == nil || local.Hash == "" || local.Folder {
 		return ""
 	}
+
 	enc, err := r.cipher.EncryptPath(local.Hash)
 	if err != nil {
 		return ""
 	}
+
 	return enc
 }
 
@@ -308,10 +322,12 @@ func (r *Reconciler) executeDecision(ctx context.Context, decision ReconcileDeci
 
 	case DecisionDeleteLocal:
 		r.logger.Info("reconcile: deleting local", slog.String("path", path))
+
 		if push.Folder {
 			if err := r.vault.DeleteEmptyDir(path); err != nil {
 				r.logger.Info("reconcile: folder not empty, skipping delete", slog.String("path", path))
 				r.persistServerPush(path, push, true)
+
 				return nil
 			}
 		} else {
@@ -319,25 +335,31 @@ func (r *Reconciler) executeDecision(ctx context.Context, decision ReconcileDeci
 				r.logger.Warn("reconcile: delete failed", slog.String("path", path), slog.String("error", err.Error()))
 			}
 		}
+
 		r.persistServerPush(path, push, true)
 		r.deleteLocalState(path)
+
 		return nil
 
 	case DecisionKeepLocal:
 		r.logger.Info("reconcile: keeping local, server deleted", slog.String("path", path))
 		r.persistServerPush(path, push, true)
+
 		return nil
 
 	case DecisionMergeMD:
 		hasPrev := prev != nil
+
 		var prevVal state.ServerFile
 		if hasPrev {
 			prevVal = *prev
 		}
+
 		var localVal state.LocalFile
 		if local != nil {
 			localVal = *local
 		}
+
 		return r.threeWayMerge(ctx, path, push, localVal, prevVal, hasPrev)
 
 	case DecisionMergeJSON:
@@ -348,6 +370,7 @@ func (r *Reconciler) executeDecision(ctx context.Context, decision ReconcileDeci
 		if local != nil {
 			localVal = *local
 		}
+
 		return r.handleTypeConflict(ctx, path, push, localVal)
 
 	default:
@@ -369,6 +392,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 		if err == nil && encSyncHash == push.Hash {
 			r.logger.Debug("reconcile: server matches last push, skip merge", slog.String("path", path))
 			r.persistServerPush(path, push, false)
+
 			return nil
 		}
 	}
@@ -378,10 +402,12 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 	if err != nil {
 		return fmt.Errorf("reading local file for merge: %w", err)
 	}
+
 	localText := string(localContent)
 
 	// Get base version (previous server state).
 	baseText := ""
+
 	if hasPrev && prev.UID > 0 {
 		baseEnc, err := r.client.pullDirect(ctx, prev.UID)
 		if err != nil {
@@ -389,8 +415,10 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 				slog.String("path", path),
 				slog.String("error", err.Error()),
 			)
+
 			return r.downloadServerFile(ctx, path, push)
 		}
+
 		if len(baseEnc) > 0 {
 			basePlain, err := r.cipher.DecryptContent(baseEnc)
 			if err != nil {
@@ -398,8 +426,10 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 					slog.String("path", path),
 					slog.String("error", err.Error()),
 				)
+
 				return r.downloadServerFile(ctx, path, push)
 			}
+
 			baseText = string(basePlain)
 		}
 	}
@@ -409,6 +439,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 	if err != nil {
 		return fmt.Errorf("pulling server version for merge: %w", err)
 	}
+
 	if serverEnc == nil {
 		// Server returned deleted content during merge -- keep local.
 		r.persistServerPush(path, push, true)
@@ -416,11 +447,13 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 	}
 
 	var serverText string
+
 	if len(serverEnc) > 0 {
 		serverPlain, err := r.cipher.DecryptContent(serverEnc)
 		if err != nil {
 			return fmt.Errorf("decrypting server version for merge: %w", err)
 		}
+
 		serverText = string(serverPlain)
 	}
 
@@ -429,6 +462,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 		r.persistServerPush(path, push, false)
 		return nil
 	}
+
 	if serverText == "" {
 		// Empty server version -- keep local.
 		r.persistServerPush(path, push, false)
@@ -444,6 +478,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 			if age < 0 {
 				age = -age
 			}
+
 			if age < 180_000 {
 				r.logger.Info("reconcile: no base, recently created, server wins", slog.String("path", path))
 				return r.writeServerContent(path, push, []byte(serverText))
@@ -454,18 +489,22 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 			r.logger.Info("reconcile: no base, server wins by mtime", slog.String("path", path))
 			return r.writeServerContent(path, push, []byte(serverText))
 		}
+
 		r.logger.Info("reconcile: no base, local wins by mtime", slog.String("path", path))
 		r.persistServerPush(path, push, false)
+
 		return nil
 	}
 
 	// Full three-way merge: compute patch(base->local), apply onto server.
 	dmp := diffmatchpatch.New()
+
 	diffs := dmp.DiffMain(baseText, localText, true)
 	if len(diffs) > 2 {
 		diffs = dmp.DiffCleanupSemantic(diffs)
 		diffs = dmp.DiffCleanupEfficiency(diffs)
 	}
+
 	patches := dmp.PatchMake(baseText, diffs)
 	// Obsidian discards the applied-status array and writes the result
 	// regardless. We match this behavior but log a warning when patches
@@ -481,6 +520,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 	}
 
 	r.logger.Info("reconcile: three-way merge", slog.String("path", path))
+
 	return r.writeServerContent(path, push, []byte(merged))
 }
 
@@ -505,6 +545,7 @@ func (r *Reconciler) jsonMerge(ctx context.Context, path string, push PushMessag
 	if err != nil {
 		return fmt.Errorf("pulling server config for merge: %w", err)
 	}
+
 	if serverEnc == nil {
 		r.persistServerPush(path, push, true)
 		return nil
@@ -535,6 +576,7 @@ func (r *Reconciler) jsonMerge(ctx context.Context, path string, push PushMessag
 	}
 
 	r.logger.Info("reconcile: JSON merge", slog.String("path", path))
+
 	return r.writeServerContent(path, push, merged)
 }
 
@@ -550,12 +592,14 @@ func (r *Reconciler) handleTypeConflict(ctx context.Context, path string, push P
 			slog.String("from", path),
 			slog.String("to", cp),
 		)
+
 		if err := r.vault.Rename(path, cp); err != nil {
 			r.logger.Warn("reconcile: failed to rename folder for type conflict",
 				slog.String("path", path),
 				slog.String("error", err.Error()),
 			)
 		}
+
 		return r.downloadServerFile(ctx, path, push)
 	}
 
@@ -575,9 +619,11 @@ func (r *Reconciler) handleTypeConflict(ctx context.Context, path string, push P
 	if err != nil {
 		return fmt.Errorf("reading local file for conflict copy: %w", err)
 	}
+
 	if err := r.vault.WriteFile(conflictPath, content, time.Time{}); err != nil {
 		return fmt.Errorf("writing conflict copy %s: %w", conflictPath, err)
 	}
+
 	if err := r.vault.DeleteFile(path); err != nil {
 		r.logger.Warn("reconcile: delete after conflict copy failed", slog.String("path", path), slog.String("error", err.Error()))
 	}
@@ -598,6 +644,7 @@ func conflictCopyPath(base, ext string) string {
 	if _, err := os.Stat(candidate); os.IsNotExist(err) {
 		return candidate
 	}
+
 	for i := 2; i <= 100; i++ {
 		candidate = fmt.Sprintf("%s (Conflicted copy %d)%s", base, i, ext)
 		if _, err := os.Stat(candidate); os.IsNotExist(err) {
@@ -615,8 +662,10 @@ func (r *Reconciler) downloadServerFile(ctx context.Context, path string, push P
 		if err := r.vault.MkdirAll(path); err != nil {
 			return fmt.Errorf("creating folder %s: %w", path, err)
 		}
+
 		r.persistServerPush(path, push, false)
 		r.client.persistLocalFolder(path)
+
 		return nil
 	}
 
@@ -624,9 +673,11 @@ func (r *Reconciler) downloadServerFile(ctx context.Context, path string, push P
 	if err != nil {
 		return fmt.Errorf("pulling %s (uid %d): %w", path, push.UID, err)
 	}
+
 	if content == nil {
 		r.persistServerPush(path, push, true)
 		r.deleteLocalState(path)
+
 		return nil
 	}
 
@@ -647,6 +698,7 @@ func (r *Reconciler) writeServerContent(path string, push PushMessage, plaintext
 	if push.MTime > 0 {
 		mtime = time.UnixMilli(push.MTime)
 	}
+
 	if err := r.vault.WriteFile(path, plaintext, mtime); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
@@ -669,6 +721,7 @@ func (r *Reconciler) writeServerContent(path string, push PushMessage, plaintext
 		slog.String("path", path),
 		slog.Int("bytes", len(plaintext)),
 	)
+
 	return nil
 }
 
@@ -688,16 +741,19 @@ func (r *Reconciler) deleteLocalState(path string) {
 func (r *Reconciler) deleteRemoteFiles(ctx context.Context, scan *ScanResult, serverFiles map[string]state.ServerFile) error {
 	// Collect files and folders separately.
 	var filePaths, folderPaths []string
+
 	for _, path := range scan.Deleted {
 		if r.filter != nil && !r.filter.AllowPath(path) {
 			continue
 		}
+
 		sf, ok := serverFiles[path]
 		if !ok {
 			// Not tracked on server -- clean up local state.
 			r.deleteLocalState(path)
 			continue
 		}
+
 		if sf.Folder {
 			folderPaths = append(folderPaths, path)
 		} else {
@@ -744,8 +800,10 @@ func (r *Reconciler) deletePaths(ctx context.Context, paths []string, serverFile
 				slog.String("path", path),
 				slog.String("error", err.Error()),
 			)
+
 			continue
 		}
+
 		r.deleteLocalState(path)
 	}
 
@@ -756,17 +814,21 @@ func (r *Reconciler) deletePaths(ctx context.Context, paths []string, serverFile
 func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, serverFiles map[string]state.ServerFile) error {
 	// Separate folders and files. Upload folders first (shallowest first),
 	// then files (smallest first, matching Obsidian app behavior).
-	var folders []string
-	var files []string
+	var (
+		folders []string
+		files   []string
+	)
 
 	for _, path := range scan.Changed {
 		if r.filter != nil && !r.filter.AllowPath(path) {
 			continue
 		}
+
 		lf, ok := scan.Current[path]
 		if !ok {
 			continue
 		}
+
 		if lf.Folder {
 			folders = append(folders, path)
 		} else {
@@ -776,13 +838,16 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 
 	// Upload folders, shallowest (shortest path) first.
 	sortByLengthAsc(folders)
+
 	for _, path := range folders {
 		sf, hasSF := serverFiles[path]
 		if hasSF && sf.Folder {
 			// Already exists as folder on server -- skip.
 			continue
 		}
+
 		r.logger.Info("reconcile: uploading folder", slog.String("path", path))
+
 		if err := r.client.Push(ctx, path, nil, 0, 0, true, false); err != nil {
 			r.logger.Warn("reconcile: failed to push folder",
 				slog.String("path", path),
@@ -793,6 +858,7 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 
 	// Upload files, smallest first.
 	sortByFileSize(files, scan.Current)
+
 	for _, path := range files {
 		lf := scan.Current[path]
 		sf, hasSF := serverFiles[path]
@@ -811,11 +877,13 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 				slog.String("path", path),
 				slog.String("error", err.Error()),
 			)
+
 			continue
 		}
 
 		// Recompute hash to be sure.
 		h := sha256.Sum256(content)
+
 		contentHash := hex.EncodeToString(h[:])
 		if hasSF && !sf.Folder && sf.Hash != "" {
 			encHash, err := r.cipher.EncryptPath(contentHash)
@@ -825,8 +893,12 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 		}
 
 		info, err := r.vault.Stat(path)
-		var mtime int64
-		var ctime int64
+
+		var (
+			mtime int64
+			ctime int64
+		)
+
 		if err == nil {
 			mtime = info.ModTime().UnixMilli()
 			ctime = fileCtime(info)
@@ -878,5 +950,6 @@ func extractExtension(path string) string {
 	if dotIdx := strings.LastIndex(base, "."); dotIdx > 0 && dotIdx < len(base)-1 {
 		return strings.ToLower(base[dotIdx+1:])
 	}
+
 	return ""
 }

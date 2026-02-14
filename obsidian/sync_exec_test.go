@@ -28,10 +28,12 @@ func init() {
 	if err != nil {
 		panic("DeriveKey failed: " + err.Error())
 	}
+
 	c, err := NewCipherV0(key)
 	if err != nil {
 		panic("NewCipherV0 failed: " + err.Error())
 	}
+
 	cachedCipher = c
 }
 
@@ -85,16 +87,20 @@ func fakePullError(msg string) pullFunc {
 // encryptContent is a test helper that encrypts content with the given cipher.
 func encryptContent(t *testing.T, cipher *CipherV0, plaintext []byte) []byte {
 	t.Helper()
+
 	enc, err := cipher.EncryptContent(plaintext)
 	require.NoError(t, err)
+
 	return enc
 }
 
 // encryptPath is a test helper that encrypts a path with the given cipher.
 func encryptPath(t *testing.T, cipher *CipherV0, path string) string {
 	t.Helper()
+
 	enc, err := cipher.EncryptPath(path)
 	require.NoError(t, err)
+
 	return enc
 }
 
@@ -489,6 +495,7 @@ func TestProcessPush_DownloadsNewFile(t *testing.T) {
 	// Call the parts processPush calls: decrypt, reconcile, execute.
 	path, err := cipher.DecryptPath(push.Path)
 	require.NoError(t, err)
+
 	path = normalizePath(path)
 
 	local, encLocalHash := s.resolveLocalState(path)

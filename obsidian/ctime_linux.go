@@ -15,6 +15,8 @@ func fileCtime(info os.FileInfo) int64 {
 	if !ok {
 		return 0
 	}
+
 	ms := float64(sys.Ctim.Sec)*1000 + float64(sys.Ctim.Nsec)/1e6
+
 	return int64(math.Ceil(ms))
 }

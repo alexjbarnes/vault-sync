@@ -68,8 +68,10 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
+
 			return nil
 		}
+
 		if base == "node_modules" && d.IsDir() {
 			return filepath.SkipDir
 		}
@@ -83,6 +85,7 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
+
 			return nil
 		}
 
@@ -117,6 +120,7 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 				// Was a file, now a folder -- treat as changed.
 				result.Changed = append(result.Changed, relPath)
 			}
+
 			return nil
 		}
 
@@ -131,8 +135,10 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 			hash, hashErr := hashFile(vault, relPath)
 			if hashErr != nil {
 				logger.Warn("hashing new file", slog.String("path", relPath), slog.String("error", hashErr.Error()))
+
 				hash = ""
 			}
+
 			lf := state.LocalFile{
 				Path:  relPath,
 				MTime: mtime,
@@ -142,6 +148,7 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 			}
 			result.Current[relPath] = lf
 			result.Changed = append(result.Changed, relPath)
+
 			return nil
 		}
 
@@ -151,8 +158,10 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 			hash, hashErr := hashFile(vault, relPath)
 			if hashErr != nil {
 				logger.Warn("hashing changed file", slog.String("path", relPath), slog.String("error", hashErr.Error()))
+
 				hash = ""
 			}
+
 			lf := state.LocalFile{
 				Path:     relPath,
 				MTime:    mtime,
@@ -167,11 +176,13 @@ func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog
 			if hash == "" || hash != prev.Hash {
 				result.Changed = append(result.Changed, relPath)
 			}
+
 			return nil
 		}
 
 		// Unchanged. Carry forward persisted state.
 		result.Current[relPath] = prev
+
 		return nil
 	})
 	if err != nil {
@@ -199,6 +210,8 @@ func hashFile(vault *Vault, relPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	h := sha256.Sum256(content)
+
 	return hex.EncodeToString(h[:]), nil
 }

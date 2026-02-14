@@ -29,6 +29,7 @@ func securityVault(t *testing.T) *Vault {
 
 	v, err := New(dir)
 	require.NoError(t, err)
+
 	return v
 }
 
@@ -287,6 +288,7 @@ func TestEdit_ObsidianProtected(t *testing.T) {
 
 func TestListAll_ExcludesObsidian(t *testing.T) {
 	v := securityVault(t)
+
 	result := v.ListAll()
 	for _, f := range result.Files {
 		assert.False(t, isProtectedPath(f.Path),
@@ -298,6 +300,7 @@ func TestList_RootExcludesObsidian(t *testing.T) {
 	v := securityVault(t)
 	result, err := v.List("")
 	require.NoError(t, err)
+
 	for _, e := range result.Entries {
 		assert.NotEqual(t, ".obsidian", e.Name,
 			".obsidian should not appear in root listing")
@@ -309,6 +312,7 @@ func TestSearch_DoesNotSurfaceObsidian(t *testing.T) {
 	// "theme" appears in .obsidian/app.json content.
 	result, err := v.Search("theme", 20)
 	require.NoError(t, err)
+
 	for _, m := range result.Results {
 		assert.False(t, isProtectedPath(m.Path),
 			".obsidian file should not appear in search: %s", m.Path)

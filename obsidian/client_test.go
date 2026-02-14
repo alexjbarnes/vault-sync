@@ -29,6 +29,7 @@ func TestPost_SetsContentTypeAndOrigin(t *testing.T) {
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		assert.Equal(t, "app://obsidian.md", r.Header.Get("Origin"))
 		assert.Equal(t, http.MethodPost, r.Method)
+
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer srv.Close()
@@ -41,10 +42,12 @@ func TestPost_SetsContentTypeAndOrigin(t *testing.T) {
 func TestPost_MarshalsRequestBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+
 		var req SigninRequest
 		require.NoError(t, json.Unmarshal(body, &req))
 		assert.Equal(t, "user@example.com", req.Email)
 		assert.Equal(t, "secret", req.Password)
+
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer srv.Close()
@@ -64,7 +67,9 @@ func TestPost_DecodesResponseIntoResult(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv)
+
 	var resp SigninResponse
+
 	err := c.post(context.Background(), "/user/signin", struct{}{}, &resp)
 	require.NoError(t, err)
 	assert.Equal(t, "abc123", resp.Token)
@@ -131,7 +136,9 @@ func TestPost_OKStatusEmptyErrorFieldNotTreatedAsError(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv)
+
 	var resp SigninResponse
+
 	err := c.post(context.Background(), "/test", struct{}{}, &resp)
 	require.NoError(t, err)
 	assert.Equal(t, "good", resp.Token)
@@ -144,7 +151,9 @@ func TestPost_MalformedResponseJSON(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv)
+
 	var resp SigninResponse
+
 	err := c.post(context.Background(), "/test", struct{}{}, &resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decoding response")
@@ -168,6 +177,7 @@ func TestPost_ContextCancelled(t *testing.T) {
 func TestPost_EndpointAppendsToBaseURL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/user/signin", r.URL.Path)
+
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer srv.Close()
@@ -200,6 +210,7 @@ func TestSignin_Success(t *testing.T) {
 		assert.Equal(t, "/user/signin", r.URL.Path)
 
 		body, _ := io.ReadAll(r.Body)
+
 		var req SigninRequest
 		require.NoError(t, json.Unmarshal(body, &req))
 		assert.Equal(t, "test@example.com", req.Email)
@@ -253,6 +264,7 @@ func TestSignout_Success(t *testing.T) {
 		assert.Equal(t, "/user/signout", r.URL.Path)
 
 		body, _ := io.ReadAll(r.Body)
+
 		var req SignoutRequest
 		require.NoError(t, json.Unmarshal(body, &req))
 		assert.Equal(t, "tok_xyz", req.Token)
@@ -286,6 +298,7 @@ func TestListVaults_Success(t *testing.T) {
 		assert.Equal(t, "/vault/list", r.URL.Path)
 
 		body, _ := io.ReadAll(r.Body)
+
 		var req VaultListRequest
 		require.NoError(t, json.Unmarshal(body, &req))
 		assert.Equal(t, "tok_abc", req.Token)
@@ -345,6 +358,7 @@ func TestListVaults_SetsEncryptionVersion(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		assert.True(t, strings.Contains(string(body), `"supported_encryption_version":3`),
 			"request should include supported_encryption_version=3")
+
 		_, _ = w.Write([]byte(`{"vaults":[],"shared":[]}`))
 	}))
 	defer srv.Close()
@@ -381,7 +395,9 @@ func TestPost_OKStatusWithNonErrorJSON(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv)
+
 	var resp VaultListResponse
+
 	err := c.post(context.Background(), "/vault/list", struct{}{}, &resp)
 	require.NoError(t, err)
 	require.Len(t, resp.Vaults, 1)

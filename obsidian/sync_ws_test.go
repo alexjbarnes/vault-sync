@@ -19,6 +19,7 @@ import (
 // behavior where decryption is expected to fail (and be logged/skipped).
 func newTestSyncClient(t *testing.T, conn wsConn) *SyncClient {
 	t.Helper()
+
 	return &SyncClient{
 		conn:         conn,
 		logger:       slog.Default(),
@@ -79,6 +80,7 @@ func TestReadJSON_Success(t *testing.T) {
 		Return(websocket.MessageText, data, nil)
 
 	var got InitResponse
+
 	err := sc.readJSON(context.Background(), &got)
 	require.NoError(t, err)
 	assert.Equal(t, "ok", got.Res)
@@ -94,6 +96,7 @@ func TestReadJSON_ReadError(t *testing.T) {
 		Return(websocket.MessageType(0), nil, fmt.Errorf("EOF"))
 
 	var got InitResponse
+
 	err := sc.readJSON(context.Background(), &got)
 	assert.ErrorContains(t, err, "reading message")
 }
@@ -107,6 +110,7 @@ func TestReadJSON_MalformedJSON(t *testing.T) {
 		Return(websocket.MessageText, []byte(`{broken`), nil)
 
 	var got InitResponse
+
 	err := sc.readJSON(context.Background(), &got)
 	assert.Error(t, err)
 }
@@ -124,6 +128,7 @@ func TestWaitForReady_ImmediateReady(t *testing.T) {
 		Return(websocket.MessageText, []byte(ready), nil)
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(context.Background(), &pushes)
 	require.NoError(t, err)
 	assert.Equal(t, int64(200), sc.version)
@@ -145,6 +150,7 @@ func TestWaitForReady_ReadyDoesNotDowngradeVersion(t *testing.T) {
 		Return(websocket.MessageText, []byte(ready), nil)
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(context.Background(), &pushes)
 	require.NoError(t, err)
 	assert.Equal(t, int64(500), sc.version, "version should not be downgraded")
@@ -164,6 +170,7 @@ func TestWaitForReady_BinaryFrameSkipped(t *testing.T) {
 	)
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(context.Background(), &pushes)
 	require.NoError(t, err)
 }
@@ -181,6 +188,7 @@ func TestWaitForReady_PongSkipped(t *testing.T) {
 	)
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(context.Background(), &pushes)
 	require.NoError(t, err)
 }
@@ -198,6 +206,7 @@ func TestWaitForReady_UnknownOpSkipped(t *testing.T) {
 	)
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(context.Background(), &pushes)
 	require.NoError(t, err)
 }
@@ -216,6 +225,7 @@ func TestWaitForReady_MalformedTextSkipped(t *testing.T) {
 	)
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(context.Background(), &pushes)
 	require.NoError(t, err)
 }
@@ -232,6 +242,7 @@ func TestWaitForReady_MalformedReadyIsFatal(t *testing.T) {
 		Return(websocket.MessageText, []byte(ready), nil)
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(context.Background(), &pushes)
 	assert.ErrorContains(t, err, "decoding ready message")
 }
@@ -245,6 +256,7 @@ func TestWaitForReady_ReadErrorIsFatal(t *testing.T) {
 		Return(websocket.MessageType(0), nil, fmt.Errorf("connection closed"))
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(context.Background(), &pushes)
 	assert.ErrorContains(t, err, "reading message")
 	assert.ErrorContains(t, err, "connection closed")
@@ -266,6 +278,7 @@ func TestWaitForReady_ReadErrorAfterPushes(t *testing.T) {
 	)
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(context.Background(), &pushes)
 	assert.ErrorContains(t, err, "unexpected EOF")
 	// Push should not have been appended (decryption failed, no cipher).
@@ -289,6 +302,7 @@ func TestWaitForReady_PushWithBadJSONSkipped(t *testing.T) {
 	)
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(context.Background(), &pushes)
 	require.NoError(t, err)
 	assert.Empty(t, pushes)
@@ -310,6 +324,7 @@ func TestWaitForReady_PushAdvancesVersion(t *testing.T) {
 	)
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(context.Background(), &pushes)
 	require.NoError(t, err)
 	// Version should be 200 from the push, not 150 from ready (200 > 150).
@@ -339,6 +354,7 @@ func TestWaitForReady_MultipleMessagesBeforeReady(t *testing.T) {
 	)
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(context.Background(), &pushes)
 	require.NoError(t, err)
 	assert.Equal(t, int64(10), sc.version)
@@ -356,6 +372,7 @@ func TestWaitForReady_ContextCancelled(t *testing.T) {
 		Return(websocket.MessageType(0), nil, ctx.Err())
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(ctx, &pushes)
 	assert.Error(t, err)
 }
@@ -781,6 +798,7 @@ func TestReadResponse_BinaryFrameSkipped(t *testing.T) {
 	sc.inboundCh = make(chan inboundMsg, 2)
 
 	sc.inboundCh <- inboundMsg{typ: websocket.MessageBinary, data: []byte{0x01}}
+
 	sc.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"res":"ok"}`)}
 
 	got, err := sc.readResponse(context.Background())
@@ -793,6 +811,7 @@ func TestReadResponse_PongSkipped(t *testing.T) {
 	sc.inboundCh = make(chan inboundMsg, 2)
 
 	sc.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"op":"pong"}`)}
+
 	sc.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"res":"ok"}`)}
 
 	got, err := sc.readResponse(context.Background())
@@ -809,6 +828,7 @@ func TestReadResponse_PushProcessedInline(t *testing.T) {
 	// the point is the push doesn't break the response loop).
 	// Path "x" is not valid hex, so DecryptPath fails before reaching the nil cipher.
 	sc.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"op":"push","uid":1,"path":"x"}`)}
+
 	sc.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"res":"ok"}`)}
 
 	got, err := sc.readResponse(context.Background())
@@ -843,9 +863,13 @@ func TestReadResponse_MultiplePongsAndPushesThenResponse(t *testing.T) {
 	sc.inboundCh = make(chan inboundMsg, 5)
 
 	sc.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"op":"pong"}`)}
+
 	sc.inboundCh <- inboundMsg{typ: websocket.MessageBinary, data: []byte{0xFF}}
+
 	sc.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"op":"push","uid":1,"path":"x"}`)}
+
 	sc.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"op":"pong"}`)}
+
 	sc.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"res":"next"}`)}
 
 	got, err := sc.readResponse(context.Background())
@@ -964,6 +988,7 @@ func TestWaitForReady_CallsOnReady(t *testing.T) {
 	sc.version = 0
 
 	var calledWith int64
+
 	sc.onReady = func(v int64) { calledWith = v }
 
 	ready := `{"op":"ready","version":42}`
@@ -971,6 +996,7 @@ func TestWaitForReady_CallsOnReady(t *testing.T) {
 		Return(websocket.MessageText, []byte(ready), nil)
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(context.Background(), &pushes)
 	require.NoError(t, err)
 	assert.Equal(t, int64(42), calledWith)
@@ -993,6 +1019,7 @@ func TestWaitForReady_DecryptPushError_Skipped(t *testing.T) {
 	)
 
 	var pushes []ServerPush
+
 	err := sc.WaitForReady(context.Background(), &pushes)
 	require.NoError(t, err)
 	// Push should be skipped (decryption fails), not appended.

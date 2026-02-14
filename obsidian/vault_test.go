@@ -15,6 +15,7 @@ func tempVault(t *testing.T) *Vault {
 	dir := t.TempDir()
 	v, err := NewVault(dir)
 	require.NoError(t, err)
+
 	return v
 }
 
@@ -418,6 +419,7 @@ func TestVault_ConcurrentReadWrite(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		go func() {
 			defer func() { done <- struct{}{} }()
+
 			_ = v.WriteFile("shared.md", []byte("updated"), time.Time{})
 		}()
 	}
@@ -426,6 +428,7 @@ func TestVault_ConcurrentReadWrite(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		go func() {
 			defer func() { done <- struct{}{} }()
+
 			_, _ = v.ReadFile("shared.md")
 		}()
 	}

@@ -12,6 +12,7 @@ import (
 // clearConfigEnv unsets all config env vars so tests start clean.
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
+
 	for _, key := range []string{
 		"ENABLE_SYNC",
 		"ENABLE_MCP",
@@ -235,6 +236,7 @@ func TestLoad_DefaultDeviceName(t *testing.T) {
 	if hostname == "" {
 		hostname = "vault-sync"
 	}
+
 	assert.Equal(t, hostname, cfg.DeviceName)
 }
 

@@ -14,13 +14,16 @@ import (
 // waitFor polls until cond returns true or the timeout expires.
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
+
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
 		}
+
 		time.Sleep(20 * time.Millisecond)
 	}
+
 	t.Fatal("timed out waiting for condition")
 }
 
@@ -41,6 +44,7 @@ func watchedVault(t *testing.T) *Vault {
 	t.Cleanup(cancel)
 
 	errCh := make(chan error, 1)
+
 	go func() {
 		errCh <- v.Watch(ctx)
 	}()
@@ -50,6 +54,7 @@ func watchedVault(t *testing.T) *Vault {
 
 	t.Cleanup(func() {
 		cancel()
+
 		err := <-errCh
 		// context.Canceled is the expected shutdown error.
 		if err != nil && err != context.Canceled {

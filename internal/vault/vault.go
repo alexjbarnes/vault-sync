@@ -55,6 +55,7 @@ func New(root string) (*Vault, error) {
 	if err != nil {
 		return nil, fmt.Errorf("accessing vault path: %w", err)
 	}
+
 	if !info.IsDir() {
 		return nil, fmt.Errorf("vault path is not a directory: %s", abs)
 	}
@@ -83,6 +84,7 @@ func (v *Vault) resolve(relPath string) (string, error) {
 	if err := validatePath(relPath); err != nil {
 		return "", err
 	}
+
 	abs := filepath.Join(v.root, filepath.FromSlash(relPath))
 	// Ensure the joined path is within the vault root before touching disk.
 	if !strings.HasPrefix(abs, v.root+string(filepath.Separator)) && abs != v.root {
@@ -98,12 +100,14 @@ func (v *Vault) resolve(relPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("evaluating path: %w", err)
 	}
+
 	if !strings.HasPrefix(real, v.root+string(filepath.Separator)) && real != v.root {
 		return "", &Error{
 			Code:    ErrCodePathNotAllowed,
 			Message: fmt.Sprintf("path escapes vault root via symlink: %s", relPath),
 		}
 	}
+
 	return abs, nil
 }
 
@@ -119,15 +123,18 @@ func evalExistingPrefix(abs string) (string, error) {
 	}
 	// Walk up until we find an existing directory, then append the rest.
 	dir := filepath.Dir(abs)
+
 	base := filepath.Base(abs)
 	if dir == abs {
 		// Reached filesystem root without finding anything.
 		return abs, nil
 	}
+
 	parentReal, err := evalExistingPrefix(dir)
 	if err != nil {
 		return "", err
 	}
+
 	return filepath.Join(parentReal, base), nil
 }
 
@@ -139,6 +146,7 @@ func validatePath(relPath string) error {
 			Message: "path must not contain '..'",
 		}
 	}
+
 	return nil
 }
 
@@ -161,6 +169,7 @@ func (v *Vault) ListAll() *ListAllResult {
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].Path < files[j].Path
 	})
+
 	return &ListAllResult{
 		TotalFiles: len(files),
 		Files:      files,
@@ -200,6 +209,7 @@ func (v *Vault) List(dirPath string) (*ListResult, error) {
 	if err != nil && dirPath != "" {
 		return nil, err
 	}
+
 	if dirPath == "" {
 		absDir = v.root
 	}
@@ -212,8 +222,10 @@ func (v *Vault) List(dirPath string) (*ListResult, error) {
 				Message: fmt.Sprintf("directory not found: %s", dirPath),
 			}
 		}
+
 		return nil, fmt.Errorf("reading directory: %w", err)
 	}
+
 	if !info.IsDir() {
 		return nil, &Error{
 			Code:    ErrCodeFileNotFound,
@@ -227,6 +239,7 @@ func (v *Vault) List(dirPath string) (*ListResult, error) {
 	}
 
 	var entries []DirEntry
+
 	for _, de := range dirEntries {
 		name := de.Name()
 
@@ -247,6 +260,7 @@ func (v *Vault) List(dirPath string) (*ListResult, error) {
 			if err != nil {
 				continue
 			}
+
 			entries = append(entries, DirEntry{
 				Name:     name,
 				Type:     "file",
@@ -274,12 +288,15 @@ func countChildren(dir string) int {
 	if err != nil {
 		return 0
 	}
+
 	count := 0
+
 	for _, e := range entries {
 		if !strings.HasPrefix(e.Name(), ".") {
 			count++
 		}
 	}
+
 	return count
 }
 
@@ -318,6 +335,7 @@ func (v *Vault) Read(relPath string, offset, limit int) (*ReadResult, error) {
 				Message: fmt.Sprintf("file not found: %s", relPath),
 			}
 		}
+
 		return nil, fmt.Errorf("reading file: %w", err)
 	}
 
@@ -327,6 +345,7 @@ func (v *Vault) Read(relPath string, offset, limit int) (*ReadResult, error) {
 	if offset <= 0 {
 		offset = 1
 	}
+
 	if offset > totalLines {
 		return nil, &Error{
 			Code:    ErrCodeInvalidRange,
@@ -337,6 +356,7 @@ func (v *Vault) Read(relPath string, offset, limit int) (*ReadResult, error) {
 	startIdx := offset - 1 // convert 1-indexed to 0-indexed
 
 	truncated := false
+
 	endIdx := totalLines
 	if limit > 0 {
 		endIdx = startIdx + limit
@@ -410,13 +430,16 @@ func (v *Vault) Write(relPath string, content string, createDirs bool) (*WriteRe
 	if err != nil {
 		return nil, fmt.Errorf("creating temp file: %w", err)
 	}
+
 	tmpName := tmp.Name()
 
 	if _, err := tmp.WriteString(content); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
+
 		return nil, fmt.Errorf("writing temp file: %w", err)
 	}
+
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
 		return nil, fmt.Errorf("closing temp file: %w", err)
@@ -424,11 +447,13 @@ func (v *Vault) Write(relPath string, content string, createDirs bool) (*WriteRe
 
 	// Preserve permissions of existing file, or use default.
 	perm := fs.FileMode(0o644)
+
 	if !created {
 		if info, err := os.Stat(abs); err == nil {
 			perm = info.Mode()
 		}
 	}
+
 	if err := os.Chmod(tmpName, perm); err != nil {
 		os.Remove(tmpName)
 		return nil, fmt.Errorf("setting file permissions: %w", err)
@@ -482,6 +507,7 @@ func (v *Vault) Edit(relPath string, oldText string, newText string) (*EditResul
 				Message: fmt.Sprintf("file not found: %s", relPath),
 			}
 		}
+
 		return nil, fmt.Errorf("reading file: %w", err)
 	}
 
@@ -494,6 +520,7 @@ func (v *Vault) Edit(relPath string, oldText string, newText string) (*EditResul
 			Message: "text not found in file",
 		}
 	}
+
 	if count > 1 {
 		return nil, &Error{
 			Code:    ErrCodeTextNotUnique,
@@ -505,17 +532,21 @@ func (v *Vault) Edit(relPath string, oldText string, newText string) (*EditResul
 
 	// Atomic write.
 	dir := filepath.Dir(abs)
+
 	tmp, err := os.CreateTemp(dir, ".vault-edit-*")
 	if err != nil {
 		return nil, fmt.Errorf("creating temp file: %w", err)
 	}
+
 	tmpName := tmp.Name()
 
 	if _, err := tmp.WriteString(updated); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
+
 		return nil, fmt.Errorf("writing temp file: %w", err)
 	}
+
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
 		return nil, fmt.Errorf("closing temp file: %w", err)
@@ -576,6 +607,7 @@ func (v *Vault) Delete(relPath string) (*DeleteResult, error) {
 				Message: fmt.Sprintf("file not found: %s", relPath),
 			}
 		}
+
 		return nil, fmt.Errorf("checking file: %w", err)
 	}
 
@@ -630,8 +662,10 @@ func (v *Vault) DeleteBatch(paths []string) *DeleteBatchResult {
 				Path:  relPath,
 				Error: err.Error(),
 			})
+
 			continue
 		}
+
 		result.Deleted++
 		result.Results = append(result.Results, DeleteBatchItem{
 			Path:    relPath,
@@ -656,6 +690,7 @@ func (v *Vault) Move(srcPath, dstPath string) (*MoveResult, error) {
 	if err := validatePath(srcPath); err != nil {
 		return nil, err
 	}
+
 	if err := validatePath(dstPath); err != nil {
 		return nil, err
 	}
@@ -666,6 +701,7 @@ func (v *Vault) Move(srcPath, dstPath string) (*MoveResult, error) {
 			Message: fmt.Sprintf("moving from .obsidian/ is not allowed: %s", srcPath),
 		}
 	}
+
 	if isProtectedPath(dstPath) {
 		return nil, &Error{
 			Code:    ErrCodePathNotAllowed,
@@ -677,6 +713,7 @@ func (v *Vault) Move(srcPath, dstPath string) (*MoveResult, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	absDst, err := v.resolve(dstPath)
 	if err != nil {
 		return nil, err
@@ -690,8 +727,10 @@ func (v *Vault) Move(srcPath, dstPath string) (*MoveResult, error) {
 				Message: fmt.Sprintf("source file not found: %s", srcPath),
 			}
 		}
+
 		return nil, fmt.Errorf("checking source: %w", err)
 	}
+
 	if srcInfo.IsDir() {
 		return nil, &Error{
 			Code:    ErrCodeIsDirectory,
@@ -741,6 +780,7 @@ func (v *Vault) Copy(srcPath, dstPath string) (*CopyResult, error) {
 	if err := validatePath(srcPath); err != nil {
 		return nil, err
 	}
+
 	if err := validatePath(dstPath); err != nil {
 		return nil, err
 	}
@@ -751,6 +791,7 @@ func (v *Vault) Copy(srcPath, dstPath string) (*CopyResult, error) {
 			Message: fmt.Sprintf("copying from .obsidian/ is not allowed: %s", srcPath),
 		}
 	}
+
 	if isProtectedPath(dstPath) {
 		return nil, &Error{
 			Code:    ErrCodePathNotAllowed,
@@ -762,6 +803,7 @@ func (v *Vault) Copy(srcPath, dstPath string) (*CopyResult, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	absDst, err := v.resolve(dstPath)
 	if err != nil {
 		return nil, err
@@ -775,8 +817,10 @@ func (v *Vault) Copy(srcPath, dstPath string) (*CopyResult, error) {
 				Message: fmt.Sprintf("source file not found: %s", srcPath),
 			}
 		}
+
 		return nil, fmt.Errorf("checking source: %w", err)
 	}
+
 	if srcInfo.IsDir() {
 		return nil, &Error{
 			Code:    ErrCodeIsDirectory,
@@ -808,13 +852,16 @@ func (v *Vault) Copy(srcPath, dstPath string) (*CopyResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating temp file: %w", err)
 	}
+
 	tmpName := tmp.Name()
 
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
+
 		return nil, fmt.Errorf("writing temp file: %w", err)
 	}
+
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
 		return nil, fmt.Errorf("closing temp file: %w", err)

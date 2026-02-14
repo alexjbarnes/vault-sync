@@ -66,10 +66,12 @@ func warnInsecureEnvFile() {
 	if runtime.GOOS == "windows" {
 		return
 	}
+
 	info, err := os.Stat(".env")
 	if err != nil {
 		return // file does not exist, nothing to check
 	}
+
 	mode := info.Mode().Perm()
 	if mode&0o077 != 0 {
 		log.Printf("WARNING: .env file has insecure permissions %04o; recommended 0600", mode)
@@ -80,6 +82,7 @@ func warnInsecureEnvFile() {
 // It first attempts to load a .env file if present, then parses env vars.
 func Load() (*Config, error) {
 	_ = godotenv.Load()
+
 	warnInsecureEnvFile()
 
 	cfg := &Config{}
@@ -92,6 +95,7 @@ func Load() (*Config, error) {
 		if err != nil || hostname == "" {
 			hostname = "vault-sync"
 		}
+
 		cfg.DeviceName = hostname
 	}
 
@@ -110,6 +114,7 @@ func Load() (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolving sync dir to absolute path: %w", err)
 		}
+
 		cfg.SyncDir = absDir
 	}
 
@@ -133,9 +138,11 @@ func (c *Config) validate() error {
 		if c.Email == "" {
 			return fmt.Errorf("OBSIDIAN_EMAIL is required when sync is enabled")
 		}
+
 		if c.Password == "" {
 			return fmt.Errorf("OBSIDIAN_PASSWORD is required when sync is enabled")
 		}
+
 		if c.VaultPassword == "" {
 			return fmt.Errorf("OBSIDIAN_VAULT_PASSWORD is required when sync is enabled")
 		}
@@ -145,6 +152,7 @@ func (c *Config) validate() error {
 		if c.MCPServerURL == "" {
 			return fmt.Errorf("MCP_SERVER_URL is required when MCP is enabled")
 		}
+
 		if c.MCPAuthUsers == "" {
 			return fmt.Errorf("MCP_AUTH_USERS is required when MCP is enabled")
 		}
@@ -160,6 +168,7 @@ func DefaultSyncDir(vaultID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("determining home directory: %w", err)
 	}
+
 	return filepath.Join(home, ".vault-sync", "vaults", vaultID), nil
 }
 
@@ -171,7 +180,9 @@ func (c *Config) SetSyncDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("resolving sync dir to absolute path: %w", err)
 	}
+
 	c.SyncDir = absDir
+
 	return nil
 }
 
@@ -186,21 +197,27 @@ func (c *Config) ParseMCPUsers() (auth.UserCredentials, error) {
 	if c.MCPAuthUsers == "" {
 		return users, nil
 	}
+
 	for _, pair := range strings.Split(c.MCPAuthUsers, ",") {
 		pair = strings.TrimSpace(pair)
 		if pair == "" {
 			continue
 		}
+
 		idx := strings.Index(pair, ":")
 		if idx < 0 {
 			return nil, fmt.Errorf("invalid user entry (missing ':'): %s", pair)
 		}
+
 		username := pair[:idx]
+
 		password := pair[idx+1:]
 		if username == "" || password == "" {
 			return nil, fmt.Errorf("empty username or password in: %s", pair)
 		}
+
 		users[username] = password
 	}
+
 	return users, nil
 }

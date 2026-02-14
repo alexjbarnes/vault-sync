@@ -19,6 +19,7 @@ var testLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 func newTestWatcher(t *testing.T, vault *Vault, pusher syncPusher) *Watcher {
 	t.Helper()
+
 	return &Watcher{
 		vault:  vault,
 		pusher: pusher,
@@ -55,6 +56,7 @@ func TestShouldIgnore(t *testing.T) {
 	}
 
 	w := &Watcher{}
+
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
 			assert.Equal(t, tt.ignore, w.shouldIgnore(tt.path), "shouldIgnore(%q)", tt.path)
@@ -252,6 +254,7 @@ func TestHandleWrite_AdoptsServerCtimeWhenOlder(t *testing.T) {
 
 	// Server has an older ctime that should be adopted.
 	serverCtime := int64(1000)
+
 	mock.EXPECT().Connected().Return(true)
 	mock.EXPECT().ContentHash("ctime.md").Return("")
 	mock.EXPECT().ServerFileState("ctime.md").Return(&state.ServerFile{
@@ -457,12 +460,15 @@ func TestDrainQueue_StopsWhenDisconnectedMidDrain(t *testing.T) {
 	// Queue two events. After the first is processed, connection drops.
 	abs1 := filepath.Join(v.Dir(), "a.md")
 	abs2 := filepath.Join(v.Dir(), "b.md")
+
 	require.NoError(t, os.WriteFile(abs1, []byte("a"), 0o644))
 	require.NoError(t, os.WriteFile(abs2, []byte("b"), 0o644))
+
 	w.queued[abs1] = pendingEvent{absPath: abs1, isDelete: false}
 	w.queued[abs2] = pendingEvent{absPath: abs2, isDelete: false}
 
 	callCount := 0
+
 	mock.EXPECT().Connected().DoAndReturn(func() bool {
 		callCount++
 		// First Connected() call in drainQueue: true.
@@ -524,6 +530,7 @@ func TestHandleWrite_NormalizesPath(t *testing.T) {
 
 	// Create a file in a subdirectory.
 	require.NoError(t, os.MkdirAll(filepath.Join(v.Dir(), "sub"), 0o755))
+
 	content := []byte("nested")
 	absPath := filepath.Join(v.Dir(), "sub", "note.md")
 	require.NoError(t, os.WriteFile(absPath, content, 0o644))

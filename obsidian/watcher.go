@@ -64,6 +64,7 @@ func (w *Watcher) Watch(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("creating watcher: %w", err)
 	}
+
 	w.watcher = watcher
 	defer watcher.Close()
 
@@ -81,6 +82,7 @@ func (w *Watcher) Watch(ctx context.Context) error {
 
 	// Debounce: batch rapid writes into a single push per file.
 	pending := make(map[string]time.Time)
+
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -93,6 +95,7 @@ func (w *Watcher) Watch(ctx context.Context) error {
 			if !ok {
 				return fmt.Errorf("fsnotify events channel closed unexpectedly")
 			}
+
 			if w.shouldIgnore(event.Name) {
 				continue
 			}
@@ -125,6 +128,7 @@ func (w *Watcher) Watch(ctx context.Context) error {
 			if !ok {
 				return fmt.Errorf("fsnotify errors channel closed unexpectedly")
 			}
+
 			w.logger.Warn("watcher error", slog.String("error", err.Error()))
 
 		case <-ticker.C:
@@ -135,6 +139,7 @@ func (w *Watcher) Watch(ctx context.Context) error {
 				if now.Sub(t) < 300*time.Millisecond {
 					continue
 				}
+
 				delete(pending, path)
 				w.handleWrite(ctx, path)
 			}
@@ -146,6 +151,7 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 	if !w.pusher.Connected() {
 		w.queued[absPath] = pendingEvent{absPath: absPath, isDelete: false}
 		w.logger.Debug("queued write (disconnected)", slog.String("path", absPath))
+
 		return
 	}
 
@@ -154,6 +160,7 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 		w.logger.Warn("computing relative path", slog.String("error", err.Error()))
 		return
 	}
+
 	relPath = normalizePath(relPath)
 
 	info, err := w.vault.Stat(relPath)
@@ -161,7 +168,9 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 		if os.IsNotExist(err) {
 			return
 		}
+
 		w.logger.Warn("stat failed", slog.String("path", relPath), slog.String("error", err.Error()))
+
 		return
 	}
 
@@ -173,6 +182,7 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 			)
 			w.requeueIfDisconnected(absPath, false)
 		}
+
 		return
 	}
 
@@ -184,6 +194,7 @@ func (w *Watcher) handleWrite(ctx context.Context, absPath string) {
 
 	// Compare against hash cache to avoid pushing content we just received.
 	h := sha256.Sum256(content)
+
 	contentHash := hex.EncodeToString(h[:])
 	if cached := w.pusher.ContentHash(relPath); cached == contentHash {
 		return
@@ -213,6 +224,7 @@ func (w *Watcher) handleDelete(ctx context.Context, absPath string) {
 	if !w.pusher.Connected() {
 		w.queued[absPath] = pendingEvent{absPath: absPath, isDelete: true}
 		w.logger.Debug("queued delete (disconnected)", slog.String("path", absPath))
+
 		return
 	}
 
@@ -221,6 +233,7 @@ func (w *Watcher) handleDelete(ctx context.Context, absPath string) {
 		w.logger.Warn("computing relative path", slog.String("error", err.Error()))
 		return
 	}
+
 	relPath = normalizePath(relPath)
 
 	// Only push the delete if the server knows about this path.
@@ -265,6 +278,7 @@ func (w *Watcher) drainQueue(ctx context.Context) {
 		absPath string
 		ev      pendingEvent
 	}
+
 	items := make([]queuedItem, 0, len(w.queued))
 	for absPath, ev := range w.queued {
 		items = append(items, queuedItem{absPath: absPath, ev: ev})
@@ -292,12 +306,15 @@ func (w *Watcher) addRecursive(dir string) error {
 		if err != nil {
 			return err
 		}
+
 		if d.IsDir() {
 			if w.shouldIgnore(path) {
 				return filepath.SkipDir
 			}
+
 			return w.watcher.Add(path)
 		}
+
 		return nil
 	})
 }
@@ -309,9 +326,11 @@ func (w *Watcher) shouldIgnore(path string) bool {
 	if strings.HasPrefix(base, ".") && base != ".obsidian" {
 		return true
 	}
+
 	if strings.HasSuffix(base, "~") || strings.HasSuffix(base, ".swp") {
 		return true
 	}
+
 	if base == "node_modules" {
 		return true
 	}
@@ -329,5 +348,6 @@ func (w *Watcher) shouldIgnore(path string) bool {
 			}
 		}
 	}
+
 	return false
 }

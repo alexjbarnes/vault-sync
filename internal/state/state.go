@@ -93,10 +93,13 @@ func LoadAt(path string) (*State, error) {
 		if _, err := tx.CreateBucketIfNotExists(appBucket); err != nil {
 			return err
 		}
+
 		if _, err := tx.CreateBucketIfNotExists(oauthTokensBucket); err != nil {
 			return err
 		}
+
 		_, err := tx.CreateBucketIfNotExists(oauthClientBucket)
+
 		return err
 	})
 	if err != nil {
@@ -115,14 +118,18 @@ func (s *State) Close() error {
 // Token returns the cached authentication token, or empty string.
 func (s *State) Token() string {
 	var token string
+
 	_ = s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(appBucket)
+
 		v := b.Get(tokenKey)
 		if v != nil {
 			token = string(v)
 		}
+
 		return nil
 	})
+
 	return token
 }
 
@@ -141,12 +148,15 @@ func (s *State) GetVault(vaultID string) (VaultState, error) {
 		if b == nil {
 			return nil
 		}
+
 		v := b.Get([]byte("state"))
 		if v == nil {
 			return nil
 		}
+
 		return json.Unmarshal(v, &vs)
 	})
+
 	return vs, err
 }
 
@@ -157,10 +167,12 @@ func (s *State) SetVault(vaultID string, vs VaultState) error {
 		if err != nil {
 			return err
 		}
+
 		data, err := json.Marshal(vs)
 		if err != nil {
 			return err
 		}
+
 		return b.Put([]byte("state"), data)
 	})
 }
@@ -172,7 +184,9 @@ func (s *State) InitVaultBuckets(vaultID string) error {
 		if _, err := tx.CreateBucketIfNotExists(vaultLocalBucket(vaultID)); err != nil {
 			return err
 		}
+
 		_, err := tx.CreateBucketIfNotExists(vaultServerBucket(vaultID))
+
 		return err
 	})
 }
@@ -180,18 +194,23 @@ func (s *State) InitVaultBuckets(vaultID string) error {
 // GetLocalFile returns the local file state for a path, or nil if not found.
 func (s *State) GetLocalFile(vaultID, path string) (*LocalFile, error) {
 	var lf *LocalFile
+
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(vaultLocalBucket(vaultID))
 		if b == nil {
 			return nil
 		}
+
 		v := b.Get([]byte(path))
 		if v == nil {
 			return nil
 		}
+
 		lf = &LocalFile{}
+
 		return json.Unmarshal(v, lf)
 	})
+
 	return lf, err
 }
 
@@ -202,10 +221,12 @@ func (s *State) SetLocalFile(vaultID string, lf LocalFile) error {
 		if b == nil {
 			return fmt.Errorf("local bucket not initialized for vault %s", vaultID)
 		}
+
 		data, err := json.Marshal(lf)
 		if err != nil {
 			return err
 		}
+
 		return b.Put([]byte(lf.Path), data)
 	})
 }
@@ -217,6 +238,7 @@ func (s *State) DeleteLocalFile(vaultID, path string) error {
 		if b == nil {
 			return nil
 		}
+
 		return b.Delete([]byte(path))
 	})
 }
@@ -229,33 +251,42 @@ func (s *State) AllLocalFiles(vaultID string) (map[string]LocalFile, error) {
 		if b == nil {
 			return nil
 		}
+
 		return b.ForEach(func(k, v []byte) error {
 			var lf LocalFile
 			if err := json.Unmarshal(v, &lf); err != nil {
 				return err
 			}
+
 			result[string(k)] = lf
+
 			return nil
 		})
 	})
+
 	return result, err
 }
 
 // GetServerFile returns the server file state for a path, or nil if not found.
 func (s *State) GetServerFile(vaultID, path string) (*ServerFile, error) {
 	var sf *ServerFile
+
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(vaultServerBucket(vaultID))
 		if b == nil {
 			return nil
 		}
+
 		v := b.Get([]byte(path))
 		if v == nil {
 			return nil
 		}
+
 		sf = &ServerFile{}
+
 		return json.Unmarshal(v, sf)
 	})
+
 	return sf, err
 }
 
@@ -266,10 +297,12 @@ func (s *State) SetServerFile(vaultID string, sf ServerFile) error {
 		if b == nil {
 			return fmt.Errorf("server bucket not initialized for vault %s", vaultID)
 		}
+
 		data, err := json.Marshal(sf)
 		if err != nil {
 			return err
 		}
+
 		return b.Put([]byte(sf.Path), data)
 	})
 }
@@ -281,6 +314,7 @@ func (s *State) DeleteServerFile(vaultID, path string) error {
 		if b == nil {
 			return nil
 		}
+
 		return b.Delete([]byte(path))
 	})
 }
@@ -293,15 +327,19 @@ func (s *State) AllServerFiles(vaultID string) (map[string]ServerFile, error) {
 		if b == nil {
 			return nil
 		}
+
 		return b.ForEach(func(k, v []byte) error {
 			var sf ServerFile
 			if err := json.Unmarshal(v, &sf); err != nil {
 				return err
 			}
+
 			result[string(k)] = sf
+
 			return nil
 		})
 	})
+
 	return result, err
 }
 
@@ -309,10 +347,12 @@ func (s *State) AllServerFiles(vaultID string) (map[string]ServerFile, error) {
 func (s *State) SaveOAuthToken(t models.OAuthToken) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(oauthTokensBucket)
+
 		data, err := json.Marshal(t)
 		if err != nil {
 			return err
 		}
+
 		return b.Put([]byte(t.Token), data)
 	})
 }
@@ -320,15 +360,20 @@ func (s *State) SaveOAuthToken(t models.OAuthToken) error {
 // GetOAuthToken returns an OAuth token by its value, or nil if not found.
 func (s *State) GetOAuthToken(token string) (*models.OAuthToken, error) {
 	var t *models.OAuthToken
+
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(oauthTokensBucket)
+
 		v := b.Get([]byte(token))
 		if v == nil {
 			return nil
 		}
+
 		t = &models.OAuthToken{}
+
 		return json.Unmarshal(v, t)
 	})
+
 	return t, err
 }
 
@@ -342,17 +387,22 @@ func (s *State) DeleteOAuthToken(token string) error {
 // AllOAuthTokens returns all stored OAuth tokens.
 func (s *State) AllOAuthTokens() ([]models.OAuthToken, error) {
 	var tokens []models.OAuthToken
+
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(oauthTokensBucket)
+
 		return b.ForEach(func(k, v []byte) error {
 			var t models.OAuthToken
 			if err := json.Unmarshal(v, &t); err != nil {
 				return err
 			}
+
 			tokens = append(tokens, t)
+
 			return nil
 		})
 	})
+
 	return tokens, err
 }
 
@@ -360,10 +410,12 @@ func (s *State) AllOAuthTokens() ([]models.OAuthToken, error) {
 func (s *State) SaveOAuthClient(c models.OAuthClient) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(oauthClientBucket)
+
 		data, err := json.Marshal(c)
 		if err != nil {
 			return err
 		}
+
 		return b.Put([]byte(c.ClientID), data)
 	})
 }
@@ -371,32 +423,42 @@ func (s *State) SaveOAuthClient(c models.OAuthClient) error {
 // GetOAuthClient returns a registered client by ID, or nil if not found.
 func (s *State) GetOAuthClient(clientID string) (*models.OAuthClient, error) {
 	var c *models.OAuthClient
+
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(oauthClientBucket)
+
 		v := b.Get([]byte(clientID))
 		if v == nil {
 			return nil
 		}
+
 		c = &models.OAuthClient{}
+
 		return json.Unmarshal(v, c)
 	})
+
 	return c, err
 }
 
 // AllOAuthClients returns all registered OAuth clients.
 func (s *State) AllOAuthClients() ([]models.OAuthClient, error) {
 	var clients []models.OAuthClient
+
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(oauthClientBucket)
+
 		return b.ForEach(func(k, v []byte) error {
 			var c models.OAuthClient
 			if err := json.Unmarshal(v, &c); err != nil {
 				return err
 			}
+
 			clients = append(clients, c)
+
 			return nil
 		})
 	})
+
 	return clients, err
 }
 
@@ -406,8 +468,10 @@ func (s *State) OAuthClientCount() int {
 	_ = s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(oauthClientBucket)
 		count = b.Stats().KeyN
+
 		return nil
 	})
+
 	return count
 }
 
@@ -420,5 +484,6 @@ func dbPath() string {
 		fmt.Fprintf(os.Stderr, "fatal: cannot determine home directory: %v\n", err)
 		os.Exit(1)
 	}
+
 	return filepath.Join(dir, ".vault-sync", "state.db")
 }

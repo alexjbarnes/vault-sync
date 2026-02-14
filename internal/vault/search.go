@@ -64,7 +64,9 @@ func (v *Vault) Search(query string, maxResults int) (*SearchResult, error) {
 	})
 
 	lowerQuery := strings.ToLower(query)
+
 	var matches []SearchMatch
+
 	seen := make(map[string]bool)
 
 	// Phase 1: filename matches.
@@ -72,6 +74,7 @@ func (v *Vault) Search(query string, maxResults int) (*SearchResult, error) {
 		if len(matches) >= maxResults {
 			break
 		}
+
 		if strings.Contains(strings.ToLower(f.Path), lowerQuery) {
 			matches = append(matches, SearchMatch{
 				Path:      f.Path,
@@ -88,9 +91,11 @@ func (v *Vault) Search(query string, maxResults int) (*SearchResult, error) {
 		if len(matches) >= maxResults {
 			break
 		}
+
 		if seen[f.Path] {
 			continue
 		}
+
 		for _, tag := range f.Tags {
 			if strings.Contains(strings.ToLower(tag), lowerQuery) {
 				matches = append(matches, SearchMatch{
@@ -100,6 +105,7 @@ func (v *Vault) Search(query string, maxResults int) (*SearchResult, error) {
 					Line:      1,
 				})
 				seen[f.Path] = true
+
 				break
 			}
 		}
@@ -108,6 +114,7 @@ func (v *Vault) Search(query string, maxResults int) (*SearchResult, error) {
 	// Phase 3: content matches.
 	if len(matches) < maxResults {
 		remaining := maxResults - len(matches)
+
 		var contentMatches []SearchMatch
 		if rgPath != "" {
 			contentMatches = searchContentRg(v.root, query, seen, remaining)
@@ -118,6 +125,7 @@ func (v *Vault) Search(query string, maxResults int) (*SearchResult, error) {
 		if rgPath == "" {
 			contentMatches = searchContentGo(v.root, lowerQuery, files, seen, remaining)
 		}
+
 		matches = append(matches, contentMatches...)
 	}
 
@@ -146,6 +154,7 @@ func searchContentRg(vaultRoot, query string, seen map[string]bool, maxResults i
 	}
 
 	cmd := exec.CommandContext(ctx, rgPath, args...) //nolint:gosec // G204: rgPath from exec.LookPath, args not shell-interpreted
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil
@@ -156,6 +165,7 @@ func searchContentRg(vaultRoot, query string, seen map[string]bool, maxResults i
 	}
 
 	var matches []SearchMatch
+
 	scanner := bufio.NewScanner(stdout)
 	// Increase buffer for long lines.
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
@@ -169,9 +179,11 @@ func searchContentRg(vaultRoot, query string, seen map[string]bool, maxResults i
 		if !ok {
 			continue
 		}
+
 		if seen[m.Path] {
 			continue
 		}
+
 		seen[m.Path] = true
 		matches = append(matches, m)
 	}
@@ -215,6 +227,7 @@ func parseRgMatchLine(line []byte, vaultRoot string) (SearchMatch, bool) {
 	if err := json.Unmarshal(line, &msg); err != nil {
 		return SearchMatch{}, false
 	}
+
 	if msg.Type != "match" {
 		return SearchMatch{}, false
 	}
@@ -230,11 +243,14 @@ func parseRgMatchLine(line []byte, vaultRoot string) (SearchMatch, bool) {
 		relPath = strings.TrimPrefix(relPath, vaultRoot)
 		relPath = strings.TrimPrefix(relPath, string(filepath.Separator))
 	}
+
 	relPath = filepath.ToSlash(relPath)
 
 	// Build snippet from the matched line and submatch positions.
 	lineText := strings.TrimRight(data.Lines.Text, "\n\r")
+
 	var snippet string
+
 	if len(data.Submatches) > 0 {
 		sub := data.Submatches[0]
 		snippet = buildSnippetFromBytes(lineText, sub.Start, sub.End)
@@ -260,9 +276,11 @@ func buildSnippetFromBytes(line string, start, end int) string {
 	if start < 0 {
 		start = 0
 	}
+
 	if end > len(lineBytes) {
 		end = len(lineBytes)
 	}
+
 	if start >= end {
 		return truncateLine(line, 120)
 	}
@@ -274,6 +292,7 @@ func buildSnippetFromBytes(line string, start, end int) string {
 	if winStart < 0 {
 		winStart = 0
 	}
+
 	winEnd := end + contextBytes
 	if winEnd > len(lineBytes) {
 		winEnd = len(lineBytes)
@@ -287,6 +306,7 @@ func buildSnippetFromBytes(line string, start, end int) string {
 	if winStart > 0 {
 		prefix = "..."
 	}
+
 	suffix := ""
 	if winEnd < len(lineBytes) {
 		suffix = "..."
@@ -300,6 +320,7 @@ func truncateLine(line string, maxLen int) string {
 	if len(line) <= maxLen {
 		return line
 	}
+
 	return line[:maxLen] + "..."
 }
 
@@ -310,11 +331,13 @@ func searchContentGo(vaultRoot, lowerQuery string, files []FileEntry, seen map[s
 		if len(matches) >= maxResults {
 			break
 		}
+
 		if seen[f.Path] {
 			continue
 		}
 
 		abs := filepath.Join(vaultRoot, filepath.FromSlash(f.Path))
+
 		data, err := os.ReadFile(abs) //nolint:gosec // G304: abs built from vaultRoot + validated index path
 		if err != nil {
 			continue
@@ -325,6 +348,7 @@ func searchContentGo(vaultRoot, lowerQuery string, files []FileEntry, seen map[s
 		if checkLen > 512 {
 			checkLen = 512
 		}
+
 		for i := 0; i < checkLen; i++ {
 			if data[i] == 0 {
 				goto nextFile
@@ -333,9 +357,11 @@ func searchContentGo(vaultRoot, lowerQuery string, files []FileEntry, seen map[s
 
 		{
 			content := string(data)
+
 			lines := strings.Split(content, "\n")
 			for lineNum, line := range lines {
 				lowerLine := strings.ToLower(line)
+
 				idx := strings.Index(lowerLine, lowerQuery)
 				if idx < 0 {
 					continue
@@ -349,11 +375,14 @@ func searchContentGo(vaultRoot, lowerQuery string, files []FileEntry, seen map[s
 					Line:      lineNum + 1,
 				})
 				seen[f.Path] = true
+
 				break // one match per file
 			}
 		}
+
 	nextFile:
 	}
+
 	return matches
 }
 
@@ -366,6 +395,7 @@ func buildSnippet(line string, matchStart, matchLen int) string {
 	if start < 0 {
 		start = 0
 	}
+
 	end := matchStart + matchLen + contextChars
 	if end > len(line) {
 		end = len(line)
@@ -375,6 +405,7 @@ func buildSnippet(line string, matchStart, matchLen int) string {
 	if start > 0 {
 		prefix = "..."
 	}
+
 	suffix := ""
 	if end < len(line) {
 		suffix = "..."

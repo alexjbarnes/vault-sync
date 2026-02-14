@@ -166,17 +166,21 @@ func TestSearch_Rg_ContentMatch(t *testing.T) {
 	if RgPath() == "" {
 		t.Skip("ripgrep not available")
 	}
+
 	v := testVault(t)
 	result, err := v.Search("productive", 20)
 	require.NoError(t, err)
 
 	found := false
+
 	for _, m := range result.Results {
 		if m.Path == "daily/2026-02-08.md" && m.MatchType == "content" {
 			found = true
+
 			assert.Contains(t, m.Snippet, "**productive**")
 		}
 	}
+
 	assert.True(t, found, "rg should find content match")
 }
 
@@ -184,6 +188,7 @@ func TestSearch_Rg_Deduplication(t *testing.T) {
 	if RgPath() == "" {
 		t.Skip("ripgrep not available")
 	}
+
 	v := testVault(t)
 	// "cold-brew" matches filename. It should not also appear as a content match.
 	result, err := v.Search("cold-brew", 20)
@@ -193,6 +198,7 @@ func TestSearch_Rg_Deduplication(t *testing.T) {
 	for _, m := range result.Results {
 		pathCounts[m.Path]++
 	}
+
 	for path, count := range pathCounts {
 		assert.Equal(t, 1, count, "path %s should appear only once, got %d", path, count)
 	}
@@ -216,6 +222,7 @@ func TestSearch_Rg_SpecialChars(t *testing.T) {
 func TestSearch_GoFallback_ContentMatch(t *testing.T) {
 	// Force Go fallback by clearing rg path.
 	orig := RgPath()
+
 	SetRgPath("")
 	defer SetRgPath(orig)
 
@@ -224,18 +231,22 @@ func TestSearch_GoFallback_ContentMatch(t *testing.T) {
 	require.NoError(t, err)
 
 	found := false
+
 	for _, m := range result.Results {
 		if m.Path == "daily/2026-02-08.md" && m.MatchType == "content" {
 			found = true
+
 			assert.Contains(t, m.Snippet, "**productive**")
 			assert.Equal(t, 6, m.Line)
 		}
 	}
+
 	assert.True(t, found, "Go fallback should find content match")
 }
 
 func TestSearch_GoFallback_Deduplication(t *testing.T) {
 	orig := RgPath()
+
 	SetRgPath("")
 	defer SetRgPath(orig)
 
@@ -247,6 +258,7 @@ func TestSearch_GoFallback_Deduplication(t *testing.T) {
 	for _, m := range result.Results {
 		pathCounts[m.Path]++
 	}
+
 	for path, count := range pathCounts {
 		assert.Equal(t, 1, count, "path %s should appear only once, got %d", path, count)
 	}
@@ -254,6 +266,7 @@ func TestSearch_GoFallback_Deduplication(t *testing.T) {
 
 func TestSearch_GoFallback_SkipsBinaryFiles(t *testing.T) {
 	orig := RgPath()
+
 	SetRgPath("")
 	defer SetRgPath(orig)
 
@@ -279,6 +292,7 @@ func TestSearch_GoFallback_SkipsBinaryFiles(t *testing.T) {
 
 func TestSearch_GoFallback_MaxResults(t *testing.T) {
 	orig := RgPath()
+
 	SetRgPath("")
 	defer SetRgPath(orig)
 
@@ -293,6 +307,7 @@ func TestSearch_GoFallback_MaxResults(t *testing.T) {
 func TestSearch_FilenameMatchTakesPrecedence(t *testing.T) {
 	// A file that matches by filename should not appear again as content match.
 	orig := RgPath()
+
 	SetRgPath("")
 	defer SetRgPath(orig)
 
@@ -312,17 +327,21 @@ func TestSearch_FilenameMatchTakesPrecedence(t *testing.T) {
 	require.NoError(t, err)
 
 	matches := 0
+
 	for _, m := range result.Results {
 		if m.Path == "docs/report.md" {
 			matches++
+
 			assert.Equal(t, "filename", m.MatchType)
 		}
 	}
+
 	assert.Equal(t, 1, matches, "should appear exactly once as filename match")
 }
 
 func TestSearch_TagMatchNotDuplicatedByContent(t *testing.T) {
 	orig := RgPath()
+
 	SetRgPath("")
 	defer SetRgPath(orig)
 
@@ -337,11 +356,13 @@ func TestSearch_TagMatchNotDuplicatedByContent(t *testing.T) {
 	require.NoError(t, err)
 
 	matches := 0
+
 	for _, m := range result.Results {
 		if m.Path == "pasta.md" {
 			matches++
 		}
 	}
+
 	assert.Equal(t, 1, matches, "should appear exactly once (as tag match)")
 }
 
@@ -358,8 +379,10 @@ func TestSearch_DefaultMaxResults(t *testing.T) {
 
 func mustMarshal(t *testing.T, v interface{}) json.RawMessage {
 	t.Helper()
+
 	data, err := json.Marshal(v)
 	require.NoError(t, err)
+
 	return data
 }
 
@@ -382,6 +405,7 @@ func TestSearchContentRg_InvalidBinary(t *testing.T) {
 	// return nil (not panic).
 	orig := rgPath
 	rgPath = "/nonexistent/rg"
+
 	defer func() { rgPath = orig }()
 
 	matches := searchContentRg("/tmp", "query", map[string]bool{}, 10)
@@ -392,10 +416,12 @@ func TestSearchContentRg_SeenFilesSkipped(t *testing.T) {
 	if RgPath() == "" {
 		t.Skip("ripgrep not available")
 	}
+
 	v := testVault(t)
 
 	// Mark all files as already seen.
 	seen := make(map[string]bool)
+
 	files := v.index.AllFiles()
 	for _, f := range files {
 		seen[f.Path] = true
@@ -434,8 +460,11 @@ func TestSearch_RgAndGoFallbackConsistency(t *testing.T) {
 
 	// Run with Go fallback.
 	origRg := RgPath()
+
 	SetRgPath("")
+
 	resultGo, err := v.Search("productive", 20)
+
 	SetRgPath(origRg)
 	require.NoError(t, err)
 

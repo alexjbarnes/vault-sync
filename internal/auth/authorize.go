@@ -108,6 +108,7 @@ func (rl *loginRateLimiter) check(ip string) bool {
 			recent = append(recent, t)
 		}
 	}
+
 	if len(recent) == 0 {
 		delete(rl.failures, ip)
 	} else {
@@ -150,6 +151,7 @@ func validateRedirectURI(client *models.OAuthClient, redirectURI string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -159,8 +161,10 @@ func generateCSRFToken(store *Store) string {
 	if _, err := rand.Read(b); err != nil {
 		panic("crypto/rand failed: " + err.Error())
 	}
+
 	token := hex.EncodeToString(b)
 	store.SaveCSRF(token)
+
 	return token
 }
 
@@ -270,6 +274,7 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 	if limiter.check(ip) {
 		logger.Warn("login rate limited", slog.String("ip", ip))
 		http.Error(w, "too many failed login attempts, try again later", http.StatusTooManyRequests)
+
 		return
 	}
 
@@ -291,9 +296,11 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 			Resource:            resource,
 			Error:               "Invalid username or password",
 		}
+
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = loginPage.Execute(w, data)
+
 		return
 	}
 
@@ -314,6 +321,7 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 	// Build redirect URL with proper encoding.
 	params := url.Values{}
 	params.Set("code", code)
+
 	if state != "" {
 		params.Set("state", state)
 	}

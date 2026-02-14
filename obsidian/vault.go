@@ -35,9 +35,11 @@ func NewVault(dir string) (*Vault, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("vault directory must not be empty")
 	}
+
 	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: vault root dir needs 0755 for Obsidian access
 		return nil, fmt.Errorf("creating vault directory %s: %w", dir, err)
 	}
+
 	return &Vault{dir: dir}, nil
 }
 
@@ -106,6 +108,7 @@ func (v *Vault) DeleteFile(relPath string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing %s: %w", relPath, err)
 	}
+
 	return nil
 }
 
@@ -125,6 +128,7 @@ func (v *Vault) DeleteDir(relPath string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing directory %s: %w", relPath, err)
 	}
+
 	return nil
 }
 
@@ -148,6 +152,7 @@ func (v *Vault) DeleteEmptyDir(relPath string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing directory %s: %w", relPath, err)
 	}
+
 	return nil
 }
 
@@ -171,6 +176,7 @@ func (v *Vault) Rename(oldRel, newRel string) error {
 	if err != nil {
 		return err
 	}
+
 	newAbs, err := v.resolve(newRel)
 	if err != nil {
 		return err
@@ -221,6 +227,7 @@ func (v *Vault) StatAndWriteFile(relPath string, data []byte, mtime time.Time, p
 		if err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("stat %s: %w", relPath, err)
 		}
+
 		if err == nil {
 			if !info.ModTime().Equal(prePullInfo.ModTime()) || info.Size() != prePullInfo.Size() {
 				return fmt.Errorf("download cancelled because %s was changed locally during download", relPath)
@@ -255,6 +262,7 @@ func (v *Vault) resolve(relPath string) (string, error) {
 	if relPath == "" {
 		return "", fmt.Errorf("empty path")
 	}
+
 	if strings.ContainsRune(relPath, 0) {
 		return "", fmt.Errorf("path contains null byte: %q", relPath)
 	}
@@ -265,6 +273,7 @@ func (v *Vault) resolve(relPath string) (string, error) {
 			return "", fmt.Errorf("path contains ..: %q", relPath)
 		}
 	}
+
 	absPath := filepath.Join(v.dir, relPath)
 	if !strings.HasPrefix(absPath, v.dir+string(os.PathSeparator)) {
 		return "", fmt.Errorf("path traversal blocked: %q resolves outside vault dir", relPath)
@@ -284,7 +293,9 @@ func (v *Vault) resolve(relPath string) (string, error) {
 				// The prefix check above already passed, so we allow it.
 				return absPath, nil
 			}
+
 			parentExpected := filepath.Dir(absPath)
+
 			vaultPrefix := v.dir + string(os.PathSeparator)
 			if !strings.HasPrefix(parentReal+string(os.PathSeparator), vaultPrefix) && parentReal != v.dir {
 				// Check if parentExpected is the vault dir itself (single-level file).
@@ -292,13 +303,17 @@ func (v *Vault) resolve(relPath string) (string, error) {
 					return "", fmt.Errorf("symlink traversal blocked: parent of %q resolves to %q outside vault", relPath, parentReal)
 				}
 			}
+
 			return absPath, nil
 		}
+
 		return "", fmt.Errorf("resolving symlinks for %q: %w", relPath, err)
 	}
+
 	if !strings.HasPrefix(realPath, v.dir+string(os.PathSeparator)) && realPath != v.dir {
 		return "", fmt.Errorf("symlink traversal blocked: %q resolves to %q outside vault dir", relPath, realPath)
 	}
+
 	return absPath, nil
 }
 
@@ -308,9 +323,11 @@ func clampMtime(t time.Time) time.Time {
 	if t.Before(mtimeMin) {
 		return mtimeMin
 	}
+
 	if t.After(mtimeMax) {
 		return mtimeMax
 	}
+
 	return t
 }
 
@@ -325,18 +342,23 @@ func normalizePath(path string) string {
 
 	// Collapse multiple slashes and trim leading/trailing.
 	var b strings.Builder
+
 	prevSlash := false
+
 	for _, r := range path {
 		if r == '/' {
 			if prevSlash {
 				continue
 			}
+
 			prevSlash = true
 		} else {
 			prevSlash = false
 		}
+
 		b.WriteRune(r)
 	}
+
 	path = strings.Trim(b.String(), "/")
 
 	return norm.NFC.String(path)

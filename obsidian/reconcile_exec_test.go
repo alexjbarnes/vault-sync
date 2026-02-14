@@ -25,6 +25,7 @@ func fullReconciler(t *testing.T, ctrl *gomock.Controller) (*Reconciler, *SyncCl
 	s.conn = mock
 
 	r := NewReconciler(vault, s, appState, testSyncVaultID, cipher, quietLogger, nil)
+
 	return r, s, vault, appState, cipher, mock
 }
 
@@ -32,6 +33,7 @@ func fullReconciler(t *testing.T, ctrl *gomock.Controller) (*Reconciler, *SyncCl
 // every push operation. Returns a cancel function to stop it.
 func fakeEventLoop(s *SyncClient) context.CancelFunc {
 	ctx, cancel := context.WithCancel(context.Background())
+
 	go func() {
 		for {
 			select {
@@ -42,6 +44,7 @@ func fakeEventLoop(s *SyncClient) context.CancelFunc {
 			}
 		}
 	}()
+
 	return cancel
 }
 
@@ -479,6 +482,7 @@ func TestJSONMerge_ShallowMerge(t *testing.T) {
 	require.NoError(t, err)
 
 	data, _ := vault.ReadFile(".obsidian/app.json")
+
 	var result map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(data, &result))
 	assert.Contains(t, string(result["shared"]), "server_val")
@@ -629,6 +633,7 @@ func TestPhase1_DownloadsNewFile(t *testing.T) {
 	plain := []byte("from server")
 	encContent := encryptContent(t, cipher, plain)
 	encPath := encryptPath(t, cipher, "phase1.md")
+
 	mockPullDirect(mock, encContent)
 
 	pushes := []ServerPush{
@@ -880,6 +885,7 @@ func TestExecuteDecision_MergeJSON(t *testing.T) {
 	require.NoError(t, err)
 
 	data, _ := vault.ReadFile(".obsidian/test.json")
+
 	var result map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(data, &result))
 	assert.Contains(t, string(result["local"]), "val")
@@ -955,6 +961,7 @@ func TestProcessServerPushes_FailureCounter(t *testing.T) {
 
 	// A push that will fail: DecisionDownload but pullDirect returns an error.
 	encPath := encryptPath(t, cipher, "fail.md")
+
 	mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).
 		Return(fmt.Errorf("connection lost"))
 
@@ -1075,6 +1082,7 @@ func TestDeletePaths_PushError_Continues(t *testing.T) {
 
 	// Make event loop return errors for push operations.
 	evCtx, evCancel := context.WithCancel(context.Background())
+
 	go func() {
 		for {
 			select {
@@ -1085,6 +1093,7 @@ func TestDeletePaths_PushError_Continues(t *testing.T) {
 			}
 		}
 	}()
+
 	defer evCancel()
 
 	serverFiles := map[string]state.ServerFile{
@@ -1748,6 +1757,7 @@ func TestUploadLocalChanges_FolderPushError(t *testing.T) {
 
 	// Fake event loop that returns errors.
 	loopCtx, loopCancel := context.WithCancel(context.Background())
+
 	go func() {
 		for {
 			select {
@@ -1758,6 +1768,7 @@ func TestUploadLocalChanges_FolderPushError(t *testing.T) {
 			}
 		}
 	}()
+
 	t.Cleanup(func() { loopCancel() })
 
 	scan := &ScanResult{
@@ -1783,6 +1794,7 @@ func TestUploadLocalChanges_FilePushError(t *testing.T) {
 	require.NoError(t, vault.WriteFile("fail.md", content, time.Time{}))
 
 	loopCtx, loopCancel := context.WithCancel(context.Background())
+
 	go func() {
 		for {
 			select {
@@ -1793,6 +1805,7 @@ func TestUploadLocalChanges_FilePushError(t *testing.T) {
 			}
 		}
 	}()
+
 	t.Cleanup(func() { loopCancel() })
 
 	scan := &ScanResult{
@@ -1828,5 +1841,6 @@ func mustJSON(v PullResponse) []byte {
 	if err != nil {
 		panic(err)
 	}
+
 	return data
 }

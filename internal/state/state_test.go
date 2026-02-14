@@ -15,6 +15,7 @@ func testDB(t *testing.T) *State {
 	s, err := LoadAt(dbPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })
+
 	return s
 }
 
@@ -39,6 +40,7 @@ func TestLoadAt_ReopensExistingDB(t *testing.T) {
 
 	s2, err := LoadAt(dbPath)
 	require.NoError(t, err)
+
 	defer s2.Close()
 
 	assert.Equal(t, "persist-me", s2.Token())
@@ -109,6 +111,7 @@ func TestGetVault_IsolatedBetweenVaults(t *testing.T) {
 
 	vs1, _ := s.GetVault("v1")
 	vs2, _ := s.GetVault("v2")
+
 	assert.Equal(t, int64(10), vs1.Version)
 	assert.Equal(t, int64(20), vs2.Version)
 }
@@ -385,6 +388,7 @@ func TestLocalFiles_IsolatedBetweenVaults(t *testing.T) {
 
 	lf1, _ := s.GetLocalFile("v1", "shared.md")
 	lf2, _ := s.GetLocalFile("v2", "shared.md")
+
 	assert.Equal(t, int64(1), lf1.Size)
 	assert.Equal(t, int64(2), lf2.Size)
 }
@@ -399,6 +403,7 @@ func TestServerFiles_IsolatedBetweenVaults(t *testing.T) {
 
 	sf1, _ := s.GetServerFile("v1", "shared.md")
 	sf2, _ := s.GetServerFile("v2", "shared.md")
+
 	assert.Equal(t, int64(10), sf1.UID)
 	assert.Equal(t, int64(20), sf2.UID)
 }
@@ -409,11 +414,13 @@ func TestServerFiles_IsolatedBetweenVaults(t *testing.T) {
 // Used to inject corrupt data that triggers unmarshal errors.
 func putRaw(t *testing.T, s *State, bucket []byte, key, value string) {
 	t.Helper()
+
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		b, err := tx.CreateBucketIfNotExists(bucket)
 		if err != nil {
 			return err
 		}
+
 		return b.Put([]byte(key), []byte(value))
 	})
 	require.NoError(t, err)

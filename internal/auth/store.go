@@ -85,6 +85,7 @@ func NewStore(persist *state.State, logger *slog.Logger) *Store {
 	}
 
 	go s.gcLoop()
+
 	return s
 }
 
@@ -96,12 +97,14 @@ func (s *Store) loadFromDisk() {
 	if err != nil {
 		s.logger.Warn("loading persisted OAuth tokens", slog.String("error", err.Error()))
 	}
+
 	for i := range tokens {
 		t := tokens[i]
 		if now.After(t.ExpiresAt) {
 			_ = s.persist.DeleteOAuthToken(t.Token)
 			continue
 		}
+
 		s.tokens[t.Token] = &t
 	}
 
@@ -109,6 +112,7 @@ func (s *Store) loadFromDisk() {
 	if err != nil {
 		s.logger.Warn("loading persisted OAuth clients", slog.String("error", err.Error()))
 	}
+
 	for i := range clients {
 		c := clients[i]
 		s.clients[c.ClientID] = &c
@@ -129,6 +133,7 @@ func (s *Store) Stop() {
 func (s *Store) gcLoop() {
 	ticker := time.NewTicker(cleanupInterval)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ticker.C:
@@ -142,6 +147,7 @@ func (s *Store) gcLoop() {
 // cleanup removes all expired entries from the store.
 func (s *Store) cleanup() {
 	now := time.Now()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -150,14 +156,17 @@ func (s *Store) cleanup() {
 			delete(s.codes, k)
 		}
 	}
+
 	for k, t := range s.tokens {
 		if now.After(t.ExpiresAt) {
 			delete(s.tokens, k)
+
 			if s.persist != nil {
 				_ = s.persist.DeleteOAuthToken(k)
 			}
 		}
 	}
+
 	for k, entry := range s.csrf {
 		if now.After(entry.expiresAt) {
 			delete(s.csrf, k)
@@ -182,11 +191,13 @@ func (s *Store) ConsumeCode(code string) *AuthCode {
 	if !ok {
 		return nil
 	}
+
 	delete(s.codes, code)
 
 	if time.Now().After(ac.ExpiresAt) {
 		return nil
 	}
+
 	return ac
 }
 
@@ -213,6 +224,7 @@ func (s *Store) ValidateToken(token string) *models.OAuthToken {
 	if !ok {
 		return nil
 	}
+
 	if time.Now().After(t.ExpiresAt) {
 		return nil
 	}
@@ -220,6 +232,7 @@ func (s *Store) ValidateToken(token string) *models.OAuthToken {
 	if t.Kind == "refresh" {
 		return nil
 	}
+
 	return t
 }
 
@@ -239,9 +252,11 @@ func (s *Store) validateRefreshTokenLocked(token, clientID, resource string) *mo
 	if !ok {
 		return nil
 	}
+
 	if time.Now().After(t.ExpiresAt) {
 		return nil
 	}
+
 	if t.Kind != "refresh" {
 		return nil
 	}
@@ -252,9 +267,11 @@ func (s *Store) validateRefreshTokenLocked(token, clientID, resource string) *mo
 			return nil
 		}
 	}
+
 	if resource != "" && strings.TrimRight(t.Resource, "/") != strings.TrimRight(resource, "/") {
 		return nil
 	}
+
 	return t
 }
 
@@ -307,12 +324,15 @@ func (s *Store) RegistrationAllowed() bool {
 			valid = append(valid, t)
 		}
 	}
+
 	s.registrationTimes = valid
 
 	if len(s.registrationTimes) >= 10 {
 		return false
 	}
+
 	s.registrationTimes = append(s.registrationTimes, now)
+
 	return true
 }
 
@@ -321,9 +341,11 @@ func (s *Store) RegistrationAllowed() bool {
 func (s *Store) RegisterClient(ci *models.OAuthClient) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if len(s.clients) >= maxClients {
 		return false
 	}
+
 	s.clients[ci.ClientID] = ci
 
 	if s.persist != nil {
@@ -331,6 +353,7 @@ func (s *Store) RegisterClient(ci *models.OAuthClient) bool {
 			s.logger.Warn("persisting OAuth client", slog.String("error", err.Error()))
 		}
 	}
+
 	return true
 }
 
@@ -338,6 +361,7 @@ func (s *Store) RegisterClient(ci *models.OAuthClient) bool {
 func (s *Store) GetClient(clientID string) *models.OAuthClient {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
 	return s.clients[clientID]
 }
 
@@ -354,6 +378,7 @@ func (s *Store) ConsumeCSRF(token string) bool {
 	if token == "" {
 		return false
 	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -361,7 +386,9 @@ func (s *Store) ConsumeCSRF(token string) bool {
 	if !ok {
 		return false
 	}
+
 	delete(s.csrf, token)
+
 	return time.Now().Before(entry.expiresAt)
 }
 
@@ -371,5 +398,6 @@ func RandomHex(byteLen int) string {
 	if _, err := rand.Read(b); err != nil {
 		panic("crypto/rand failed: " + err.Error())
 	}
+
 	return hex.EncodeToString(b)
 }

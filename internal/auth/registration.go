@@ -71,10 +71,12 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 		if len(grantTypes) == 0 {
 			grantTypes = []string{"authorization_code"}
 		}
+
 		responseTypes := req.ResponseTypes
 		if len(responseTypes) == 0 {
 			responseTypes = []string{"code"}
 		}
+
 		authMethod := req.TokenEndpointAuthMethod
 		if authMethod == "" {
 			authMethod = "none"
@@ -114,6 +116,7 @@ func validateRedirectScheme(rawURI string) error {
 	if err != nil {
 		return fmt.Errorf("invalid URI: %s", rawURI)
 	}
+
 	if u.Scheme == "https" {
 		return nil
 	}
@@ -124,6 +127,7 @@ func validateRedirectScheme(rawURI string) error {
 			return nil
 		}
 	}
+
 	return fmt.Errorf("redirect_uri must use HTTPS (or http://localhost): %s", rawURI)
 }
 

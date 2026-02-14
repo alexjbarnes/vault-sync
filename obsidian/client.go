@@ -43,12 +43,14 @@ func sameHostRedirectPolicy(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("stopped after 10 redirects")
 	}
+
 	if len(via) > 0 {
 		origHost := via[0].URL.Host
 		if req.URL.Host != origHost {
 			return fmt.Errorf("redirect to different host blocked: %s -> %s", origHost, req.URL.Host)
 		}
 	}
+
 	return nil
 }
 
@@ -62,6 +64,7 @@ func NewClient(httpClient *http.Client) *Client {
 			CheckRedirect: sameHostRedirectPolicy,
 		}
 	}
+
 	return &Client{
 		httpClient: httpClient,
 		baseURL:    baseURL,
@@ -78,20 +81,25 @@ func sanitizeResponseBody(body []byte) string {
 	}
 	// Ensure valid UTF-8 and replace control characters.
 	var clean []byte
+
 	for len(body) > 0 {
 		r, size := utf8.DecodeRune(body)
 		if r == utf8.RuneError && size <= 1 {
 			clean = append(clean, '?')
 			body = body[1:]
+
 			continue
 		}
+
 		if r < 0x20 && r != '\n' && r != '\r' && r != '\t' {
 			clean = append(clean, '?')
 		} else {
 			clean = append(clean, body[:size]...)
 		}
+
 		body = body[size:]
 	}
+
 	return string(clean)
 }
 
@@ -106,6 +114,7 @@ func (c *Client) post(ctx context.Context, endpoint string, body, result interfa
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
+
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "app://obsidian.md")
 
@@ -131,12 +140,15 @@ func (c *Client) post(ctx context.Context, endpoint string, body, result interfa
 			if isTransientStatus(resp.StatusCode) || isTransientMessage(apiErr.Error) {
 				return &TransientError{Err: err}
 			}
+
 			return err
 		}
+
 		err := fmt.Errorf("API %s returned status %d: %s", endpoint, resp.StatusCode, sanitizeResponseBody(respBody))
 		if isTransientStatus(resp.StatusCode) {
 			return &TransientError{Err: err}
 		}
+
 		return err
 	}
 
@@ -147,6 +159,7 @@ func (c *Client) post(ctx context.Context, endpoint string, body, result interfa
 		if isTransientMessage(apiErr.Error) {
 			return &TransientError{Err: err}
 		}
+
 		return err
 	}
 
@@ -196,6 +209,7 @@ func isTransientStatus(code int) bool {
 		http.StatusGatewayTimeout:
 		return true
 	}
+
 	return false
 }
 
@@ -204,6 +218,7 @@ func isTransientStatus(code int) bool {
 // again later." as a 200 with an error body, so we match on that.
 func isTransientMessage(msg string) bool {
 	lower := strings.ToLower(msg)
+
 	return strings.Contains(lower, "overloaded") ||
 		strings.Contains(lower, "try again") ||
 		strings.Contains(lower, "temporarily unavailable")

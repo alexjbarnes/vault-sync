@@ -34,6 +34,7 @@ func testVault(t *testing.T) *Vault {
 
 	v, err := New(dir)
 	require.NoError(t, err)
+
 	return v
 }
 
@@ -75,6 +76,7 @@ func TestListAll_ReturnsAllFiles(t *testing.T) {
 	for _, f := range result.Files {
 		paths[f.Path] = true
 	}
+
 	assert.True(t, paths["notes/hello.md"])
 	assert.True(t, paths["images/photo.png"])
 	assert.Equal(t, result.TotalFiles, len(result.Files))
@@ -85,12 +87,14 @@ func TestListAll_ParsesFrontmatterTags(t *testing.T) {
 	result := v.ListAll()
 
 	var helloEntry *FileEntry
+
 	for i := range result.Files {
 		if result.Files[i].Path == "notes/hello.md" {
 			helloEntry = &result.Files[i]
 			break
 		}
 	}
+
 	require.NotNil(t, helloEntry)
 	assert.Equal(t, []string{"project", "go"}, helloEntry.Tags)
 }
@@ -120,6 +124,7 @@ func TestList_Root(t *testing.T) {
 	for _, e := range result.Entries {
 		names[e.Name] = e.Type
 	}
+
 	assert.Equal(t, "folder", names["notes"])
 	assert.Equal(t, "folder", names["daily"])
 }
@@ -134,6 +139,7 @@ func TestList_Subdirectory(t *testing.T) {
 	for _, e := range result.Entries {
 		names[e.Name] = true
 	}
+
 	assert.True(t, names["hello.md"])
 	assert.True(t, names["second.md"])
 }
@@ -239,6 +245,7 @@ func TestRead_AutoTruncation(t *testing.T) {
 	for i := 0; i < 300; i++ {
 		content += "line\n"
 	}
+
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "big.md"), []byte(content), 0o644))
 
 	v, err := New(dir)
@@ -252,10 +259,12 @@ func TestRead_AutoTruncation(t *testing.T) {
 
 func TestRead_ExplicitLimitNoTruncation(t *testing.T) {
 	dir := t.TempDir()
+
 	var content string
 	for i := 0; i < 300; i++ {
 		content += "line\n"
 	}
+
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "big.md"), []byte(content), 0o644))
 
 	v, err := New(dir)
@@ -277,11 +286,13 @@ func TestSearch_ByFilename(t *testing.T) {
 	assert.Greater(t, result.TotalMatches, 0)
 
 	found := false
+
 	for _, m := range result.Results {
 		if m.Path == "recipes/cold-brew.md" && m.MatchType == "filename" {
 			found = true
 		}
 	}
+
 	assert.True(t, found, "should find cold-brew.md by filename")
 }
 
@@ -291,11 +302,13 @@ func TestSearch_ByTag(t *testing.T) {
 	require.NoError(t, err)
 
 	found := false
+
 	for _, m := range result.Results {
 		if m.Path == "recipes/cold-brew.md" && m.MatchType == "tag" {
 			found = true
 		}
 	}
+
 	assert.True(t, found, "should find cold-brew.md by tag")
 }
 
@@ -305,13 +318,16 @@ func TestSearch_ByContent(t *testing.T) {
 	require.NoError(t, err)
 
 	found := false
+
 	for _, m := range result.Results {
 		if m.Path == "daily/2026-02-08.md" && m.MatchType == "content" {
 			found = true
+
 			assert.Contains(t, m.Snippet, "**productive**")
 			assert.Equal(t, 6, m.Line)
 		}
 	}
+
 	assert.True(t, found, "should find content match")
 }
 

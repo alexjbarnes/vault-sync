@@ -20,13 +20,16 @@ func logToolCall(logger *slog.Logger, tool string, args ...slog.Attr) func(error
 	attrs = append(attrs, slog.String("tool", tool))
 	attrs = append(attrs, args...)
 	start := time.Now()
+
 	return func(err error) {
 		attrs = append(attrs, slog.Duration("duration", time.Since(start)))
 		if err != nil {
 			attrs = append(attrs, slog.String("error", err.Error()))
 			logger.LogAttrs(context.Background(), slog.LevelWarn, "tool call failed", attrs...)
+
 			return
 		}
+
 		logger.LogAttrs(context.Background(), slog.LevelInfo, "tool call", attrs...)
 	}
 }
@@ -151,20 +154,26 @@ func listHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[ListInp
 				TotalFiles: all.TotalFiles,
 				Files:      all.Files,
 			}
+
 			done(nil)
+
 			return textResult(r), r, nil
 		}
+
 		dir, err := v.List(input.Path)
 		if err != nil {
 			done(err)
 			return nil, nil, err
 		}
+
 		r := &listResult{
 			Path:         dir.Path,
 			Entries:      dir.Entries,
 			TotalEntries: dir.TotalEntries,
 		}
+
 		done(nil)
+
 		return textResult(r), r, nil
 	}
 }
@@ -172,12 +181,15 @@ func listHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[ListInp
 func readHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[ReadInput, *vault.ReadResult] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, input ReadInput) (*mcp.CallToolResult, *vault.ReadResult, error) {
 		done := logToolCall(logger, "vault_read", slog.String("path", input.Path))
+
 		result, err := v.Read(input.Path, input.Offset, input.Limit)
 		if err != nil {
 			done(err)
 			return nil, nil, err
 		}
+
 		done(nil)
+
 		return textResult(result), result, nil
 	}
 }
@@ -185,12 +197,15 @@ func readHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[ReadInp
 func searchHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[SearchInput, *vault.SearchResult] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, input SearchInput) (*mcp.CallToolResult, *vault.SearchResult, error) {
 		done := logToolCall(logger, "vault_search", slog.String("query", input.Query))
+
 		result, err := v.Search(input.Query, input.MaxResults)
 		if err != nil {
 			done(err)
 			return nil, nil, err
 		}
+
 		done(nil)
+
 		return textResult(result), result, nil
 	}
 }
@@ -198,16 +213,20 @@ func searchHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[Searc
 func writeHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[WriteInput, *vault.WriteResult] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, input WriteInput) (*mcp.CallToolResult, *vault.WriteResult, error) {
 		done := logToolCall(logger, "vault_write", slog.String("path", input.Path), slog.Int("bytes", len(input.Content)))
+
 		createDirs := true
 		if input.CreateDirs != nil {
 			createDirs = *input.CreateDirs
 		}
+
 		result, err := v.Write(input.Path, input.Content, createDirs)
 		if err != nil {
 			done(err)
 			return nil, nil, err
 		}
+
 		done(nil)
+
 		return textResult(result), result, nil
 	}
 }
@@ -215,12 +234,15 @@ func writeHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[WriteI
 func editHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[EditInput, *vault.EditResult] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, input EditInput) (*mcp.CallToolResult, *vault.EditResult, error) {
 		done := logToolCall(logger, "vault_edit", slog.String("path", input.Path))
+
 		result, err := v.Edit(input.Path, input.OldText, input.NewText)
 		if err != nil {
 			done(err)
 			return nil, nil, err
 		}
+
 		done(nil)
+
 		return textResult(result), result, nil
 	}
 }
@@ -234,10 +256,14 @@ func deleteHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[Delet
 				Message: "paths must not be empty",
 			}
 			done(err)
+
 			return nil, nil, err
 		}
+
 		result := v.DeleteBatch(input.Paths)
+
 		done(nil)
+
 		return textResult(result), result, nil
 	}
 }
@@ -245,12 +271,15 @@ func deleteHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[Delet
 func moveHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[MoveInput, *vault.MoveResult] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, input MoveInput) (*mcp.CallToolResult, *vault.MoveResult, error) {
 		done := logToolCall(logger, "vault_move", slog.String("source", input.Source), slog.String("destination", input.Destination))
+
 		result, err := v.Move(input.Source, input.Destination)
 		if err != nil {
 			done(err)
 			return nil, nil, err
 		}
+
 		done(nil)
+
 		return textResult(result), result, nil
 	}
 }
@@ -258,12 +287,15 @@ func moveHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[MoveInp
 func copyHandler(v *vault.Vault, logger *slog.Logger) mcp.ToolHandlerFor[CopyInput, *vault.CopyResult] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, input CopyInput) (*mcp.CallToolResult, *vault.CopyResult, error) {
 		done := logToolCall(logger, "vault_copy", slog.String("source", input.Source), slog.String("destination", input.Destination))
+
 		result, err := v.Copy(input.Source, input.Destination)
 		if err != nil {
 			done(err)
 			return nil, nil, err
 		}
+
 		done(nil)
+
 		return textResult(result), result, nil
 	}
 }
@@ -279,6 +311,7 @@ func textResult(v interface{}) *mcp.CallToolResult {
 			IsError: true,
 		}
 	}
+
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: string(data)}},
 	}

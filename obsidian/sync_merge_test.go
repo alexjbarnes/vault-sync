@@ -45,6 +45,7 @@ func TestLiveMergeMD_ServerDeletedReturnsNil(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, vault.WriteFile("del.md", []byte("local"), time.Time{}))
+
 	push := PushMessage{UID: 2}
 
 	err := s.liveMergeMD(ctx, "del.md", push, nil, nil, fakePullDeleted())
@@ -86,9 +87,11 @@ func TestLiveMergeMD_ServerEqualsBase(t *testing.T) {
 	callCount := 0
 	pull := func(ctx context.Context, uid int64) ([]byte, error) {
 		callCount++
+
 		if uid == 10 {
 			return encBase, nil
 		}
+
 		return encServer, nil
 	}
 
@@ -106,6 +109,7 @@ func TestLiveMergeMD_NoBaseServerWinsByMtime(t *testing.T) {
 
 	localContent := []byte("old local")
 	serverContent := []byte("newer server")
+
 	require.NoError(t, vault.WriteFile("mtime.md", localContent, time.Time{}))
 
 	encServer := encryptContent(t, cipher, serverContent)
@@ -127,6 +131,7 @@ func TestLiveMergeMD_NoBaseLocalWinsByMtime(t *testing.T) {
 
 	localContent := []byte("newer local")
 	serverContent := []byte("old server")
+
 	require.NoError(t, vault.WriteFile("local-wins.md", localContent, time.Time{}))
 
 	encServer := encryptContent(t, cipher, serverContent)
@@ -166,6 +171,7 @@ func TestLiveMergeMD_ThreeWayMerge(t *testing.T) {
 		if uid == 100 {
 			return encBase, nil
 		}
+
 		return encServer, nil
 	}
 
@@ -196,9 +202,11 @@ func TestLiveMergeMD_PullBaseError_FallsBackToDownload(t *testing.T) {
 	callCount := 0
 	pull := func(ctx context.Context, uid int64) ([]byte, error) {
 		callCount++
+
 		if uid == 50 {
 			return nil, fmt.Errorf("base unavailable")
 		}
+
 		return encServer, nil
 	}
 
@@ -235,6 +243,7 @@ func TestLiveMergeMD_RecentlyCreatedFileServerWins(t *testing.T) {
 
 	localContent := []byte("new local file")
 	serverContent := []byte("server content")
+
 	require.NoError(t, vault.WriteFile("recent.md", localContent, time.Time{}))
 
 	encServer := encryptContent(t, cipher, serverContent)
@@ -259,6 +268,7 @@ func TestLiveMergeMD_PullServerError(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, vault.WriteFile("pull-err.md", []byte("local"), time.Time{}))
+
 	push := PushMessage{UID: 9}
 
 	err := s.liveMergeMD(ctx, "pull-err.md", push, nil, nil, fakePullError("server down"))
@@ -283,6 +293,7 @@ func TestLiveMergeJSON_ShallowMerge(t *testing.T) {
 	require.NoError(t, err)
 
 	data, _ := vault.ReadFile(".obsidian/app.json")
+
 	var result map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(data, &result))
 
@@ -526,6 +537,7 @@ func TestPersistPushedDelete(t *testing.T) {
 
 	lf, _ := appState.GetLocalFile(testSyncVaultID, "del.md")
 	assert.Nil(t, lf)
+
 	sf, _ := appState.GetServerFile(testSyncVaultID, "del.md")
 	assert.Nil(t, sf)
 }

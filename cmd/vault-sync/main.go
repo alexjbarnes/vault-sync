@@ -52,20 +52,25 @@ func run() error {
 	// before starting any services. This ensures cfg.SyncDir is resolved
 	// before the MCP server reads it, preventing the MCP server from
 	// serving the wrong directory.
-	var syncSetup *syncSetupResult
-	var appState *state.State
+	var (
+		syncSetup *syncSetupResult
+		appState  *state.State
+	)
 
 	if cfg.EnableSync {
 		var err error
+
 		syncSetup, err = setupSync(ctx, cfg, logger)
 		if err != nil {
 			return err
 		}
 		defer syncSetup.cleanup()
+
 		appState = syncSetup.appState
 	} else if cfg.EnableMCP {
 		// MCP-only mode: load state for OAuth persistence.
 		var err error
+
 		appState, err = state.Load()
 		if err != nil {
 			return fmt.Errorf("loading state: %w", err)
@@ -139,10 +144,12 @@ func setupSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*s
 			appState.Close()
 			return nil, fmt.Errorf("determining default sync dir: %w", err)
 		}
+
 		if err := cfg.SetSyncDir(defaultDir); err != nil {
 			appState.Close()
 			return nil, err
 		}
+
 		logger.Info("using default sync dir", slog.String("dir", cfg.SyncDir))
 	}
 
@@ -162,20 +169,25 @@ func setupSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*s
 	)
 
 	logger.Info("deriving encryption key")
+
 	key, err := obsidian.DeriveKey(cfg.VaultPassword, v.Salt)
 	if err != nil {
 		appState.Close()
 		return nil, fmt.Errorf("deriving key: %w", err)
 	}
+
 	keyHash := obsidian.KeyHash(key)
+
 	logger.Debug("key derived")
 
 	cipher, err := obsidian.NewCipherV0(key)
 	if err != nil {
 		obsidian.ZeroKey(key)
 		appState.Close()
+
 		return nil, fmt.Errorf("creating cipher: %w", err)
 	}
+
 	obsidian.ZeroKey(key)
 
 	return &syncSetupResult{
@@ -198,6 +210,7 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, setup
 	if err != nil {
 		return fmt.Errorf("reading vault state: %w", err)
 	}
+
 	logger.Info("sync state",
 		slog.Int64("version", vs.Version),
 		slog.Bool("initial", vs.Initial),
@@ -244,6 +257,7 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, setup
 				logger.Warn("failed to save state", slog.String("error", err.Error()))
 				return
 			}
+
 			logger.Info("state saved", slog.Int64("version", version))
 		},
 	}, logger)
@@ -267,6 +281,7 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, setup
 	if err := reconciler.Phase1(ctx, serverPushes, scan); err != nil {
 		return fmt.Errorf("reconciliation phase 1 failed: %w", err)
 	}
+
 	serverPushes = nil
 
 	sg, sgctx := errgroup.WithContext(ctx)
@@ -279,6 +294,7 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, setup
 	}
 
 	watcher := obsidian.NewWatcher(vaultFS, syncClient, logger, syncFilter)
+
 	sg.Go(func() error {
 		return watcher.Watch(sgctx)
 	})
@@ -297,6 +313,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 	mcpLogger := logger.With(slog.String("service", "mcp"))
 
 	mcpLogger.Info("opening vault", slog.String("path", cfg.SyncDir))
+
 	v, err := vault.New(cfg.SyncDir)
 	if err != nil {
 		return fmt.Errorf("opening vault: %w", err)
@@ -320,6 +337,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 
 	store := auth.NewStore(appState, mcpLogger)
 	defer store.Stop()
+
 	authMiddleware := auth.Middleware(store, cfg.MCPServerURL)
 
 	mux := http.NewServeMux()
@@ -348,8 +366,10 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 	go func() {
 		<-ctx.Done()
 		mcpLogger.Info("shutting down MCP server")
+
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
@@ -361,6 +381,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			return fmt.Errorf("MCP server error: %w", err)
 		}
+
 		return nil
 	})
 	mg.Go(func() error {
@@ -383,43 +404,54 @@ func retryDelay(attempt int) time.Duration {
 	if d > retryMaxDelay {
 		d = retryMaxDelay
 	}
+
 	return d
 }
 
 func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Config, appState *state.State, logger *slog.Logger) (string, *obsidian.VaultListResponse, error) {
 	if token := appState.Token(); token != "" {
 		logger.Debug("trying cached token")
+
 		vaults, err := client.ListVaults(ctx, token)
 		if err == nil && (len(vaults.Vaults) > 0 || len(vaults.Shared) > 0) {
 			logger.Info("authenticated with cached token")
 			return token, vaults, nil
 		}
+
 		logger.Debug("cached token expired, signing in fresh")
 	}
 
-	var err error
-	var authResp *obsidian.SigninResponse
+	var (
+		err      error
+		authResp *obsidian.SigninResponse
+	)
+
 	for attempt := range retryMaxAttempts {
 		logger.Debug("signing in", slog.String("email", cfg.Email))
+
 		authResp, err = client.Signin(ctx, cfg.Email, cfg.Password)
 		if err == nil {
 			break
 		}
+
 		if !obsidian.IsTransient(err) || attempt == retryMaxAttempts-1 {
 			return "", nil, fmt.Errorf("signing in: %w", err)
 		}
+
 		delay := retryDelay(attempt)
 		logger.Warn("signin failed, retrying",
 			slog.String("error", err.Error()),
 			slog.Int("attempt", attempt+1),
 			slog.Duration("backoff", delay),
 		)
+
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
 			return "", nil, ctx.Err()
 		}
 	}
+
 	logger.Info("signed in")
 
 	if err := appState.SetToken(authResp.Token); err != nil {
@@ -432,15 +464,18 @@ func authenticate(ctx context.Context, client *obsidian.Client, cfg *config.Conf
 		if err == nil {
 			break
 		}
+
 		if !obsidian.IsTransient(err) || attempt == retryMaxAttempts-1 {
 			return "", nil, fmt.Errorf("listing vaults: %w", err)
 		}
+
 		delay := retryDelay(attempt)
 		logger.Warn("list vaults failed, retrying",
 			slog.String("error", err.Error()),
 			slog.Int("attempt", attempt+1),
 			slog.Duration("backoff", delay),
 		)
+
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
@@ -463,8 +498,10 @@ func selectVault(vaults *obsidian.VaultListResponse, name string) (*obsidian.Vau
 			if len(vaults.Vaults) == 1 {
 				return &vaults.Vaults[0], nil
 			}
+
 			return &vaults.Shared[0], nil
 		}
+
 		return nil, fmt.Errorf("multiple vaults found, set OBSIDIAN_VAULT_NAME to pick one: %s", vaultNames(vaults))
 	}
 
@@ -473,6 +510,7 @@ func selectVault(vaults *obsidian.VaultListResponse, name string) (*obsidian.Vau
 			return &vaults.Vaults[i], nil
 		}
 	}
+
 	for i := range vaults.Shared {
 		if vaults.Shared[i].Name == name {
 			return &vaults.Shared[i], nil
@@ -487,8 +525,10 @@ func vaultNames(vaults *obsidian.VaultListResponse) string {
 	for _, v := range vaults.Vaults {
 		all = append(all, v.Name)
 	}
+
 	for _, v := range vaults.Shared {
 		all = append(all, v.Name+" (shared)")
 	}
+
 	return strings.Join(all, ", ")
 }

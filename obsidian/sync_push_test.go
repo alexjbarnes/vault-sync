@@ -21,6 +21,7 @@ func withMockConn(t *testing.T, ctrl *gomock.Controller) (*SyncClient, *MockWSCo
 	mock := NewMockWSConn(ctrl)
 	s.conn = mock
 	s.inboundCh = make(chan inboundMsg, 16)
+
 	return s, mock
 }
 
@@ -39,6 +40,7 @@ func feedResponses(s *SyncClient, responses ...string) {
 	go func() {
 		for _, r := range responses {
 			time.Sleep(5 * time.Millisecond)
+
 			s.inboundCh <- inboundMsg{
 				typ:  websocket.MessageText,
 				data: []byte(r),
@@ -62,6 +64,7 @@ func TestExecutePush_Folder(t *testing.T) {
 			assert.True(t, msg.Folder)
 			assert.False(t, msg.Deleted)
 			assert.Empty(t, msg.Extension)
+
 			return nil
 		})
 
@@ -106,12 +109,14 @@ func TestExecutePush_FileContent(t *testing.T) {
 	require.NoError(t, s.vault.WriteFile("test.md", content, time.Time{}))
 
 	writeCount := 0
+
 	mock.EXPECT().Write(gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(ctx context.Context, typ websocket.MessageType, data []byte) error {
 			writeCount++
 			if writeCount == 1 {
 				// First write: push metadata (text)
 				assert.Equal(t, websocket.MessageText, typ)
+
 				var msg ClientPushMessage
 				require.NoError(t, json.Unmarshal(data, &msg))
 				assert.Equal(t, "push", msg.Op)
@@ -124,6 +129,7 @@ func TestExecutePush_FileContent(t *testing.T) {
 				// Second write: binary chunk
 				assert.Equal(t, websocket.MessageBinary, typ)
 			}
+
 			return nil
 		}).Times(2)
 
@@ -253,6 +259,7 @@ func TestExecutePush_FolderReadResponseError(t *testing.T) {
 	// readResponse times out or gets an error via inboundCh.
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		s.inboundCh <- inboundMsg{err: fmt.Errorf("read failed")}
 	}()
 
@@ -279,6 +286,7 @@ func TestExecutePush_ContentMetadataReadResponseError(t *testing.T) {
 	// readResponse after metadata write fails.
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		s.inboundCh <- inboundMsg{err: fmt.Errorf("connection lost")}
 	}()
 
@@ -320,6 +328,7 @@ func TestExecutePush_BinaryChunkWriteError(t *testing.T) {
 	content := []byte("chunk data")
 
 	writeCount := 0
+
 	mock.EXPECT().Write(gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(ctx context.Context, typ websocket.MessageType, data []byte) error {
 			writeCount++
@@ -353,6 +362,7 @@ func TestExecutePush_ChunkAckReadResponseError(t *testing.T) {
 	content := []byte("ack fails")
 
 	writeCount := 0
+
 	mock.EXPECT().Write(gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(ctx context.Context, typ websocket.MessageType, data []byte) error {
 			writeCount++
@@ -362,8 +372,11 @@ func TestExecutePush_ChunkAckReadResponseError(t *testing.T) {
 	// Response to metadata: "next". Then chunk ack fails.
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		s.inboundCh <- inboundMsg{typ: websocket.MessageText, data: []byte(`{"res":"next"}`)}
+
 		time.Sleep(5 * time.Millisecond)
+
 		s.inboundCh <- inboundMsg{err: fmt.Errorf("ack lost")}
 	}()
 
@@ -387,6 +400,7 @@ func TestExecutePush_DeleteReadResponseError(t *testing.T) {
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
+
 		s.inboundCh <- inboundMsg{err: fmt.Errorf("read failed")}
 	}()
 
@@ -413,6 +427,7 @@ func TestExecutePush_MultiPieceUpload(t *testing.T) {
 	}
 
 	var writeCount int
+
 	mock.EXPECT().Write(gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(ctx context.Context, typ websocket.MessageType, data []byte) error {
 			writeCount++
@@ -454,6 +469,7 @@ func TestExecutePush_EmptyContentFile(t *testing.T) {
 			require.NoError(t, json.Unmarshal(data, &msg))
 			assert.Equal(t, int64(0), msg.Size)
 			assert.Equal(t, 0, msg.Pieces)
+
 			return nil
 		})
 
@@ -480,6 +496,7 @@ func TestExecutePush_ExtensionExtracted(t *testing.T) {
 			var msg ClientPushMessage
 			require.NoError(t, json.Unmarshal(data, &msg))
 			assert.Equal(t, "json", msg.Extension)
+
 			return nil
 		})
 

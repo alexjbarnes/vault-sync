@@ -62,6 +62,7 @@ func (idx *Index) Build() error {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
+
 			return nil
 		}
 
@@ -91,6 +92,7 @@ func (idx *Index) Build() error {
 		}
 
 		entries[rel] = entry
+
 		return nil
 	})
 	if err != nil {
@@ -100,6 +102,7 @@ func (idx *Index) Build() error {
 	idx.mu.Lock()
 	idx.entries = entries
 	idx.mu.Unlock()
+
 	return nil
 }
 
@@ -112,6 +115,7 @@ func (idx *Index) AllFiles() []FileEntry {
 	for _, e := range idx.entries {
 		result = append(result, *e)
 	}
+
 	return result
 }
 
@@ -119,11 +123,14 @@ func (idx *Index) AllFiles() []FileEntry {
 func (idx *Index) Get(path string) *FileEntry {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
+
 	e := idx.entries[path]
 	if e == nil {
 		return nil
 	}
+
 	copy := *e
+
 	return &copy
 }
 
@@ -138,6 +145,7 @@ func (idx *Index) Update(relPath string) {
 		idx.mu.Lock()
 		delete(idx.entries, relPath)
 		idx.mu.Unlock()
+
 		return
 	}
 

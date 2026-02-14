@@ -245,7 +245,9 @@ func (s *SyncClient) handshake(ctx context.Context, conn wsConn) error {
 		if msg == "" {
 			msg = initResp.Res
 		}
+
 		s.conn.Close(websocket.StatusNormalClosure, "auth failed")
+
 		return fmt.Errorf("auth failed: %s", msg)
 	}
 
@@ -261,11 +263,13 @@ func (s *SyncClient) handshake(ctx context.Context, conn wsConn) error {
 	if readLimit < 4*1024*1024 {
 		readLimit = 4 * 1024 * 1024
 	}
+
 	s.conn.SetReadLimit(readLimit)
 	s.logger.Info("websocket authenticated",
 		slog.Int("user_id", initResp.UserID),
 		slog.Int("per_file_max", initResp.PerFileMax),
 	)
+
 	return nil
 }
 
@@ -278,15 +282,19 @@ func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPus
 	// timeout our connection while replaying missed pushes.
 	pingTicker := time.NewTicker(heartbeatCheckAt)
 	pingDone := make(chan struct{})
+
 	var pingWg sync.WaitGroup
 	pingWg.Add(1)
+
 	defer func() {
 		pingTicker.Stop()
 		close(pingDone)
 		pingWg.Wait()
 	}()
+
 	go func() {
 		defer pingWg.Done()
+
 		for {
 			select {
 			case <-pingDone:
@@ -301,9 +309,11 @@ func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPus
 					return
 				default:
 				}
+
 				s.lastMsgMu.Lock()
 				elapsed := time.Since(s.lastMessage)
 				s.lastMsgMu.Unlock()
+
 				if elapsed > pingAfter {
 					if err := s.writeJSON(ctx, map[string]string{"op": "ping"}); err != nil {
 						return
@@ -318,6 +328,7 @@ func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPus
 		if err != nil {
 			return fmt.Errorf("reading message: %w", err)
 		}
+
 		s.touchLastMessage()
 
 		if typ == websocket.MessageBinary {
@@ -340,9 +351,11 @@ func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPus
 			if err := json.Unmarshal(data, &readyMsg); err != nil {
 				return fmt.Errorf("decoding ready message: %w", err)
 			}
+
 			if readyMsg.Version > s.version {
 				s.version = readyMsg.Version
 			}
+
 			s.initial = false
 			s.setConnected(true)
 			s.logger.Info("server ready",
@@ -353,6 +366,7 @@ func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPus
 			if s.onReady != nil {
 				s.onReady(s.version)
 			}
+
 			return nil
 
 		case "push":
@@ -361,17 +375,21 @@ func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPus
 				s.logger.Warn("failed to decode push", slog.String("error", err.Error()))
 				continue
 			}
+
 			if push.UID > s.version {
 				s.version = push.UID
 			}
+
 			sp, err := s.decryptPush(push)
 			if err != nil {
 				s.logger.Warn("decrypting queued push",
 					slog.Int64("uid", push.UID),
 					slog.String("error", err.Error()),
 				)
+
 				continue
 			}
+
 			*serverPushes = append(*serverPushes, sp)
 
 		default:
@@ -393,6 +411,7 @@ func (s *SyncClient) startReader(connCtx context.Context) {
 	// during reconnect. The old reader goroutine uses the old conn;
 	// the new reader goroutine uses the new conn.
 	conn := s.conn
+
 	go func() {
 		for {
 			typ, data, err := conn.Read(connCtx)
@@ -401,6 +420,7 @@ func (s *SyncClient) startReader(connCtx context.Context) {
 			case <-connCtx.Done():
 				return
 			}
+
 			if err != nil {
 				return
 			}
@@ -431,6 +451,7 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+
 		if isPermanentError(err) {
 			return fmt.Errorf("permanent error: %w", err)
 		}
@@ -441,6 +462,7 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 		)
 
 		jitter := time.Duration(rand.Int64N(int64(backoff) / 2)) //nolint:gosec // G404: math/rand is fine for reconnect jitter, no security impact
+
 		timer := time.NewTimer(backoff + jitter)
 		select {
 		case <-ctx.Done():
@@ -453,14 +475,17 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+
 			if isPermanentError(err) {
 				return fmt.Errorf("permanent reconnect error: %w", err)
 			}
+
 			s.logger.Warn("reconnect failed",
 				slog.String("error", err.Error()),
 				slog.Duration("backoff", backoff),
 			)
 			backoff = min(backoff*2, reconnectMax)
+
 			continue
 		}
 
@@ -470,6 +495,7 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 		s.startReader(connCtx)
 
 		backoff = reconnectMin
+
 		s.logger.Info("reconnected")
 	}
 }
@@ -488,6 +514,7 @@ func (s *SyncClient) eventLoop(ctx context.Context, connCtx context.Context) err
 			if msg.err != nil {
 				return fmt.Errorf("reading message: %w", msg.err)
 			}
+
 			s.touchLastMessage()
 
 			if msg.typ == websocket.MessageBinary {
@@ -498,6 +525,7 @@ func (s *SyncClient) eventLoop(ctx context.Context, connCtx context.Context) err
 			if err := s.handleInbound(ctx, msg.data); err != nil {
 				return err
 			}
+
 			s.drainPendingPulls(ctx)
 
 		case op := <-s.opCh:
@@ -506,6 +534,7 @@ func (s *SyncClient) eventLoop(ctx context.Context, connCtx context.Context) err
 				// its result. Return to trigger reconnect.
 				return err
 			}
+
 			s.drainPendingPulls(ctx)
 
 		case <-ticker.C:
@@ -517,6 +546,7 @@ func (s *SyncClient) eventLoop(ctx context.Context, connCtx context.Context) err
 				s.persistVersionIfDirty()
 				s.logger.Warn("connection timed out, closing")
 				s.conn.Close(websocket.StatusGoingAway, "timeout")
+
 				return fmt.Errorf("heartbeat timeout")
 			}
 
@@ -557,16 +587,19 @@ func (s *SyncClient) handleInbound(ctx context.Context, data []byte) error {
 			s.logger.Warn("failed to decode push", slog.String("error", err.Error()))
 			return nil
 		}
+
 		if push.UID > s.version {
 			s.version = push.UID
 			s.versionDirty = true
 		}
+
 		if err := s.processPush(ctx, push); err != nil {
 			s.logger.Warn("processing push",
 				slog.Int64("uid", push.UID),
 				slog.String("error", err.Error()),
 			)
 		}
+
 		return nil
 
 	default:
@@ -588,6 +621,7 @@ func (s *SyncClient) handlePushOp(ctx context.Context, op syncOp) error {
 	if err != nil && !s.isOperationError(err) {
 		return err
 	}
+
 	return nil
 }
 
@@ -599,6 +633,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 			slog.String("path", op.path),
 			slog.Duration("wait", time.Until(backoff)),
 		)
+
 		return nil
 	}
 
@@ -609,11 +644,13 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	}
 
 	ext := ""
+
 	if !op.isFolder {
 		base := op.path
 		if slashIdx := strings.LastIndex(op.path, "/"); slashIdx >= 0 {
 			base = op.path[slashIdx+1:]
 		}
+
 		if dotIdx := strings.LastIndex(base, "."); dotIdx > 0 && dotIdx < len(base)-1 {
 			ext = strings.ToLower(base[dotIdx+1:])
 		}
@@ -657,6 +694,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 			slog.Bool("deleted", op.isDeleted),
 		)
 		s.clearRetryBackoff(op.path)
+
 		return nil
 	}
 
@@ -668,6 +706,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 			slog.Int("limit", s.perFileMax),
 		)
 		s.clearRetryBackoff(op.path)
+
 		return nil
 	}
 
@@ -684,6 +723,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 
 	h := sha256.Sum256(op.content)
 	hashHex := hex.EncodeToString(h[:])
+
 	encHash, err := s.cipher.EncryptPath(hashHex)
 	if err != nil {
 		s.recordRetryBackoff(op.path)
@@ -716,6 +756,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	if err := s.writeJSON(ctx, msg); err != nil {
 		s.recordRetryBackoff(op.path)
 		s.removeHashCache(op.path)
+
 		return fmt.Errorf("sending push metadata: %w", err)
 	}
 
@@ -723,6 +764,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	if err != nil {
 		s.recordRetryBackoff(op.path)
 		s.removeHashCache(op.path)
+
 		return err
 	}
 
@@ -730,6 +772,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	if err := json.Unmarshal(rawResp, &resp); err != nil {
 		s.recordRetryBackoff(op.path)
 		s.removeHashCache(op.path)
+
 		return fmt.Errorf("decoding push response: %w", err)
 	}
 
@@ -738,6 +781,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	if resp.Err != "" {
 		s.recordRetryBackoff(op.path)
 		s.removeHashCache(op.path)
+
 		return fmt.Errorf("server rejected push for %s: %s", op.path, resp.Err)
 	}
 
@@ -745,12 +789,14 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	if resp.Res == "ok" || resp.Op == "ok" {
 		s.logger.Debug("push skipped, unchanged", slog.String("path", op.path))
 		s.clearRetryBackoff(op.path)
+
 		return nil
 	}
 
 	// Send binary chunks, waiting for ack after each.
 	for i := 0; i < pieces; i++ {
 		start := i * chunkSize
+
 		end := start + chunkSize
 		if end > len(encContent) {
 			end = len(encContent)
@@ -759,12 +805,14 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 		if err := s.conn.Write(ctx, websocket.MessageBinary, encContent[start:end]); err != nil {
 			s.recordRetryBackoff(op.path)
 			s.removeHashCache(op.path)
+
 			return fmt.Errorf("sending chunk %d/%d: %w", i+1, pieces, err)
 		}
 
 		if _, err := s.readResponse(ctx); err != nil {
 			s.recordRetryBackoff(op.path)
 			s.removeHashCache(op.path)
+
 			return err
 		}
 	}
@@ -776,6 +824,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 		slog.Int("bytes", len(op.content)),
 	)
 	s.clearRetryBackoff(op.path)
+
 	return nil
 }
 
@@ -794,6 +843,7 @@ func (s *SyncClient) readResponse(ctx context.Context) (json.RawMessage, error) 
 			if msg.err != nil {
 				return nil, fmt.Errorf("reading response: %w", msg.err)
 			}
+
 			s.touchLastMessage()
 
 			// Any message from the server proves the connection is alive.
@@ -805,6 +855,7 @@ func (s *SyncClient) readResponse(ctx context.Context) (json.RawMessage, error) 
 				default:
 				}
 			}
+
 			timeout.Reset(responseTimeout)
 
 			if msg.typ == websocket.MessageBinary {
@@ -859,6 +910,7 @@ func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 		s.logger.Warn("failed to decode push while busy", slog.String("error", err.Error()))
 		return
 	}
+
 	if push.UID > s.version {
 		s.version = push.UID
 		s.versionDirty = true
@@ -869,6 +921,7 @@ func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 		s.logger.Warn("decrypting push path while busy", slog.String("error", err.Error()))
 		return
 	}
+
 	path = normalizePath(path)
 
 	local, encLocalHash := s.resolveLocalState(path)
@@ -881,10 +934,12 @@ func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 
 	case DecisionDeleteLocal:
 		s.logger.Info("delete (while busy)", slog.String("path", path))
+
 		if push.Folder {
 			if err := s.vault.DeleteEmptyDir(path); err != nil {
 				s.logger.Info("folder not empty, skipping delete (while busy)", slog.String("path", path))
 				s.persistServerFile(path, push, true)
+
 				return
 			}
 		} else {
@@ -892,6 +947,7 @@ func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 				s.logger.Warn("delete failed (while busy)", slog.String("path", path), slog.String("error", err.Error()))
 			}
 		}
+
 		s.removeHashCache(path)
 		s.persistServerFile(path, push, true)
 		s.deleteLocalState(path)
@@ -944,6 +1000,7 @@ func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
 	if err != nil {
 		return fmt.Errorf("decrypting path: %w", err)
 	}
+
 	path = normalizePath(path)
 
 	if s.filter != nil && !s.filter.AllowPath(path) {
@@ -978,10 +1035,12 @@ func (s *SyncClient) executeLiveDecision(ctx context.Context, decision Reconcile
 
 	case DecisionDeleteLocal:
 		s.logger.Info("delete", slog.String("path", path))
+
 		if push.Folder {
 			if err := s.vault.DeleteEmptyDir(path); err != nil {
 				s.logger.Info("folder not empty, skipping delete", slog.String("path", path))
 				s.persistServerFile(path, push, true)
+
 				return nil
 			}
 		} else {
@@ -989,14 +1048,17 @@ func (s *SyncClient) executeLiveDecision(ctx context.Context, decision Reconcile
 				s.logger.Warn("delete failed", slog.String("path", path), slog.String("error", err.Error()))
 			}
 		}
+
 		s.removeHashCache(path)
 		s.persistServerFile(path, push, true)
 		s.deleteLocalState(path)
+
 		return nil
 
 	case DecisionKeepLocal:
 		s.logger.Info("keeping local, server deleted", slog.String("path", path))
 		s.persistServerFile(path, push, true)
+
 		return nil
 
 	case DecisionMergeMD:
@@ -1018,11 +1080,14 @@ func (s *SyncClient) executeLiveDecision(ctx context.Context, decision Reconcile
 func (s *SyncClient) liveDownload(ctx context.Context, path string, push PushMessage, pull pullFunc) error {
 	if push.Folder {
 		s.logger.Info("mkdir", slog.String("path", path))
+
 		if err := s.vault.MkdirAll(path); err != nil {
 			return err
 		}
+
 		s.persistServerFile(path, push, false)
 		s.persistLocalFolder(path)
+
 		return nil
 	}
 
@@ -1033,10 +1098,12 @@ func (s *SyncClient) liveDownload(ctx context.Context, path string, push PushMes
 	if err != nil {
 		return fmt.Errorf("pulling %s (uid %d): %w", path, push.UID, err)
 	}
+
 	if content == nil {
 		s.logger.Info("skip deleted content", slog.String("path", path))
 		s.persistServerFile(path, push, true)
 		s.deleteLocalState(path)
+
 		return nil
 	}
 
@@ -1060,6 +1127,7 @@ func (s *SyncClient) liveDownload(ctx context.Context, path string, push PushMes
 
 	contentH := sha256.Sum256(plaintext)
 	contentHash := hex.EncodeToString(contentH[:])
+
 	s.hashCacheMu.Lock()
 	s.hashCache[path] = hashEntry{
 		encHash:     push.Hash,
@@ -1074,6 +1142,7 @@ func (s *SyncClient) liveDownload(ctx context.Context, path string, push PushMes
 		slog.String("path", path),
 		slog.Int("bytes", len(plaintext)),
 	)
+
 	return nil
 }
 
@@ -1085,6 +1154,7 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 		if err == nil && encSyncHash == push.Hash {
 			s.logger.Debug("server matches last push, skip merge", slog.String("path", path))
 			s.persistServerFile(path, push, false)
+
 			return nil
 		}
 	}
@@ -1093,10 +1163,12 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 	if err != nil {
 		return fmt.Errorf("reading local file for merge: %w", err)
 	}
+
 	localText := string(localContent)
 
 	// Get base version (previous server state).
 	baseText := ""
+
 	if prev != nil && prev.UID > 0 {
 		baseEnc, err := pull(ctx, prev.UID)
 		if err != nil {
@@ -1104,8 +1176,10 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 				slog.String("path", path),
 				slog.String("error", err.Error()),
 			)
+
 			return s.liveDownload(ctx, path, push, pull)
 		}
+
 		if len(baseEnc) > 0 {
 			basePlain, err := s.cipher.DecryptContent(baseEnc)
 			if err != nil {
@@ -1113,8 +1187,10 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 					slog.String("path", path),
 					slog.String("error", err.Error()),
 				)
+
 				return s.liveDownload(ctx, path, push, pull)
 			}
+
 			baseText = string(basePlain)
 		}
 	}
@@ -1124,18 +1200,22 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 	if err != nil {
 		return fmt.Errorf("pulling server version for merge: %w", err)
 	}
+
 	if serverEnc == nil {
 		s.persistServerFile(path, push, true)
 		s.deleteLocalState(path)
+
 		return nil
 	}
 
 	var serverText string
+
 	if len(serverEnc) > 0 {
 		serverPlain, err := s.cipher.DecryptContent(serverEnc)
 		if err != nil {
 			return fmt.Errorf("decrypting server version for merge: %w", err)
 		}
+
 		serverText = string(serverPlain)
 	}
 
@@ -1144,6 +1224,7 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 		s.persistServerFile(path, push, false)
 		return nil
 	}
+
 	if serverText == "" {
 		s.persistServerFile(path, push, false)
 		return nil
@@ -1160,6 +1241,7 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 			if age < 0 {
 				age = -age
 			}
+
 			if age < 180_000 {
 				s.logger.Info("merge: no base, recently created, server wins", slog.String("path", path))
 				return s.liveWriteContent(path, push, []byte(serverText))
@@ -1170,23 +1252,29 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 		if local != nil {
 			localMtime = local.MTime
 		}
+
 		if push.MTime > localMtime {
 			s.logger.Info("merge: no base, server wins by mtime", slog.String("path", path))
 			return s.liveWriteContent(path, push, []byte(serverText))
 		}
+
 		s.logger.Info("merge: no base, local wins by mtime", slog.String("path", path))
 		s.persistServerFile(path, push, false)
+
 		return nil
 	}
 
 	// Full three-way merge.
 	dmp := diffmatchpatch.New()
+
 	diffs := dmp.DiffMain(baseText, localText, true)
 	if len(diffs) > 2 {
 		diffs = dmp.DiffCleanupSemantic(diffs)
 		diffs = dmp.DiffCleanupEfficiency(diffs)
 	}
+
 	patches := dmp.PatchMake(baseText, diffs)
+
 	merged, applied := dmp.PatchApply(patches, serverText)
 	for i, ok := range applied {
 		if !ok {
@@ -1198,6 +1286,7 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 	}
 
 	s.logger.Info("merge: three-way", slog.String("path", path))
+
 	return s.liveWriteContent(path, push, []byte(merged))
 }
 
@@ -1217,9 +1306,11 @@ func (s *SyncClient) liveMergeJSON(ctx context.Context, path string, push PushMe
 	if err != nil {
 		return fmt.Errorf("pulling server config for merge: %w", err)
 	}
+
 	if serverEnc == nil {
 		s.persistServerFile(path, push, true)
 		s.deleteLocalState(path)
+
 		return nil
 	}
 
@@ -1246,6 +1337,7 @@ func (s *SyncClient) liveMergeJSON(ctx context.Context, path string, push PushMe
 	}
 
 	s.logger.Info("merge: JSON", slog.String("path", path))
+
 	return s.liveWriteContent(path, push, merged)
 }
 
@@ -1257,21 +1349,25 @@ func (s *SyncClient) liveTypeConflict(ctx context.Context, path string, push Pus
 			slog.String("from", path),
 			slog.String("to", cp),
 		)
+
 		if err := s.vault.Rename(path, cp); err != nil {
 			s.logger.Warn("failed to rename folder for type conflict",
 				slog.String("path", path),
 				slog.String("error", err.Error()),
 			)
 		}
+
 		return s.liveDownload(ctx, path, push, pull)
 	}
 
 	// Local is file, server wants a folder. Save local to conflict copy.
 	ext := extractExtension(path)
+
 	dotExt := ""
 	if ext != "" {
 		dotExt = "." + ext
 	}
+
 	base := strings.TrimSuffix(path, dotExt)
 	cp := conflictCopyPath(base, dotExt)
 
@@ -1284,9 +1380,11 @@ func (s *SyncClient) liveTypeConflict(ctx context.Context, path string, push Pus
 	if err != nil {
 		return fmt.Errorf("reading local file for conflict copy: %w", err)
 	}
+
 	if err := s.vault.WriteFile(cp, content, time.Time{}); err != nil {
 		return fmt.Errorf("writing conflict copy %s: %w", cp, err)
 	}
+
 	if err := s.vault.DeleteFile(path); err != nil {
 		s.logger.Warn("delete after conflict copy failed", slog.String("path", path), slog.String("error", err.Error()))
 	}
@@ -1305,6 +1403,7 @@ func (s *SyncClient) liveWriteContent(path string, push PushMessage, plaintext [
 	if push.MTime > 0 {
 		mtime = time.UnixMilli(push.MTime)
 	}
+
 	if err := s.vault.WriteFile(path, plaintext, mtime); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
@@ -1326,6 +1425,7 @@ func (s *SyncClient) liveWriteContent(path string, push PushMessage, plaintext [
 		slog.String("path", path),
 		slog.Int("bytes", len(plaintext)),
 	)
+
 	return nil
 }
 
@@ -1335,7 +1435,9 @@ func (s *SyncClient) decryptPush(push PushMessage) (ServerPush, error) {
 	if err != nil {
 		return ServerPush{}, fmt.Errorf("decrypting path: %w", err)
 	}
+
 	path = normalizePath(path)
+
 	return ServerPush{Msg: push, Path: path}, nil
 }
 
@@ -1355,8 +1457,10 @@ func (s *SyncClient) persistServerFile(path string, push PushMessage, deleted bo
 				slog.String("error", err.Error()),
 			)
 		}
+
 		return
 	}
+
 	sf := state.ServerFile{
 		Path:   path,
 		Hash:   push.Hash,
@@ -1385,9 +1489,12 @@ func (s *SyncClient) persistLocalFileAfterWrite(path, contentHash string) {
 			slog.String("path", path),
 			slog.String("error", err.Error()),
 		)
+
 		return
 	}
+
 	now := time.Now().UnixMilli()
+
 	lf := state.LocalFile{
 		Path:     path,
 		MTime:    info.ModTime().UnixMilli(),
@@ -1409,6 +1516,7 @@ func (s *SyncClient) persistLocalFileAfterWrite(path, contentHash string) {
 // persistLocalFolder records the local state for a directory.
 func (s *SyncClient) persistLocalFolder(path string) {
 	now := time.Now().UnixMilli()
+
 	lf := state.LocalFile{
 		Path:     path,
 		MTime:    now,
@@ -1436,9 +1544,13 @@ func (s *SyncClient) persistPushedFile(path string, content []byte, encHash stri
 	now := time.Now().UnixMilli()
 
 	info, err := s.vault.Stat(path)
-	var size int64
-	var fileMtime int64
-	var fileCt int64
+
+	var (
+		size      int64
+		fileMtime int64
+		fileCt    int64
+	)
+
 	if err == nil {
 		size = info.Size()
 		fileMtime = info.ModTime().UnixMilli()
@@ -1469,6 +1581,7 @@ func (s *SyncClient) persistPushedFile(path string, content []byte, encHash stri
 // persistPushedFolder records state after we successfully pushed a folder.
 func (s *SyncClient) persistPushedFolder(path string) {
 	now := time.Now().UnixMilli()
+
 	lf := state.LocalFile{
 		Path:     path,
 		Folder:   true,
@@ -1503,6 +1616,7 @@ func (s *SyncClient) persistPushedDelete(path string) {
 			slog.String("error", err.Error()),
 		)
 	}
+
 	s.deleteLocalState(path)
 }
 
@@ -1528,8 +1642,10 @@ func (s *SyncClient) ServerFileState(path string) *state.ServerFile {
 			slog.String("path", path),
 			slog.String("error", err.Error()),
 		)
+
 		return nil
 	}
+
 	return sf
 }
 
@@ -1543,7 +1659,9 @@ func (s *SyncClient) resolveLocalState(path string) (*state.LocalFile, string) {
 		if os.IsNotExist(err) {
 			return nil, ""
 		}
+
 		s.logger.Warn("stat for reconcile", slog.String("path", path), slog.String("error", err.Error()))
+
 		return nil, ""
 	}
 
@@ -1560,6 +1678,7 @@ func (s *SyncClient) resolveLocalState(path string) (*state.LocalFile, string) {
 			Folder: true,
 			MTime:  info.ModTime().UnixMilli(),
 		}
+
 		return &lf, ""
 	}
 
@@ -1572,10 +1691,12 @@ func (s *SyncClient) resolveLocalState(path string) (*state.LocalFile, string) {
 		if ctime > 0 {
 			persisted.CTime = ctime
 		}
+
 		enc, err := s.cipher.EncryptPath(persisted.Hash)
 		if err != nil {
 			return persisted, ""
 		}
+
 		return persisted, enc
 	}
 
@@ -1583,10 +1704,13 @@ func (s *SyncClient) resolveLocalState(path string) (*state.LocalFile, string) {
 	content, err := s.vault.ReadFile(path)
 	if err != nil {
 		s.logger.Warn("reading file for hash", slog.String("path", path), slog.String("error", err.Error()))
+
 		if persisted != nil {
 			return persisted, ""
 		}
+
 		lf := state.LocalFile{Path: path, MTime: mtime, CTime: ctime, Size: size}
+
 		return &lf, ""
 	}
 
@@ -1609,6 +1733,7 @@ func (s *SyncClient) resolveLocalState(path string) (*state.LocalFile, string) {
 	if err != nil {
 		return &lf, ""
 	}
+
 	return &lf, enc
 }
 
@@ -1628,6 +1753,7 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 	// Read from inboundCh until we get the pull response. Pongs and
 	// server pushes may arrive in between.
 	var resp PullResponse
+
 	for {
 		raw, err := s.readInbound(ctx)
 		if err != nil {
@@ -1638,6 +1764,7 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 		if op == "pong" {
 			continue
 		}
+
 		if op == "push" {
 			s.handlePushWhileBusy(ctx, raw.data)
 			continue
@@ -1646,6 +1773,7 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 		if err := json.Unmarshal(raw.data, &resp); err != nil {
 			return nil, fmt.Errorf("decoding pull response: %w", err)
 		}
+
 		break
 	}
 
@@ -1658,9 +1786,11 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 	if maxSize == 0 {
 		maxSize = 10 * 1024 * 1024
 	}
+
 	if resp.Size > maxSize {
 		return nil, fmt.Errorf("pull response size %d exceeds limit %d", resp.Size, maxSize)
 	}
+
 	maxPieces := int(resp.Size)/chunkSize + 1
 	if resp.Pieces < 0 || resp.Pieces > maxPieces {
 		return nil, fmt.Errorf("pull response pieces %d out of range [0, %d] for size %d", resp.Pieces, maxPieces, resp.Size)
@@ -1675,6 +1805,7 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading piece %d/%d: %w", i+1, resp.Pieces, err)
 		}
+
 		if raw.typ != websocket.MessageBinary {
 			// Text frame during binary transfer. Could be a pong or push.
 			op := gjson.GetBytes(raw.data, "op").Str
@@ -1682,16 +1813,22 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 				i-- // retry this piece
 				continue
 			}
+
 			if op == "push" {
 				s.handlePushWhileBusy(ctx, raw.data)
+
 				i-- // retry this piece
+
 				continue
 			}
+
 			return nil, fmt.Errorf("expected binary frame, got text: %s", string(raw.data))
 		}
+
 		if int64(len(content))+int64(len(raw.data)) > maxSize {
 			return nil, fmt.Errorf("pull data exceeds declared size %d", resp.Size)
 		}
+
 		content = append(content, raw.data...)
 	}
 
@@ -1708,7 +1845,9 @@ func (s *SyncClient) readInbound(ctx context.Context) (inboundMsg, error) {
 		if msg.err != nil {
 			return msg, msg.err
 		}
+
 		s.touchLastMessage()
+
 		return msg, nil
 	case <-timer.C:
 		return inboundMsg{}, errResponseTimeout
@@ -1751,9 +1890,11 @@ func (s *SyncClient) ContentHash(relPath string) string {
 	s.hashCacheMu.Lock()
 	entry, ok := s.hashCache[relPath]
 	s.hashCacheMu.Unlock()
+
 	if !ok {
 		return ""
 	}
+
 	return entry.contentHash
 }
 
@@ -1774,6 +1915,7 @@ func (s *SyncClient) Connected() bool {
 	s.connectedMu.RLock()
 	v := s.connected
 	s.connectedMu.RUnlock()
+
 	return v
 }
 
@@ -1781,6 +1923,7 @@ func (s *SyncClient) Connected() bool {
 // push operation (encryption failure, etc.) rather than connection-level.
 func (s *SyncClient) isOperationError(err error) bool {
 	msg := err.Error()
+
 	return strings.Contains(msg, "encrypting path") ||
 		strings.Contains(msg, "encrypting content") ||
 		strings.Contains(msg, "encrypting hash")
@@ -1791,9 +1934,11 @@ func (s *SyncClient) Close() error {
 	if s.connCancel != nil {
 		s.connCancel()
 	}
+
 	if s.conn != nil {
 		return s.conn.Close(websocket.StatusNormalClosure, "bye")
 	}
+
 	return nil
 }
 
@@ -1877,6 +2022,7 @@ func (s *SyncClient) processPushDirect(ctx context.Context, push PushMessage) er
 	if err != nil {
 		return fmt.Errorf("decrypting path: %w", err)
 	}
+
 	path = normalizePath(path)
 
 	if s.filter != nil && !s.filter.AllowPath(path) {
@@ -1903,11 +2049,13 @@ func (s *SyncClient) pullDirect(ctx context.Context, uid int64) ([]byte, error) 
 	}
 
 	var resp PullResponse
+
 	for {
 		typ, data, err := s.conn.Read(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("reading pull response: %w", err)
 		}
+
 		s.touchLastMessage()
 
 		if typ == websocket.MessageBinary {
@@ -1919,6 +2067,7 @@ func (s *SyncClient) pullDirect(ctx context.Context, uid int64) ([]byte, error) 
 		if op == "pong" {
 			continue
 		}
+
 		if op == "push" {
 			s.handlePushWhileBusy(ctx, data)
 			continue
@@ -1927,6 +2076,7 @@ func (s *SyncClient) pullDirect(ctx context.Context, uid int64) ([]byte, error) 
 		if err := json.Unmarshal(data, &resp); err != nil {
 			return nil, fmt.Errorf("decoding pull response: %w", err)
 		}
+
 		break
 	}
 
@@ -1938,9 +2088,11 @@ func (s *SyncClient) pullDirect(ctx context.Context, uid int64) ([]byte, error) 
 	if maxSize == 0 {
 		maxSize = 10 * 1024 * 1024
 	}
+
 	if resp.Size > maxSize {
 		return nil, fmt.Errorf("pull response size %d exceeds limit %d", resp.Size, maxSize)
 	}
+
 	maxPieces := int(resp.Size)/chunkSize + 1
 	if resp.Pieces < 0 || resp.Pieces > maxPieces {
 		return nil, fmt.Errorf("pull response pieces %d out of range [0, %d] for size %d", resp.Pieces, maxPieces, resp.Size)
@@ -1952,6 +2104,7 @@ func (s *SyncClient) pullDirect(ctx context.Context, uid int64) ([]byte, error) 
 		if err != nil {
 			return nil, fmt.Errorf("reading piece %d/%d: %w", i+1, resp.Pieces, err)
 		}
+
 		s.touchLastMessage()
 
 		if typ != websocket.MessageBinary {
@@ -1960,16 +2113,22 @@ func (s *SyncClient) pullDirect(ctx context.Context, uid int64) ([]byte, error) 
 				i--
 				continue
 			}
+
 			if op == "push" {
 				s.handlePushWhileBusy(ctx, data)
+
 				i--
+
 				continue
 			}
+
 			return nil, fmt.Errorf("expected binary frame, got text: %s", string(data))
 		}
+
 		if int64(len(content))+int64(len(data)) > maxSize {
 			return nil, fmt.Errorf("pull data exceeds declared size %d", resp.Size)
 		}
+
 		content = append(content, data...)
 	}
 
@@ -1981,7 +2140,9 @@ func isPermanentError(err error) bool {
 	if err == nil {
 		return false
 	}
+
 	msg := err.Error()
+
 	return strings.Contains(msg, "auth failed") ||
 		strings.Contains(msg, "subscription") ||
 		strings.Contains(msg, "Vault not found")
@@ -2001,7 +2162,9 @@ func (s *SyncClient) persistVersionIfDirty() {
 	if !s.versionDirty {
 		return
 	}
+
 	s.versionDirty = false
+
 	vs := state.VaultState{
 		Version: s.version,
 		Initial: s.initial,
@@ -2010,8 +2173,10 @@ func (s *SyncClient) persistVersionIfDirty() {
 		s.logger.Warn("failed to persist version",
 			slog.String("error", err.Error()),
 		)
+
 		return
 	}
+
 	s.logger.Debug("version persisted", slog.Int64("version", s.version))
 }
 
@@ -2033,15 +2198,18 @@ func (s *SyncClient) checkRetryBackoff(path string) (time.Time, bool) {
 	if shift > 10 {
 		shift = 10
 	}
+
 	delay := 5 * time.Second * time.Duration(1<<shift)
 	if delay > 5*time.Minute {
 		delay = 5 * time.Minute
 	}
+
 	waitUntil := entry.lastFailure.Add(delay)
 
 	if time.Now().Before(waitUntil) {
 		return waitUntil, true
 	}
+
 	return time.Time{}, false
 }
 
@@ -2060,6 +2228,7 @@ func (s *SyncClient) recordRetryBackoff(path string) {
 func (s *SyncClient) clearRetryBackoff(path string) {
 	s.retryBackoffMu.Lock()
 	defer s.retryBackoffMu.Unlock()
+
 	delete(s.retryBackoff, path)
 }
 
@@ -2070,6 +2239,7 @@ func (s *SyncClient) writeJSON(ctx context.Context, v interface{}) error {
 	if err != nil {
 		return fmt.Errorf("marshalling message: %w", err)
 	}
+
 	return s.conn.Write(ctx, websocket.MessageText, data)
 }
 
@@ -2080,6 +2250,8 @@ func (s *SyncClient) readJSON(ctx context.Context, v interface{}) error {
 	if err != nil {
 		return fmt.Errorf("reading message: %w", err)
 	}
+
 	s.touchLastMessage()
+
 	return json.Unmarshal(data, v)
 }

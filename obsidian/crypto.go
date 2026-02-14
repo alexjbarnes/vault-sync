@@ -18,10 +18,12 @@ import (
 func DeriveKey(password, salt string) ([]byte, error) {
 	password = norm.NFKC.String(password)
 	salt = norm.NFKC.String(salt)
+
 	key, err := scrypt.Key([]byte(password), []byte(salt), 32768, 8, 1, 32)
 	if err != nil {
 		return nil, fmt.Errorf("deriving key: %w", err)
 	}
+
 	return key, nil
 }
 
@@ -47,10 +49,12 @@ func NewCipherV0(key []byte) (*CipherV0, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating AES cipher: %w", err)
 	}
+
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, fmt.Errorf("creating GCM: %w", err)
 	}
+
 	return &CipherV0{gcm: gcm}, nil
 }
 
@@ -70,10 +74,12 @@ func (c *CipherV0) DecryptPath(hexStr string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("decoding hex: %w", err)
 	}
+
 	plaintext, err := c.decrypt(data)
 	if err != nil {
 		return "", err
 	}
+
 	return string(plaintext), nil
 }
 
@@ -94,6 +100,7 @@ func (c *CipherV0) EncryptPath(path string) (string, error) {
 	result := make([]byte, len(iv)+len(ciphertext))
 	copy(result, iv)
 	copy(result[len(iv):], ciphertext)
+
 	return hex.EncodeToString(result), nil
 }
 
@@ -104,10 +111,12 @@ func (c *CipherV0) EncryptContent(data []byte) ([]byte, error) {
 	if _, err := rand.Read(iv); err != nil {
 		return nil, fmt.Errorf("generating IV: %w", err)
 	}
+
 	ciphertext := c.gcm.Seal(nil, iv, data, nil)
 	result := make([]byte, len(iv)+len(ciphertext))
 	copy(result, iv)
 	copy(result[len(iv):], ciphertext)
+
 	return result, nil
 }
 
@@ -124,11 +133,14 @@ func (c *CipherV0) decrypt(data []byte) ([]byte, error) {
 	if len(data) == nonceSize {
 		return []byte{}, nil
 	}
+
 	nonce := data[:nonceSize]
 	ciphertext := data[nonceSize:]
+
 	plaintext, err := c.gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
 		return nil, fmt.Errorf("decrypting: %w", err)
 	}
+
 	return plaintext, nil
 }

@@ -63,12 +63,14 @@ func testSetup(t *testing.T) (*mcp.ClientSession, *vault.Vault) {
 // callTool is a helper that calls a tool and returns the result.
 func callTool(t *testing.T, session *mcp.ClientSession, name string, args map[string]interface{}) *mcp.CallToolResult {
 	t.Helper()
+
 	ctx := context.Background()
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      name,
 		Arguments: args,
 	})
 	require.NoError(t, err)
+
 	return result
 }
 
@@ -100,6 +102,7 @@ func TestList_AllFiles(t *testing.T) {
 		paths[f.Path] = true
 		assert.False(t, strings.HasPrefix(f.Path, ".obsidian"), "should exclude .obsidian: %s", f.Path)
 	}
+
 	assert.True(t, paths["notes/hello.md"])
 	assert.True(t, paths["images/photo.png"])
 }
@@ -119,6 +122,7 @@ func TestList_AllFilesIncludesTags(t *testing.T) {
 			return
 		}
 	}
+
 	t.Fatal("notes/hello.md not found in results")
 }
 
@@ -221,11 +225,13 @@ func TestSearch_ByFilename(t *testing.T) {
 	assert.Greater(t, out.TotalMatches, 0)
 
 	found := false
+
 	for _, m := range out.Results {
 		if m.Path == "recipes/cold-brew.md" && m.MatchType == "filename" {
 			found = true
 		}
 	}
+
 	assert.True(t, found, "should find by filename")
 }
 
@@ -240,11 +246,13 @@ func TestSearch_ByContent(t *testing.T) {
 	extractJSON(t, result, &out)
 
 	found := false
+
 	for _, m := range out.Results {
 		if m.Path == "daily/2026-02-08.md" && m.MatchType == "content" {
 			found = true
 		}
 	}
+
 	assert.True(t, found, "should find content match")
 }
 
@@ -714,8 +722,10 @@ func TestToolsRegistered(t *testing.T) {
 	ctx := context.Background()
 
 	var names []string
+
 	for tool, err := range session.Tools(ctx, nil) {
 		require.NoError(t, err)
+
 		names = append(names, tool.Name)
 	}
 

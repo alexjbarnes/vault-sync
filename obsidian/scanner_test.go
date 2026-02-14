@@ -25,6 +25,7 @@ func testState(t *testing.T, vaultID string) *state.State {
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })
 	require.NoError(t, s.InitVaultBuckets(vaultID))
+
 	return s
 }
 
@@ -53,8 +54,10 @@ func TestScanLocal_SkipsDotGit(t *testing.T) {
 
 	_, hasGitHead := result.Current[".git/HEAD"]
 	assert.False(t, hasGitHead, ".git/HEAD should be excluded")
+
 	_, hasGitDir := result.Current[".git"]
 	assert.False(t, hasGitDir, ".git dir should be excluded")
+
 	_, hasNotes := result.Current["notes.md"]
 	assert.True(t, hasNotes, "notes.md should be included")
 }
@@ -71,6 +74,7 @@ func TestScanLocal_IncludesObsidianDir(t *testing.T) {
 
 	_, hasDir := result.Current[".obsidian"]
 	assert.True(t, hasDir, ".obsidian directory should be included")
+
 	_, hasAppJSON := result.Current[".obsidian/app.json"]
 	assert.True(t, hasAppJSON, ".obsidian/app.json should be included")
 }
@@ -88,8 +92,10 @@ func TestScanLocal_SkipsDotFiles(t *testing.T) {
 
 	_, hasHidden := result.Current[".hidden"]
 	assert.False(t, hasHidden, ".hidden should be excluded")
+
 	_, hasDSStore := result.Current[".DS_Store"]
 	assert.False(t, hasDSStore, ".DS_Store should be excluded")
+
 	_, hasVisible := result.Current["visible.md"]
 	assert.True(t, hasVisible)
 }
@@ -122,8 +128,10 @@ func TestScanLocal_SkipsWorkspaceJSON(t *testing.T) {
 
 	_, hasWorkspace := result.Current["workspace.json"]
 	assert.False(t, hasWorkspace, "workspace.json should be excluded")
+
 	_, hasMobile := result.Current["workspace-mobile.json"]
 	assert.False(t, hasMobile, "workspace-mobile.json should be excluded")
+
 	_, hasOther := result.Current["other.json"]
 	assert.True(t, hasOther, "other.json should be included")
 }
@@ -142,6 +150,7 @@ func TestScanLocal_SkipsNestedDotDirs(t *testing.T) {
 
 	_, hasSecret := result.Current["notes/.secret/file.txt"]
 	assert.False(t, hasSecret)
+
 	_, hasVisible := result.Current["notes/visible.md"]
 	assert.True(t, hasVisible)
 }
@@ -330,6 +339,7 @@ func TestScanLocal_NFDPathNormalizedToNFC(t *testing.T) {
 	// Create file with NFD e-acute (e + combining acute U+0301).
 	nfdName := "caf\u0065\u0301.md" // e + combining acute
 	nfcName := "caf\u00e9.md"       // precomposed e-acute
+
 	require.NoError(t, os.WriteFile(filepath.Join(v.Dir(), nfdName), []byte("coffee"), 0o644))
 
 	result, err := ScanLocal(v, s, testVaultID, discardLogger, nil)
@@ -354,8 +364,10 @@ func TestScanLocal_DirectoriesInCurrent(t *testing.T) {
 
 	lfA := result.Current["a"]
 	assert.True(t, lfA.Folder)
+
 	lfB := result.Current["a/b"]
 	assert.True(t, lfB.Folder)
+
 	lfFile := result.Current["a/b/file.md"]
 	assert.False(t, lfFile.Folder)
 }
@@ -401,6 +413,7 @@ func TestScanLocal_ModifiedFilePreservesSyncFields(t *testing.T) {
 
 	// Modify the file.
 	require.NoError(t, os.WriteFile(filePath, []byte("v2 longer"), 0o644))
+
 	future := time.Now().Add(2 * time.Second)
 	require.NoError(t, os.Chtimes(filePath, future, future))
 
@@ -462,6 +475,8 @@ func keysOf(m map[string]state.LocalFile) []string {
 	for k := range m {
 		keys = append(keys, k)
 	}
+
 	sort.Strings(keys)
+
 	return keys
 }

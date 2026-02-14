@@ -40,6 +40,7 @@ func HandleProtectedResourceMetadata(serverURL string) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		_ = json.NewEncoder(w).Encode(meta)
@@ -65,6 +66,7 @@ func HandleAuthServerMetadata(serverURL string) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		_ = json.NewEncoder(w).Encode(meta)

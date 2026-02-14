@@ -25,6 +25,7 @@ func parseFrontmatter(content []byte) *Frontmatter {
 	if idx < 0 {
 		return nil
 	}
+
 	rest = rest[idx+1:]
 
 	end := bytes.Index(rest, []byte("\n---"))
@@ -38,5 +39,6 @@ func parseFrontmatter(content []byte) *Frontmatter {
 	if err := yaml.Unmarshal(block, &fm); err != nil {
 		return nil
 	}
+
 	return &fm
 }
