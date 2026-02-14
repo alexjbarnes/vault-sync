@@ -3,7 +3,9 @@ package state
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/alexjbarnes/vault-sync/internal/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	bolt "go.etcd.io/bbolt"
@@ -483,4 +485,188 @@ func TestLoadAt_InvalidPath(t *testing.T) {
 	_, err := LoadAt("/dev/null/sub/state.db")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "creating state directory")
+}
+
+// --- OAuth Token CRUD ---
+
+func TestSaveGetOAuthToken_RoundTrip(t *testing.T) {
+	s := testDB(t)
+	tok := models.OAuthToken{
+		Token:        "tok_abc",
+		Kind:         "access",
+		UserID:       "user1",
+		Resource:     "https://example.com",
+		Scopes:       []string{"read", "write"},
+		ExpiresAt:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		RefreshToken: "ref_xyz",
+		ClientID:     "client1",
+	}
+	require.NoError(t, s.SaveOAuthToken(tok))
+
+	got, err := s.GetOAuthToken("tok_abc")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, tok, *got)
+}
+
+func TestGetOAuthToken_NotFound(t *testing.T) {
+	s := testDB(t)
+
+	got, err := s.GetOAuthToken("nonexistent")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestSaveOAuthToken_Overwrite(t *testing.T) {
+	s := testDB(t)
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "tok1", UserID: "old"}))
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "tok1", UserID: "new"}))
+
+	got, err := s.GetOAuthToken("tok1")
+	require.NoError(t, err)
+	assert.Equal(t, "new", got.UserID)
+}
+
+func TestDeleteOAuthToken(t *testing.T) {
+	s := testDB(t)
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "tok_del"}))
+	require.NoError(t, s.DeleteOAuthToken("tok_del"))
+
+	got, err := s.GetOAuthToken("tok_del")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestDeleteOAuthToken_NonexistentIsNoOp(t *testing.T) {
+	s := testDB(t)
+	require.NoError(t, s.DeleteOAuthToken("never-existed"))
+}
+
+func TestAllOAuthTokens_Empty(t *testing.T) {
+	s := testDB(t)
+
+	tokens, err := s.AllOAuthTokens()
+	require.NoError(t, err)
+	assert.Empty(t, tokens)
+}
+
+func TestAllOAuthTokens_ReturnsAll(t *testing.T) {
+	s := testDB(t)
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "t1", UserID: "u1"}))
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "t2", UserID: "u2"}))
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "t3", UserID: "u3"}))
+
+	tokens, err := s.AllOAuthTokens()
+	require.NoError(t, err)
+	require.Len(t, tokens, 3)
+}
+
+func TestAllOAuthTokens_ExcludesDeleted(t *testing.T) {
+	s := testDB(t)
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "keep", UserID: "u1"}))
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "remove", UserID: "u2"}))
+	require.NoError(t, s.DeleteOAuthToken("remove"))
+
+	tokens, err := s.AllOAuthTokens()
+	require.NoError(t, err)
+	require.Len(t, tokens, 1)
+	assert.Equal(t, "keep", tokens[0].Token)
+}
+
+func TestAllOAuthTokens_CorruptJSON(t *testing.T) {
+	s := testDB(t)
+	putRaw(t, s, oauthTokensBucket, "bad-tok", "%%%corrupt")
+
+	_, err := s.AllOAuthTokens()
+	require.Error(t, err)
+}
+
+func TestGetOAuthToken_CorruptJSON(t *testing.T) {
+	s := testDB(t)
+	putRaw(t, s, oauthTokensBucket, "bad-tok", "not-json")
+
+	_, err := s.GetOAuthToken("bad-tok")
+	require.Error(t, err)
+}
+
+// --- OAuth Client CRUD ---
+
+func TestSaveGetOAuthClient_RoundTrip(t *testing.T) {
+	s := testDB(t)
+	client := models.OAuthClient{
+		ClientID:     "client_abc",
+		ClientName:   "Test App",
+		RedirectURIs: []string{"https://example.com/callback"},
+	}
+	require.NoError(t, s.SaveOAuthClient(client))
+
+	got, err := s.GetOAuthClient("client_abc")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, client, *got)
+}
+
+func TestGetOAuthClient_NotFound(t *testing.T) {
+	s := testDB(t)
+
+	got, err := s.GetOAuthClient("nonexistent")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestSaveOAuthClient_Overwrite(t *testing.T) {
+	s := testDB(t)
+	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c1", ClientName: "old"}))
+	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c1", ClientName: "new"}))
+
+	got, err := s.GetOAuthClient("c1")
+	require.NoError(t, err)
+	assert.Equal(t, "new", got.ClientName)
+}
+
+func TestAllOAuthClients_Empty(t *testing.T) {
+	s := testDB(t)
+
+	clients, err := s.AllOAuthClients()
+	require.NoError(t, err)
+	assert.Empty(t, clients)
+}
+
+func TestAllOAuthClients_ReturnsAll(t *testing.T) {
+	s := testDB(t)
+	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c1"}))
+	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c2"}))
+
+	clients, err := s.AllOAuthClients()
+	require.NoError(t, err)
+	require.Len(t, clients, 2)
+}
+
+func TestAllOAuthClients_CorruptJSON(t *testing.T) {
+	s := testDB(t)
+	putRaw(t, s, oauthClientBucket, "bad-client", "%%%corrupt")
+
+	_, err := s.AllOAuthClients()
+	require.Error(t, err)
+}
+
+func TestGetOAuthClient_CorruptJSON(t *testing.T) {
+	s := testDB(t)
+	putRaw(t, s, oauthClientBucket, "bad-client", "not-json")
+
+	_, err := s.GetOAuthClient("bad-client")
+	require.Error(t, err)
+}
+
+func TestOAuthClientCount_Zero(t *testing.T) {
+	s := testDB(t)
+	assert.Equal(t, 0, s.OAuthClientCount())
+}
+
+func TestOAuthClientCount_AfterInserts(t *testing.T) {
+	s := testDB(t)
+	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c1"}))
+	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c2"}))
+	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c3"}))
+	assert.Equal(t, 3, s.OAuthClientCount())
 }

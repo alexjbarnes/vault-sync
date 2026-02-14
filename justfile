@@ -21,6 +21,13 @@ test-coverage:
     go tool cover -html=coverage.out -o coverage.html
     @echo "Coverage report: coverage.html"
 
+# Run tests with coverage for a specific package (e.g. just test-coverage-pkg ./internal/state/...)
+test-coverage-pkg pkg:
+    go test -coverprofile=coverage.out {{pkg}}
+    go tool cover -func=coverage.out
+    go tool cover -html=coverage.out -o coverage.html
+    @echo "Coverage report: coverage.html"
+
 # Run linter
 lint:
     golangci-lint run
