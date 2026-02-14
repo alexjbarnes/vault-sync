@@ -25,7 +25,21 @@ func resourceMatches(resource, serverURL string) bool {
 // UserCredentials maps usernames to plain text passwords.
 type UserCredentials map[string]string
 
-const codeExpiry = 5 * time.Minute
+const (
+	codeExpiry = 5 * time.Minute
+
+	// rateLimitPruneThreshold is the number of tracked IPs above which
+	// the rate limiter prunes expired entries to prevent unbounded growth.
+	rateLimitPruneThreshold = 1000
+
+	// csrfTokenBytes is the number of random bytes used to generate
+	// a CSRF token (hex-encoded to twice this length).
+	csrfTokenBytes = 16
+
+	// authCodeBytes is the number of random bytes used to generate
+	// an authorization code (hex-encoded to twice this length).
+	authCodeBytes = 32
+)
 
 // loginPage is a minimal HTML login form. The csrf_token hidden field
 // prevents cross-site form submission.
@@ -93,7 +107,7 @@ func (rl *loginRateLimiter) check(ip string) bool {
 	// Prevent unbounded growth from many distinct source IPs. When
 	// the map gets large, prune all IPs whose most recent failure
 	// has expired beyond the window.
-	if len(rl.failures) > 1000 {
+	if len(rl.failures) > rateLimitPruneThreshold {
 		for k, times := range rl.failures {
 			if len(times) == 0 || times[len(times)-1].Before(cutoff) {
 				delete(rl.failures, k)
@@ -157,7 +171,7 @@ func validateRedirectURI(client *models.OAuthClient, redirectURI string) bool {
 
 // generateCSRFToken creates a random CSRF token and stores it.
 func generateCSRFToken(store *Store) string {
-	b := make([]byte, 16)
+	b := make([]byte, csrfTokenBytes)
 	if _, err := rand.Read(b); err != nil {
 		panic("crypto/rand failed: " + err.Error())
 	}
@@ -307,7 +321,7 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 	logger.Info("login successful", slog.String("username", username))
 
 	// Issue authorization code bound to the resource (RFC 8707).
-	code := RandomHex(32)
+	code := RandomHex(authCodeBytes)
 	store.SaveCode(&AuthCode{
 		Code:          code,
 		ClientID:      clientID,

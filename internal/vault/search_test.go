@@ -30,7 +30,7 @@ func TestBuildSnippet_MatchInMiddleLongLine(t *testing.T) {
 	idx := 62 // byte position of "KEYWORD"
 	snippet := buildSnippet(line, idx, 7)
 	assert.Contains(t, snippet, "**KEYWORD**")
-	assert.True(t, len(snippet) < len(line)+10, "snippet should be shorter than full line")
+	assert.Less(t, len(snippet), len(line)+10, "snippet should be shorter than full line")
 }
 
 func TestBuildSnippet_EmptyMatch(t *testing.T) {
@@ -493,7 +493,7 @@ func TestSetRgPath(t *testing.T) {
 	assert.Equal(t, "/usr/bin/rg", RgPath())
 
 	SetRgPath("")
-	assert.Equal(t, "", RgPath())
+	assert.Empty(t, RgPath())
 }
 
 // Verify interface{} isn't used anywhere by checking mustMarshal accepts concrete types.

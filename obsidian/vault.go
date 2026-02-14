@@ -2,6 +2,7 @@ package obsidian
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,16 @@ import (
 	"time"
 
 	"golang.org/x/text/unicode/norm"
+)
+
+const (
+	// vaultDirPerm is the permission mode for directories created inside
+	// the vault. Group and other get read+execute for Obsidian access.
+	vaultDirPerm = fs.FileMode(0o755)
+
+	// vaultFilePerm is the permission mode for files written inside the
+	// vault. Group and other get read access for shared access.
+	vaultFilePerm = fs.FileMode(0o644)
 )
 
 // mtimeMin and mtimeMax clamp server-provided modification times to a
@@ -36,7 +47,7 @@ func NewVault(dir string) (*Vault, error) {
 		return nil, fmt.Errorf("vault directory must not be empty")
 	}
 
-	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: vault root dir needs 0755 for Obsidian access
+	if err := os.MkdirAll(dir, vaultDirPerm); err != nil {
 		return nil, fmt.Errorf("creating vault directory %s: %w", dir, err)
 	}
 
@@ -75,11 +86,11 @@ func (v *Vault) WriteFile(relPath string, data []byte, mtime time.Time) error {
 	defer v.mu.Unlock()
 
 	dir := filepath.Dir(absPath)
-	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: vault directories need group/other read+exec for shared access
+	if err := os.MkdirAll(dir, vaultDirPerm); err != nil {
 		return fmt.Errorf("creating directory for %s: %w", relPath, err)
 	}
 
-	if err := os.WriteFile(absPath, data, 0o644); err != nil { //nolint:gosec // G306: vault files need group/other read for shared access
+	if err := os.WriteFile(absPath, data, vaultFilePerm); err != nil {
 		return err
 	}
 
@@ -166,7 +177,7 @@ func (v *Vault) MkdirAll(relPath string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	return os.MkdirAll(absPath, 0o755) //nolint:gosec // G301: vault content dirs need 0755
+	return os.MkdirAll(absPath, vaultDirPerm)
 }
 
 // Rename moves a file or directory from one relative path to another
@@ -186,7 +197,7 @@ func (v *Vault) Rename(oldRel, newRel string) error {
 	defer v.mu.Unlock()
 
 	// Ensure parent directory of destination exists.
-	if err := os.MkdirAll(filepath.Dir(newAbs), 0o755); err != nil { //nolint:gosec // G301: vault content dirs need 0755
+	if err := os.MkdirAll(filepath.Dir(newAbs), vaultDirPerm); err != nil {
 		return fmt.Errorf("creating directory for %s: %w", newRel, err)
 	}
 
@@ -237,11 +248,11 @@ func (v *Vault) StatAndWriteFile(relPath string, data []byte, mtime time.Time, p
 	}
 
 	dir := filepath.Dir(absPath)
-	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: vault directories need group/other read+exec for shared access
+	if err := os.MkdirAll(dir, vaultDirPerm); err != nil {
 		return fmt.Errorf("creating directory for %s: %w", relPath, err)
 	}
 
-	if err := os.WriteFile(absPath, data, 0o644); err != nil { //nolint:gosec // G306: vault files need group/other read for shared access
+	if err := os.WriteFile(absPath, data, vaultFilePerm); err != nil {
 		return err
 	}
 
@@ -291,7 +302,7 @@ func (v *Vault) resolve(relPath string) (string, error) {
 			if pErr != nil {
 				// Parent doesn't exist either. MkdirAll will create it.
 				// The prefix check above already passed, so we allow it.
-				return absPath, nil
+				return absPath, nil //nolint:nilerr // intentional: parent will be created by MkdirAll
 			}
 
 			parentExpected := filepath.Dir(absPath)

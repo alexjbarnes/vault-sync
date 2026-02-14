@@ -563,7 +563,7 @@ func TestHandleTypeConflict_LocalFolder(t *testing.T) {
 
 	// Original folder should be renamed to conflict copy.
 	_, err = vault.Stat("conflict (Conflicted copy)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Server file should be written at original path.
 	data, err := vault.ReadFile("conflict")
@@ -907,7 +907,7 @@ func TestExecuteDecision_TypeConflict_LocalFile(t *testing.T) {
 
 	// Conflict copy should exist.
 	_, err = vault.ReadFile("clash (Conflicted copy).txt")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Original path should be a folder.
 	info, err := vault.Stat("clash.txt")
@@ -935,7 +935,7 @@ func TestExecuteDecision_TypeConflict_LocalFolder(t *testing.T) {
 
 	// Conflict copy of folder should exist.
 	_, err = vault.Stat("folder-conflict (Conflicted copy)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Server file should be at original path.
 	data, err := vault.ReadFile("folder-conflict")

@@ -32,6 +32,61 @@ const (
 	responseTimeout = 60 * time.Second
 )
 
+const (
+	// defaultPerFileMax is the default per-file size limit in bytes
+	// (~199MB), matching the Obsidian client default.
+	defaultPerFileMax = 208_666_624
+
+	// syncOpChanSize is the buffer size for the channel carrying file
+	// change operations from the watcher to the event loop.
+	syncOpChanSize = 64
+
+	// initialWSReadLimit is the conservative WebSocket read limit set
+	// before auth, large enough to cover the default 5MB perFileMax
+	// with encryption overhead headroom.
+	initialWSReadLimit = 16 * 1024 * 1024
+
+	// wsReadLimitMultiplier scales perFileMax to account for encryption
+	// overhead (IV + GCM tag) when setting the post-auth read limit.
+	wsReadLimitMultiplier = 2
+
+	// minWSReadLimit is the floor for the post-auth WebSocket read
+	// limit, ensuring metadata-heavy responses are never truncated.
+	minWSReadLimit = 4 * 1024 * 1024
+
+	// inboundChanSize is the buffer size for the channel carrying
+	// messages from the WebSocket reader goroutine to the event loop.
+	inboundChanSize = 64
+
+	// jitterDivisor controls the range of random jitter added to
+	// reconnect backoff: jitter is uniform in [0, backoff/jitterDivisor).
+	jitterDivisor = 2
+
+	// reconnectBackoffMultiplier is the exponential growth factor
+	// applied to the reconnect backoff after each consecutive failure.
+	reconnectBackoffMultiplier = 2
+
+	// pullSizeMultiplier scales perFileMax when computing the maximum
+	// allowed pull response size, leaving room for encryption overhead.
+	pullSizeMultiplier = 2
+
+	// defaultPullMaxSize is the fallback maximum pull response size
+	// used when perFileMax is zero (server did not provide a value).
+	defaultPullMaxSize = 10 * 1024 * 1024
+
+	// maxRetryShift caps the bit-shift exponent in the per-file retry
+	// backoff to prevent integer overflow of time.Duration.
+	maxRetryShift = 10
+
+	// fileRetryBaseDelay is the base delay for per-file exponential
+	// backoff, matching app.js: 5s * 2^count.
+	fileRetryBaseDelay = 5 * time.Second
+
+	// fileRetryMaxDelay is the ceiling for per-file retry backoff,
+	// matching the app.js 5-minute cap.
+	fileRetryMaxDelay = 5 * time.Minute
+)
+
 var errResponseTimeout = fmt.Errorf("timed out waiting for server response")
 
 // inboundMsg wraps a message read from the WebSocket by the reader goroutine.
@@ -175,8 +230,8 @@ func NewSyncClient(cfg SyncConfig, logger *slog.Logger) *SyncClient {
 		state:             cfg.State,
 		filter:            cfg.Filter,
 		onReady:           cfg.OnReady,
-		perFileMax:        208_666_624, // ~199MB, matches Obsidian client default
-		opCh:              make(chan syncOp, 64),
+		perFileMax:        defaultPerFileMax,
+		opCh:              make(chan syncOp, syncOpChanSize),
 		hashCache:         make(map[string]hashEntry),
 		retryBackoff:      make(map[string]retryEntry),
 	}
@@ -192,7 +247,7 @@ func (s *SyncClient) Connect(ctx context.Context) error {
 	url := "wss://" + s.host
 	s.logger.Debug("connecting", slog.String("url", url))
 
-	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{ //nolint:bodyclose // websocket.Dial closes the response body internally
 		HTTPHeader: http.Header{
 			"Origin":     []string{"app://obsidian.md"},
 			"User-Agent": []string{"Mozilla/5.0 obsidian/1.7.7"},
@@ -213,7 +268,7 @@ func (s *SyncClient) handshake(ctx context.Context, conn wsConn) error {
 	// Set a conservative initial read limit. Updated after auth when we
 	// know perFileMax. Encrypted content adds overhead (IV + GCM tag)
 	// so 16MB covers the default 5MB perFileMax with headroom.
-	s.conn.SetReadLimit(16 * 1024 * 1024)
+	s.conn.SetReadLimit(initialWSReadLimit)
 	s.touchLastMessage()
 
 	init := InitMessage{
@@ -259,9 +314,9 @@ func (s *SyncClient) handshake(ctx context.Context, conn wsConn) error {
 	}
 	// Tighten read limit now that we know the max file size. Allow 2x
 	// for encryption overhead, minimum 4MB for metadata-heavy responses.
-	readLimit := int64(s.perFileMax * 2)
-	if readLimit < 4*1024*1024 {
-		readLimit = 4 * 1024 * 1024
+	readLimit := int64(s.perFileMax * wsReadLimitMultiplier)
+	if readLimit < minWSReadLimit {
+		readLimit = minWSReadLimit
 	}
 
 	s.conn.SetReadLimit(readLimit)
@@ -405,7 +460,7 @@ func (s *SyncClient) WaitForReady(ctx context.Context, serverPushes *[]ServerPus
 // again for a new connection, the old goroutine cannot send stale
 // messages into the new channel.
 func (s *SyncClient) startReader(connCtx context.Context) {
-	ch := make(chan inboundMsg, 64)
+	ch := make(chan inboundMsg, inboundChanSize)
 	s.inboundCh = ch
 	// Capture conn by value to avoid racing with s.conn reassignment
 	// during reconnect. The old reader goroutine uses the old conn;
@@ -461,7 +516,7 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 			slog.Duration("backoff", backoff),
 		)
 
-		jitter := time.Duration(rand.Int64N(int64(backoff) / 2)) //nolint:gosec // G404: math/rand is fine for reconnect jitter, no security impact
+		jitter := time.Duration(rand.Int64N(int64(backoff) / jitterDivisor)) //nolint:gosec // G404: math/rand is fine for reconnect jitter, no security impact
 
 		timer := time.NewTimer(backoff + jitter)
 		select {
@@ -484,7 +539,7 @@ func (s *SyncClient) Listen(ctx context.Context) error {
 				slog.String("error", err.Error()),
 				slog.Duration("backoff", backoff),
 			)
-			backoff = min(backoff*2, reconnectMax)
+			backoff = min(backoff*reconnectBackoffMultiplier, reconnectMax)
 
 			continue
 		}
@@ -574,7 +629,8 @@ func (s *SyncClient) handleInbound(ctx context.Context, data []byte) error {
 	var msg GenericMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
 		s.logger.Debug("unparseable text frame", slog.Int("bytes", len(data)))
-		return nil
+
+		return nil //nolint:nilerr // intentional: skip frames that don't parse as JSON
 	}
 
 	switch msg.Op {
@@ -1041,7 +1097,7 @@ func (s *SyncClient) executeLiveDecision(ctx context.Context, decision Reconcile
 				s.logger.Info("folder not empty, skipping delete", slog.String("path", path))
 				s.persistServerFile(path, push, true)
 
-				return nil
+				return nil //nolint:nilerr // intentional: non-empty folder is not an error, skip delete
 			}
 		} else {
 			if err := s.vault.DeleteFile(path); err != nil {
@@ -1242,7 +1298,7 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 				age = -age
 			}
 
-			if age < 180_000 {
+			if age < recentlyCreatedThresholdMs {
 				s.logger.Info("merge: no base, recently created, server wins", slog.String("path", path))
 				return s.liveWriteContent(path, push, []byte(serverText))
 			}
@@ -1268,7 +1324,7 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 	dmp := diffmatchpatch.New()
 
 	diffs := dmp.DiffMain(baseText, localText, true)
-	if len(diffs) > 2 {
+	if len(diffs) > diffCleanupThreshold {
 		diffs = dmp.DiffCleanupSemantic(diffs)
 		diffs = dmp.DiffCleanupEfficiency(diffs)
 	}
@@ -1782,9 +1838,9 @@ func (s *SyncClient) pull(ctx context.Context, uid int64) ([]byte, error) {
 	}
 
 	// Guard against a malicious or buggy server sending a huge Size.
-	maxSize := int64(s.perFileMax) * 2
+	maxSize := int64(s.perFileMax) * pullSizeMultiplier
 	if maxSize == 0 {
-		maxSize = 10 * 1024 * 1024
+		maxSize = defaultPullMaxSize
 	}
 
 	if resp.Size > maxSize {
@@ -2084,9 +2140,9 @@ func (s *SyncClient) pullDirect(ctx context.Context, uid int64) ([]byte, error) 
 		return nil, nil
 	}
 
-	maxSize := int64(s.perFileMax) * 2
+	maxSize := int64(s.perFileMax) * pullSizeMultiplier
 	if maxSize == 0 {
-		maxSize = 10 * 1024 * 1024
+		maxSize = defaultPullMaxSize
 	}
 
 	if resp.Size > maxSize {
@@ -2195,13 +2251,13 @@ func (s *SyncClient) checkRetryBackoff(path string) (time.Time, bool) {
 	// the raw delay is 5s * 1024 = ~85 minutes, well above the 5-minute
 	// cap. Beyond 10 the bit shift overflows time.Duration.
 	shift := entry.count
-	if shift > 10 {
-		shift = 10
+	if shift > maxRetryShift {
+		shift = maxRetryShift
 	}
 
-	delay := 5 * time.Second * time.Duration(1<<shift)
-	if delay > 5*time.Minute {
-		delay = 5 * time.Minute
+	delay := fileRetryBaseDelay * time.Duration(1<<shift)
+	if delay > fileRetryMaxDelay {
+		delay = fileRetryMaxDelay
 	}
 
 	waitUntil := entry.lastFailure.Add(delay)

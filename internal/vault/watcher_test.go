@@ -2,6 +2,7 @@ package vault
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -57,7 +58,7 @@ func watchedVault(t *testing.T) *Vault {
 
 		err := <-errCh
 		// context.Canceled is the expected shutdown error.
-		if err != nil && err != context.Canceled {
+		if err != nil && !errors.Is(err, context.Canceled) {
 			t.Errorf("watcher error: %v", err)
 		}
 	})

@@ -30,6 +30,24 @@ func IsTransient(err error) bool {
 
 const baseURL = "https://api.obsidian.md"
 
+const (
+	// maxRedirects is the maximum number of HTTP redirects to follow
+	// before giving up, matching the default net/http limit.
+	maxRedirects = 10
+
+	// httpClientTimeout is the timeout for the default HTTP client used
+	// by the API client when no custom client is provided.
+	httpClientTimeout = 30 * time.Second
+
+	// maxAPIResponseBytes caps response body reads to prevent a
+	// misbehaving server from consuming unbounded memory.
+	maxAPIResponseBytes = 1024 * 1024
+
+	// supportedEncryptionVersion is the encryption version sent to the
+	// server in vault list requests. Must match the Obsidian app.
+	supportedEncryptionVersion = 3
+)
+
 // Client talks to the Obsidian REST API.
 type Client struct {
 	httpClient *http.Client
@@ -40,7 +58,7 @@ type Client struct {
 // matches the original request host. This prevents credentials or
 // Origin headers from leaking to third-party domains.
 func sameHostRedirectPolicy(req *http.Request, via []*http.Request) error {
-	if len(via) >= 10 {
+	if len(via) >= maxRedirects {
 		return errors.New("stopped after 10 redirects")
 	}
 
@@ -60,7 +78,7 @@ func sameHostRedirectPolicy(req *http.Request, via []*http.Request) error {
 func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{
-			Timeout:       30 * time.Second,
+			Timeout:       httpClientTimeout,
 			CheckRedirect: sameHostRedirectPolicy,
 		}
 	}
@@ -128,7 +146,7 @@ func (c *Client) post(ctx context.Context, endpoint string, body, result interfa
 	defer resp.Body.Close()
 
 	// Cap response reads at 1MB. API responses are small JSON payloads.
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseBytes))
 	if err != nil {
 		return fmt.Errorf("reading response from %s: %w", endpoint, err)
 	}
@@ -228,7 +246,7 @@ func isTransientMessage(msg string) bool {
 func (c *Client) ListVaults(ctx context.Context, token string) (*VaultListResponse, error) {
 	req := VaultListRequest{
 		Token:                      token,
-		SupportedEncryptionVersion: 3,
+		SupportedEncryptionVersion: supportedEncryptionVersion,
 	}
 
 	var resp VaultListResponse

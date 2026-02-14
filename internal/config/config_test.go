@@ -149,7 +149,7 @@ func TestLoad_MCPMode_NoSyncFieldsNeeded(t *testing.T) {
 
 	cfg, err := Load()
 	require.NoError(t, err)
-	assert.Equal(t, "", cfg.Email)
+	assert.Empty(t, cfg.Email)
 }
 
 // --- Load: both modes ---
@@ -192,7 +192,7 @@ func TestLoad_SyncDir_OptionalForSyncMode(t *testing.T) {
 
 	cfg, err := Load()
 	require.NoError(t, err)
-	assert.Equal(t, "", cfg.SyncDir, "SyncDir should be empty; derived later from vault ID")
+	assert.Empty(t, cfg.SyncDir, "SyncDir should be empty; derived later from vault ID")
 }
 
 func TestLoad_SyncDir_RequiredForMCPOnly(t *testing.T) {
@@ -299,7 +299,7 @@ func TestLoad_VaultNameOptional(t *testing.T) {
 
 	cfg, err := Load()
 	require.NoError(t, err)
-	assert.Equal(t, "", cfg.VaultName)
+	assert.Empty(t, cfg.VaultName)
 }
 
 func TestLoad_VaultNameSet(t *testing.T) {

@@ -3,7 +3,6 @@ package obsidian
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -17,7 +16,7 @@ import (
 
 const testSyncVaultID = "sync-test-vault"
 
-var quietLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+var quietLogger = slog.New(slog.DiscardHandler)
 
 // cachedCipher is derived once and reused across all tests in this file.
 // scrypt is intentionally slow, so running it per-test adds ~0.4s each.
@@ -346,7 +345,7 @@ func TestExecuteLiveDecision_TypeConflict_LocalFolder(t *testing.T) {
 
 	// Conflict copy of folder.
 	_, err = vault.Stat("fclash (Conflicted copy)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Server file at original path.
 	data, err := vault.ReadFile("fclash")

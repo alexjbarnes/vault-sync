@@ -33,11 +33,11 @@ func TestHandlePushOp_Success(t *testing.T) {
 	}
 
 	err := s.handlePushOp(ctx, op)
-	assert.NoError(t, err, "handlePushOp should return nil on success")
+	require.NoError(t, err, "handlePushOp should return nil on success")
 
 	select {
 	case opErr := <-op.result:
-		assert.NoError(t, opErr, "op.result should be nil on success")
+		require.NoError(t, opErr, "op.result should be nil on success")
 	default:
 		t.Fatal("op.result should have a value")
 	}
@@ -58,11 +58,11 @@ func TestHandlePushOp_ConnectionError(t *testing.T) {
 	}
 
 	err := s.handlePushOp(ctx, op)
-	assert.ErrorContains(t, err, "connection reset", "connection errors propagate")
+	require.ErrorContains(t, err, "connection reset", "connection errors propagate")
 
 	select {
 	case opErr := <-op.result:
-		assert.ErrorContains(t, opErr, "connection reset", "op.result gets the error too")
+		require.ErrorContains(t, opErr, "connection reset", "op.result gets the error too")
 	default:
 		t.Fatal("op.result should have a value")
 	}
@@ -95,11 +95,11 @@ func TestHandlePushOp_OperationError_ReturnsNil(t *testing.T) {
 	}
 
 	err := s.handlePushOp(ctx, op)
-	assert.NoError(t, err, "operation errors do not propagate as return value")
+	require.NoError(t, err, "operation errors do not propagate as return value")
 
 	select {
 	case opErr := <-op.result:
-		assert.ErrorContains(t, opErr, "encrypting path")
+		require.ErrorContains(t, opErr, "encrypting path")
 	default:
 		t.Fatal("op.result should have a value")
 	}
@@ -595,9 +595,9 @@ func TestPersistLocalFileAfterWrite_WritesCorrectState(t *testing.T) {
 	assert.Equal(t, "hash123", lf.Hash)
 	assert.Equal(t, "hash123", lf.SyncHash)
 	assert.False(t, lf.Folder)
-	assert.Greater(t, lf.Size, int64(0))
-	assert.Greater(t, lf.MTime, int64(0))
-	assert.Greater(t, lf.SyncTime, int64(0))
+	assert.Positive(t, lf.Size)
+	assert.Positive(t, lf.MTime)
+	assert.Positive(t, lf.SyncTime)
 }
 
 func TestPersistLocalFileAfterWrite_StatErrorLogsOnly(t *testing.T) {
@@ -624,7 +624,7 @@ func TestPersistLocalFolder_WritesCorrectState(t *testing.T) {
 	assert.Equal(t, "notes", lf.Path)
 	assert.True(t, lf.Folder)
 	assert.Equal(t, int64(0), lf.Size)
-	assert.Greater(t, lf.SyncTime, int64(0))
+	assert.Positive(t, lf.SyncTime)
 }
 
 // --- StatAndWriteFile (replaces checkFileChangedDuringDownload) ---
@@ -633,7 +633,7 @@ func TestStatAndWriteFile_NilPrePullInfo(t *testing.T) {
 	_, vault, _, _ := fullSyncClient(t)
 
 	err := vault.StatAndWriteFile("any.md", []byte("new"), time.Time{}, nil)
-	assert.NoError(t, err, "nil prePullInfo should write unconditionally")
+	require.NoError(t, err, "nil prePullInfo should write unconditionally")
 
 	content, err := vault.ReadFile("any.md")
 	require.NoError(t, err)
@@ -648,7 +648,7 @@ func TestStatAndWriteFile_Unchanged(t *testing.T) {
 	require.NoError(t, err)
 
 	err = vault.StatAndWriteFile("stable.md", []byte("updated"), time.Time{}, info)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	content, err := vault.ReadFile("stable.md")
 	require.NoError(t, err)
@@ -667,7 +667,7 @@ func TestStatAndWriteFile_MtimeChanged(t *testing.T) {
 	require.NoError(t, vault.WriteFile("changing.md", []byte("data"), time.Time{}))
 
 	err = vault.StatAndWriteFile("changing.md", []byte("should fail"), time.Time{}, info)
-	assert.ErrorContains(t, err, "changed locally during download")
+	require.ErrorContains(t, err, "changed locally during download")
 }
 
 func TestStatAndWriteFile_SizeChanged(t *testing.T) {
@@ -682,7 +682,7 @@ func TestStatAndWriteFile_SizeChanged(t *testing.T) {
 	require.NoError(t, vault.WriteFile("grow.md", []byte("abcdef"), mtime))
 
 	err = vault.StatAndWriteFile("grow.md", []byte("should fail"), time.Time{}, info)
-	assert.ErrorContains(t, err, "changed locally during download")
+	require.ErrorContains(t, err, "changed locally during download")
 }
 
 func TestStatAndWriteFile_FileDeleted(t *testing.T) {
@@ -695,7 +695,7 @@ func TestStatAndWriteFile_FileDeleted(t *testing.T) {
 	require.NoError(t, vault.DeleteFile("ephemeral.md"))
 
 	err = vault.StatAndWriteFile("ephemeral.md", []byte("recreated"), time.Time{}, info)
-	assert.NoError(t, err, "deleted file should allow write to recreate it")
+	require.NoError(t, err, "deleted file should allow write to recreate it")
 
 	content, err := vault.ReadFile("ephemeral.md")
 	require.NoError(t, err)

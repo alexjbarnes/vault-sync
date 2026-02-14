@@ -6,13 +6,34 @@ formatters:
 
 linters:
   enable:
+    - bodyclose
     - errcheck
-    - govet
+    - errorlint
+    - funlen
+    - gocognit
+    - gocritic
     - gosec
+    - govet
     - ineffassign
+    - misspell
+    - mnd
+    - nilerr
+    - nilnesserr
+    - noctx
+    - nolintlint
+    - recvcheck
+    - sloglint
     - staticcheck
+    - testifylint
+    - unconvert
     - unused
     - wsl_v5
+  settings:
+    funlen:
+      lines: 200
+      statements: 100
+    gocognit:
+      min-complexity: 50
   exclusions:
     presets:
       - comments
@@ -22,10 +43,14 @@ linters:
       - linters:
           - gosec
         text: "G104:"
-      # Test files use standard 0644/0755 permissions for setup fixtures.
+      # Test files use standard permissions for fixtures and don't need
+      # funlen/gocognit/mnd enforcement.
       - path: _test\.go
         linters:
           - gosec
+          - funlen
+          - gocognit
+          - mnd
 
 issues:
   max-issues-per-linter: 0

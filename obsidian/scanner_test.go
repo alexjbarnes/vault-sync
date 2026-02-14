@@ -3,7 +3,6 @@ package obsidian
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -36,7 +35,7 @@ func sha256Hex(data []byte) string {
 
 var (
 	testVaultID   = "test-vault-001"
-	discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	discardLogger = slog.New(slog.DiscardHandler)
 )
 
 // --- File filtering ---

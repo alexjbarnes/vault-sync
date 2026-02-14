@@ -13,6 +13,24 @@ import (
 	"time"
 )
 
+const (
+	// rgSearchTimeout is the maximum time allowed for a ripgrep search.
+	rgSearchTimeout = 10 * time.Second
+
+	// rgScannerInitBytes is the initial buffer size for scanning ripgrep output.
+	rgScannerInitBytes = 256 * 1024
+
+	// rgScannerMaxBytes is the maximum buffer size for scanning ripgrep output.
+	rgScannerMaxBytes = 1024 * 1024
+
+	// snippetMaxLen is the maximum character length of a search result snippet.
+	snippetMaxLen = 120
+
+	// binaryCheckBytes is the number of leading bytes inspected for null
+	// bytes when deciding whether a file is binary.
+	binaryCheckBytes = 512
+)
+
 // rgPath holds the path to ripgrep if found at startup.
 // Empty string means ripgrep is not available.
 var rgPath string
@@ -140,7 +158,7 @@ func (v *Vault) Search(query string, maxResults int) (*SearchResult, error) {
 // Returns matches for files not already in seen. On rg error (exit code 2
 // or timeout), returns nil so the caller can fall back to Go.
 func searchContentRg(vaultRoot, query string, seen map[string]bool, maxResults int) []SearchMatch {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), rgSearchTimeout)
 	defer cancel()
 
 	args := []string{
@@ -168,7 +186,7 @@ func searchContentRg(vaultRoot, query string, seen map[string]bool, maxResults i
 
 	scanner := bufio.NewScanner(stdout)
 	// Increase buffer for long lines.
-	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, rgScannerInitBytes), rgScannerMaxBytes)
 
 	for scanner.Scan() {
 		if len(matches) >= maxResults {
@@ -255,7 +273,7 @@ func parseRgMatchLine(line []byte, vaultRoot string) (SearchMatch, bool) {
 		sub := data.Submatches[0]
 		snippet = buildSnippetFromBytes(lineText, sub.Start, sub.End)
 	} else {
-		snippet = truncateLine(lineText, 120)
+		snippet = truncateLine(lineText, snippetMaxLen)
 	}
 
 	return SearchMatch{
@@ -282,7 +300,7 @@ func buildSnippetFromBytes(line string, start, end int) string {
 	}
 
 	if start >= end {
-		return truncateLine(line, 120)
+		return truncateLine(line, snippetMaxLen)
 	}
 
 	const contextBytes = 50
@@ -345,8 +363,8 @@ func searchContentGo(vaultRoot, lowerQuery string, files []FileEntry, seen map[s
 
 		// Skip binary files: check for null bytes in the first 512 bytes.
 		checkLen := len(data)
-		if checkLen > 512 {
-			checkLen = 512
+		if checkLen > binaryCheckBytes {
+			checkLen = binaryCheckBytes
 		}
 
 		for i := 0; i < checkLen; i++ {

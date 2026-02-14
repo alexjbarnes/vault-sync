@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -44,7 +43,11 @@ func TestPost_MarshalsRequestBody(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 
 		var req SigninRequest
-		require.NoError(t, json.Unmarshal(body, &req))
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("unmarshal request: %v", err)
+			return
+		}
+
 		assert.Equal(t, "user@example.com", req.Email)
 		assert.Equal(t, "secret", req.Password)
 
@@ -212,7 +215,11 @@ func TestSignin_Success(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 
 		var req SigninRequest
-		require.NoError(t, json.Unmarshal(body, &req))
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("unmarshal request: %v", err)
+			return
+		}
+
 		assert.Equal(t, "test@example.com", req.Email)
 		assert.Equal(t, "pass123", req.Password)
 
@@ -266,7 +273,11 @@ func TestSignout_Success(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 
 		var req SignoutRequest
-		require.NoError(t, json.Unmarshal(body, &req))
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("unmarshal request: %v", err)
+			return
+		}
+
 		assert.Equal(t, "tok_xyz", req.Token)
 
 		_, _ = w.Write([]byte(`{}`))
@@ -300,7 +311,11 @@ func TestListVaults_Success(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 
 		var req VaultListRequest
-		require.NoError(t, json.Unmarshal(body, &req))
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("unmarshal request: %v", err)
+			return
+		}
+
 		assert.Equal(t, "tok_abc", req.Token)
 		assert.Equal(t, 3, req.SupportedEncryptionVersion)
 
@@ -356,7 +371,7 @@ func TestListVaults_APIError(t *testing.T) {
 func TestListVaults_SetsEncryptionVersion(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		assert.True(t, strings.Contains(string(body), `"supported_encryption_version":3`),
+		assert.Contains(t, string(body), `"supported_encryption_version":3`,
 			"request should include supported_encryption_version=3")
 
 		_, _ = w.Write([]byte(`{"vaults":[],"shared":[]}`))

@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +19,7 @@ import (
 )
 
 func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.New(slog.DiscardHandler)
 }
 
 func testUsers(t *testing.T) UserCredentials {
@@ -883,7 +882,7 @@ func TestToken_FullFlow(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.NotEmpty(t, resp.AccessToken)
 	assert.Equal(t, "Bearer", resp.TokenType)
-	assert.Greater(t, resp.ExpiresIn, 0)
+	assert.Positive(t, resp.ExpiresIn)
 
 	// Validate the issued token works.
 	ti := store.ValidateToken(resp.AccessToken)

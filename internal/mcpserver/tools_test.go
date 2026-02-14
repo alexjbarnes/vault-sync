@@ -95,7 +95,7 @@ func TestList_AllFiles(t *testing.T) {
 		Files      []vault.FileEntry `json:"files"`
 	}
 	extractJSON(t, result, &out)
-	assert.Greater(t, out.TotalFiles, 0)
+	assert.Positive(t, out.TotalFiles)
 
 	paths := make(map[string]bool)
 	for _, f := range out.Files {
@@ -136,7 +136,7 @@ func TestList_Root(t *testing.T) {
 	var out vault.ListResult
 	extractJSON(t, result, &out)
 	assert.Equal(t, "/", out.Path)
-	assert.Greater(t, out.TotalEntries, 0)
+	assert.Positive(t, out.TotalEntries)
 }
 
 func TestList_Subdirectory(t *testing.T) {
@@ -177,7 +177,7 @@ func TestRead_FullFile(t *testing.T) {
 	extractJSON(t, result, &out)
 	assert.Equal(t, "notes/hello.md", out.Path)
 	assert.Contains(t, out.Content, "Hello World")
-	assert.Greater(t, out.TotalLines, 0)
+	assert.Positive(t, out.TotalLines)
 }
 
 func TestRead_WithPagination(t *testing.T) {
@@ -222,7 +222,7 @@ func TestSearch_ByFilename(t *testing.T) {
 
 	var out vault.SearchResult
 	extractJSON(t, result, &out)
-	assert.Greater(t, out.TotalMatches, 0)
+	assert.Positive(t, out.TotalMatches)
 
 	found := false
 
@@ -590,7 +590,7 @@ func TestCopy_Success(t *testing.T) {
 	var out vault.CopyResult
 	extractJSON(t, result, &out)
 	assert.True(t, out.Copied)
-	assert.Greater(t, out.Size, int64(0))
+	assert.Positive(t, out.Size)
 
 	// Both files exist.
 	_, err := os.Stat(filepath.Join(v.Root(), "notes/second.md"))

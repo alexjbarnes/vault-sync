@@ -15,6 +15,14 @@ import (
 const (
 	tokenExpiry        = time.Hour
 	refreshTokenExpiry = 30 * 24 * time.Hour
+
+	// accessTokenBytes is the number of random bytes used to generate
+	// an access token (hex-encoded to twice this length).
+	accessTokenBytes = 32
+
+	// refreshTokenBytes is the number of random bytes used to generate
+	// a refresh token (hex-encoded to twice this length).
+	refreshTokenBytes = 32
 )
 
 type tokenRequest struct {
@@ -100,8 +108,8 @@ func HandleToken(store *Store, serverURL string) http.HandlerFunc {
 				resource = serverURL
 			}
 
-			newAccessToken := RandomHex(32)
-			newRefreshToken := RandomHex(32)
+			newAccessToken := RandomHex(accessTokenBytes)
+			newRefreshToken := RandomHex(refreshTokenBytes)
 
 			store.SaveToken(&models.OAuthToken{
 				Token:        newAccessToken,
@@ -199,8 +207,8 @@ func HandleToken(store *Store, serverURL string) http.HandlerFunc {
 		}
 
 		// Generate both access and refresh tokens
-		accessToken := RandomHex(32)
-		refreshToken := RandomHex(32)
+		accessToken := RandomHex(accessTokenBytes)
+		refreshToken := RandomHex(refreshTokenBytes)
 
 		// Save access token
 		store.SaveToken(&models.OAuthToken{

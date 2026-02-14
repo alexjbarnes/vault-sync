@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -61,7 +62,9 @@ func TestRead_TraversalAttacks(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := v.Read(tc.path, 0, 0)
 			require.Error(t, err, "path %q should be rejected", tc.path)
-			vErr, ok := err.(*Error)
+
+			vErr := &Error{}
+			ok := errors.As(err, &vErr)
 			require.True(t, ok, "expected vault.Error, got %T: %v", err, err)
 			assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 		})
@@ -74,7 +77,9 @@ func TestList_TraversalAttacks(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := v.List(tc.path)
 			require.Error(t, err, "path %q should be rejected", tc.path)
-			vErr, ok := err.(*Error)
+
+			vErr := &Error{}
+			ok := errors.As(err, &vErr)
 			require.True(t, ok, "expected vault.Error, got %T: %v", err, err)
 			assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 		})
@@ -87,7 +92,9 @@ func TestWrite_TraversalAttacks(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := v.Write(tc.path, "malicious", true)
 			require.Error(t, err, "path %q should be rejected", tc.path)
-			vErr, ok := err.(*Error)
+
+			vErr := &Error{}
+			ok := errors.As(err, &vErr)
 			require.True(t, ok, "expected vault.Error, got %T: %v", err, err)
 			assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 		})
@@ -100,7 +107,9 @@ func TestEdit_TraversalAttacks(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := v.Edit(tc.path, "old", "new")
 			require.Error(t, err, "path %q should be rejected", tc.path)
-			vErr, ok := err.(*Error)
+
+			vErr := &Error{}
+			ok := errors.As(err, &vErr)
 			require.True(t, ok, "expected vault.Error, got %T: %v", err, err)
 			assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 		})
@@ -135,7 +144,9 @@ func TestRead_SymlinkEscape(t *testing.T) {
 	// Attempt to read through the symlink.
 	_, err = v.Read("notes/escape/secret.txt", 0, 0)
 	require.Error(t, err, "symlink escape should be blocked")
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok, "expected vault.Error, got %T: %v", err, err)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 }
@@ -155,7 +166,9 @@ func TestList_SymlinkEscape(t *testing.T) {
 
 	_, err = v.List("escape")
 	require.Error(t, err, "symlink escape should be blocked")
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok, "expected vault.Error, got %T: %v", err, err)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 }
@@ -174,7 +187,9 @@ func TestWrite_SymlinkEscape(t *testing.T) {
 
 	_, err = v.Write("escape/evil.txt", "malicious", false)
 	require.Error(t, err, "symlink escape should be blocked")
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok, "expected vault.Error, got %T: %v", err, err)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 
@@ -202,7 +217,9 @@ func TestEdit_SymlinkEscape(t *testing.T) {
 
 	_, err = v.Edit("notes/linked.md", "original", "hacked")
 	require.Error(t, err, "symlink escape should be blocked")
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok, "expected vault.Error, got %T: %v", err, err)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 
@@ -228,7 +245,9 @@ func TestRead_ObsidianProtected(t *testing.T) {
 		t.Run(p, func(t *testing.T) {
 			_, err := v.Read(p, 0, 0)
 			require.Error(t, err, "reading %s should be blocked", p)
-			vErr, ok := err.(*Error)
+
+			vErr := &Error{}
+			ok := errors.As(err, &vErr)
 			require.True(t, ok)
 			assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 		})
@@ -246,7 +265,9 @@ func TestList_ObsidianProtected(t *testing.T) {
 		t.Run(p, func(t *testing.T) {
 			_, err := v.List(p)
 			require.Error(t, err, "listing %s should be blocked", p)
-			vErr, ok := err.(*Error)
+
+			vErr := &Error{}
+			ok := errors.As(err, &vErr)
 			require.True(t, ok)
 			assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 		})
@@ -265,7 +286,9 @@ func TestWrite_ObsidianProtected(t *testing.T) {
 		t.Run(p, func(t *testing.T) {
 			_, err := v.Write(p, "{}", true)
 			require.Error(t, err, "writing %s should be blocked", p)
-			vErr, ok := err.(*Error)
+
+			vErr := &Error{}
+			ok := errors.As(err, &vErr)
 			require.True(t, ok)
 			assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 		})
@@ -277,7 +300,9 @@ func TestEdit_ObsidianProtected(t *testing.T) {
 
 	_, err := v.Edit(".obsidian/app.json", "dark", "light")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 }
@@ -347,7 +372,9 @@ func TestValidatePath_DotDot(t *testing.T) {
 	for _, p := range bad {
 		err := validatePath(p)
 		require.Error(t, err, "path %q should be rejected", p)
-		vErr, ok := err.(*Error)
+
+		vErr := &Error{}
+		ok := errors.As(err, &vErr)
 		require.True(t, ok)
 		assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 	}
@@ -407,7 +434,8 @@ func TestResolve_AbsolutePathInInput(t *testing.T) {
 	// This should either error or resolve to root/etc/passwd (inside vault).
 	if err != nil {
 		// If it errors, it should be a path escape.
-		vErr, ok := err.(*Error)
+		vErr := &Error{}
+		ok := errors.As(err, &vErr)
 		require.True(t, ok)
 		assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 	} else {

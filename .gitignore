@@ -3,3 +3,4 @@ bin/
 /vault/
 cover*.out
 coverage.html
+vault-sync

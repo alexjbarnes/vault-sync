@@ -43,7 +43,7 @@ func TestClose_CancelsConnContext(t *testing.T) {
 	mock.EXPECT().Close(websocket.StatusNormalClosure, "bye").Return(nil)
 
 	err := s.Close()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Error(t, ctx.Err(), "connCancel should have been called")
 }
 
@@ -153,7 +153,7 @@ func TestStartReader_FeedsInboundCh(t *testing.T) {
 	case msg := <-s.inboundCh:
 		assert.Equal(t, websocket.MessageText, msg.typ)
 		assert.Equal(t, payload, msg.data)
-		assert.NoError(t, msg.err)
+		require.NoError(t, msg.err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for inbound message")
 	}
@@ -172,8 +172,8 @@ func TestStartReader_DeliverReadError(t *testing.T) {
 
 	select {
 	case msg := <-s.inboundCh:
-		assert.Error(t, msg.err)
-		assert.ErrorContains(t, msg.err, "conn died")
+		require.Error(t, msg.err)
+		require.ErrorContains(t, msg.err, "conn died")
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for error message")
 	}
@@ -237,7 +237,7 @@ func TestEventLoop_InboundPush(t *testing.T) {
 	defer connCancel()
 
 	err := s.eventLoop(ctx, connCtx)
-	assert.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, context.Canceled)
 
 	// Version should have been updated.
 	assert.Equal(t, int64(500), s.version)
@@ -292,11 +292,11 @@ func TestEventLoop_OpChannelPush(t *testing.T) {
 	}()
 
 	err := s.eventLoop(ctx, connCtx)
-	assert.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, context.Canceled)
 
 	select {
 	case opErr := <-op.result:
-		assert.NoError(t, opErr)
+		require.NoError(t, opErr)
 	default:
 		t.Fatal("op.result should have a value")
 	}
@@ -729,7 +729,7 @@ func TestHandshake_CancelsPreviousConnCancel(t *testing.T) {
 		s.connCancel()
 	}
 
-	assert.Error(t, prevCtx.Err(), "previous connCancel should be called")
+	require.Error(t, prevCtx.Err(), "previous connCancel should be called")
 
 	err := s.handshake(context.Background(), mock)
 	require.NoError(t, err)

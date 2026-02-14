@@ -690,7 +690,7 @@ func TestHandlePushWhileBusy_DeleteLocalFile(t *testing.T) {
 
 	// File should be deleted.
 	_, err := vault.ReadFile("busy-del.md")
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	// Local state should be cleaned up.
 	lf, _ := appState.GetLocalFile(testSyncVaultID, "busy-del.md")

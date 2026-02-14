@@ -184,7 +184,7 @@ func TestPathDecrypt_InvalidHex(t *testing.T) {
 	c := testCipher(t)
 
 	_, err := c.DecryptPath("not-hex!")
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decoding hex")
 }
 
@@ -205,7 +205,7 @@ func TestPathDecrypt_TooShort(t *testing.T) {
 	c := testCipher(t)
 	// Less than 12 bytes (nonce size) when decoded.
 	_, err := c.DecryptPath(hex.EncodeToString([]byte{0x01, 0x02, 0x03}))
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ciphertext too short")
 }
 
@@ -217,7 +217,7 @@ func TestPathEncrypt_EmptyPath(t *testing.T) {
 
 	dec, err := c.DecryptPath(enc)
 	require.NoError(t, err)
-	assert.Equal(t, "", dec)
+	assert.Empty(t, dec)
 }
 
 // --- Content encryption round-trip tests ---
@@ -275,7 +275,7 @@ func TestContentDecrypt_WrongKey(t *testing.T) {
 func TestContentDecrypt_TooShort(t *testing.T) {
 	c := testCipher(t)
 	_, err := c.DecryptContent([]byte{0x01, 0x02, 0x03})
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ciphertext too short")
 }
 

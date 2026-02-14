@@ -123,8 +123,8 @@ func TestExecutePush_FileContent(t *testing.T) {
 				assert.Equal(t, "md", msg.Extension)
 				assert.False(t, msg.Folder)
 				assert.False(t, msg.Deleted)
-				assert.Greater(t, msg.Size, int64(0))
-				assert.Greater(t, msg.Pieces, 0)
+				assert.Positive(t, msg.Size)
+				assert.Positive(t, msg.Pieces)
 			} else {
 				// Second write: binary chunk
 				assert.Equal(t, websocket.MessageBinary, typ)

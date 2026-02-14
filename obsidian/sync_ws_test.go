@@ -258,8 +258,8 @@ func TestWaitForReady_ReadErrorIsFatal(t *testing.T) {
 	var pushes []ServerPush
 
 	err := sc.WaitForReady(context.Background(), &pushes)
-	assert.ErrorContains(t, err, "reading message")
-	assert.ErrorContains(t, err, "connection closed")
+	require.ErrorContains(t, err, "reading message")
+	require.ErrorContains(t, err, "connection closed")
 }
 
 func TestWaitForReady_ReadErrorAfterPushes(t *testing.T) {
@@ -280,7 +280,7 @@ func TestWaitForReady_ReadErrorAfterPushes(t *testing.T) {
 	var pushes []ServerPush
 
 	err := sc.WaitForReady(context.Background(), &pushes)
-	assert.ErrorContains(t, err, "unexpected EOF")
+	require.ErrorContains(t, err, "unexpected EOF")
 	// Push should not have been appended (decryption failed, no cipher).
 	assert.Empty(t, pushes)
 }
@@ -442,7 +442,7 @@ func TestPullDirect_DeletedResponse(t *testing.T) {
 	)
 
 	content, err := sc.pullDirect(context.Background(), 99)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Nil(t, content)
 }
 
@@ -843,8 +843,8 @@ func TestReadResponse_ReadError(t *testing.T) {
 	sc.inboundCh <- inboundMsg{err: fmt.Errorf("connection lost")}
 
 	_, err := sc.readResponse(context.Background())
-	assert.ErrorContains(t, err, "reading response")
-	assert.ErrorContains(t, err, "connection lost")
+	require.ErrorContains(t, err, "reading response")
+	require.ErrorContains(t, err, "connection lost")
 }
 
 func TestReadResponse_ContextCancelled(t *testing.T) {
@@ -944,7 +944,7 @@ func TestHandleInbound_PushUpdatesVersion(t *testing.T) {
 	// Push with higher UID should update version. processPush will fail
 	// without cipher, but the version update happens before processPush.
 	err := sc.handleInbound(context.Background(), []byte(`{"op":"push","uid":50,"path":"enc"}`))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, int64(50), sc.version)
 	assert.True(t, sc.versionDirty)
 }
@@ -954,7 +954,7 @@ func TestHandleInbound_PushDoesNotDowngradeVersion(t *testing.T) {
 	sc.version = 100
 
 	err := sc.handleInbound(context.Background(), []byte(`{"op":"push","uid":50,"path":"enc"}`))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, int64(100), sc.version)
 }
 

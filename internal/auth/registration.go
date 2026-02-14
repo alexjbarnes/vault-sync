@@ -28,9 +28,15 @@ type registrationResponse struct {
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
 }
 
-// maxRequestBody caps the size of JSON request bodies to prevent
-// memory exhaustion from oversized requests.
-const maxRequestBody = 64 * 1024 // 64KB
+const (
+	// maxRequestBody caps the size of JSON request bodies to prevent
+	// memory exhaustion from oversized requests.
+	maxRequestBody = 64 * 1024 // 64KB
+
+	// clientIDBytes is the number of random bytes used to generate
+	// a client ID during dynamic registration (hex-encoded to twice this length).
+	clientIDBytes = 16
+)
 
 // HandleRegistration returns the /oauth/register handler.
 func HandleRegistration(store *Store) http.HandlerFunc {
@@ -65,7 +71,7 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 			}
 		}
 
-		clientID := RandomHex(16)
+		clientID := RandomHex(clientIDBytes)
 
 		grantTypes := req.GrantTypes
 		if len(grantTypes) == 0 {

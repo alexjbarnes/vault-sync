@@ -125,7 +125,7 @@ func TestVault_DeleteEmptyDir_Empty(t *testing.T) {
 	require.NoError(t, err)
 
 	err = v.DeleteEmptyDir("empty-dir")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	_, err = v.Stat("empty-dir")
 	assert.True(t, os.IsNotExist(err))
@@ -140,7 +140,7 @@ func TestVault_DeleteEmptyDir_NonEmpty(t *testing.T) {
 	require.NoError(t, err)
 
 	err = v.DeleteEmptyDir("parent")
-	assert.Error(t, err, "deleting non-empty directory must fail")
+	require.Error(t, err, "deleting non-empty directory must fail")
 
 	// Directory must still exist.
 	_, err = v.Stat("parent")
@@ -162,15 +162,15 @@ func TestVault_DeleteEmptyDir_NestedEmpty(t *testing.T) {
 
 	// Delete innermost first.
 	err = v.DeleteEmptyDir("a/b/c")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Now b is empty too.
 	err = v.DeleteEmptyDir("a/b")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Now a is empty.
 	err = v.DeleteEmptyDir("a")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 // --- DeleteDir (force remove) ---
@@ -182,7 +182,7 @@ func TestVault_DeleteDir_NonEmpty(t *testing.T) {
 	require.NoError(t, err)
 
 	err = v.DeleteDir("dir")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	_, err = v.Stat("dir")
 	assert.True(t, os.IsNotExist(err))
@@ -213,7 +213,7 @@ func TestVault_Rename(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = v.ReadFile("old.md")
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	got, err := v.ReadFile("new.md")
 	require.NoError(t, err)
@@ -260,7 +260,7 @@ func TestVault_RejectsPathTraversal(t *testing.T) {
 	v := tempVault(t)
 
 	_, err := v.ReadFile("../../etc/passwd")
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "path contains ..")
 }
 
@@ -268,7 +268,7 @@ func TestVault_RejectsEmptyPath(t *testing.T) {
 	v := tempVault(t)
 
 	_, err := v.ReadFile("")
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty path")
 }
 

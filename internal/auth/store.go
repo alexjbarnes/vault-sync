@@ -38,6 +38,10 @@ const (
 
 	// cleanupInterval controls how often expired entries are reaped.
 	cleanupInterval = 5 * time.Minute
+
+	// maxRegistrationsPerMinute caps the number of dynamic client
+	// registrations allowed within a one-minute sliding window.
+	maxRegistrationsPerMinute = 10
 )
 
 // csrfEntry tracks a CSRF token with its expiry time.
@@ -327,7 +331,7 @@ func (s *Store) RegistrationAllowed() bool {
 
 	s.registrationTimes = valid
 
-	if len(s.registrationTimes) >= 10 {
+	if len(s.registrationTimes) >= maxRegistrationsPerMinute {
 		return false
 	}
 

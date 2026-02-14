@@ -31,7 +31,7 @@ type ScanResult struct {
 // Files that existed in persisted state but are gone from disk are returned
 // in Deleted. If filter is non-nil, .obsidian/ paths not allowed by the
 // filter are skipped.
-func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog.Logger, filter *SyncFilter) (*ScanResult, error) {
+func ScanLocal(vault *Vault, appState *state.State, vaultID string, logger *slog.Logger, filter *SyncFilter) (*ScanResult, error) { //nolint:gocognit // filesystem scan with filter/hash/diff logic is inherently complex
 	persisted, err := appState.AllLocalFiles(vaultID)
 	if err != nil {
 		return nil, fmt.Errorf("loading persisted local files: %w", err)

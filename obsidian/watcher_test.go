@@ -3,7 +3,6 @@ package obsidian
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,7 +14,7 @@ import (
 	"go.uber.org/mock/gomock"
 )
 
-var testLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+var testLogger = slog.New(slog.DiscardHandler)
 
 func newTestWatcher(t *testing.T, vault *Vault, pusher syncPusher) *Watcher {
 	t.Helper()

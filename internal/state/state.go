@@ -3,12 +3,24 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/alexjbarnes/vault-sync/internal/models"
 	bolt "go.etcd.io/bbolt"
+)
+
+const (
+	// stateDirPerm is the permission mode for the state directory (~/.vault-sync/).
+	stateDirPerm = fs.FileMode(0o700)
+
+	// stateFilePerm is the permission mode for the state database file.
+	stateFilePerm = fs.FileMode(0o600)
+
+	// stateOpenTimeout is the maximum time to wait for the bolt database lock.
+	stateOpenTimeout = 5 * time.Second
 )
 
 var (
@@ -80,11 +92,11 @@ func Load() (*State, error) {
 // LoadAt opens a state database at the given path, creating it if it
 // does not exist. Useful for tests that need an isolated database.
 func LoadAt(path string) (*State, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), stateDirPerm); err != nil {
 		return nil, fmt.Errorf("creating state directory: %w", err)
 	}
 
-	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	db, err := bolt.Open(path, stateFilePerm, &bolt.Options{Timeout: stateOpenTimeout})
 	if err != nil {
 		return nil, fmt.Errorf("opening state db: %w", err)
 	}

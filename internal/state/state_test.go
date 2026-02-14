@@ -50,7 +50,7 @@ func TestLoadAt_ReopensExistingDB(t *testing.T) {
 
 func TestToken_EmptyByDefault(t *testing.T) {
 	s := testDB(t)
-	assert.Equal(t, "", s.Token())
+	assert.Empty(t, s.Token())
 }
 
 func TestSetToken_RoundTrip(t *testing.T) {
@@ -70,7 +70,7 @@ func TestSetToken_EmptyString(t *testing.T) {
 	s := testDB(t)
 	require.NoError(t, s.SetToken("something"))
 	require.NoError(t, s.SetToken(""))
-	assert.Equal(t, "", s.Token())
+	assert.Empty(t, s.Token())
 }
 
 // --- VaultState ---

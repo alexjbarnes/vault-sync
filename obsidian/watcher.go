@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -13,6 +14,16 @@ import (
 
 	"github.com/alexjbarnes/vault-sync/internal/state"
 	"github.com/fsnotify/fsnotify"
+)
+
+const (
+	// watcherDirPerm is the permission mode for the sync directory when
+	// ensuring it exists before starting the file watcher.
+	watcherDirPerm = fs.FileMode(0o755)
+
+	// watcherDebounceInterval is how often the watcher checks for pending
+	// filesystem events to batch rapid writes into a single push per file.
+	watcherDebounceInterval = 500 * time.Millisecond
 )
 
 type pendingEvent struct {
@@ -70,7 +81,7 @@ func (w *Watcher) Watch(ctx context.Context) error {
 
 	syncDir := w.vault.Dir()
 
-	if err := os.MkdirAll(syncDir, 0o755); err != nil { //nolint:gosec // G301: vault sync directory needs group/other read+exec for shared access
+	if err := os.MkdirAll(syncDir, watcherDirPerm); err != nil {
 		return fmt.Errorf("creating sync dir: %w", err)
 	}
 
@@ -83,7 +94,7 @@ func (w *Watcher) Watch(ctx context.Context) error {
 	// Debounce: batch rapid writes into a single push per file.
 	pending := make(map[string]time.Time)
 
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(watcherDebounceInterval)
 	defer ticker.Stop()
 
 	for {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"math"
 	"net/http"
@@ -24,6 +25,21 @@ import (
 )
 
 var Version = "dev"
+
+const (
+	// vaultDirPerm is the Unix permission for vault directories.
+	vaultDirPerm = fs.FileMode(0o755)
+	// mcpReadTimeout is the HTTP server read timeout.
+	mcpReadTimeout = 30 * time.Second
+	// mcpWriteTimeout is the HTTP server write timeout.
+	mcpWriteTimeout = 60 * time.Second
+	// mcpIdleTimeout is the HTTP server idle connection timeout.
+	mcpIdleTimeout = 120 * time.Second
+	// mcpShutdownTimeout is the grace period for MCP server shutdown.
+	mcpShutdownTimeout = 10 * time.Second
+	// retryBackoffBase is the base for exponential backoff calculations.
+	retryBackoffBase = 2
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -156,7 +172,7 @@ func setupSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*s
 	// Ensure the vault directory exists before runSync and runMCP
 	// launch concurrently. Without this, runMCP can race ahead and
 	// fail opening the vault before runSync creates the directory.
-	if err := os.MkdirAll(cfg.SyncDir, 0o755); err != nil { //nolint:gosec // G301: vault dir needs 0755 for Obsidian access
+	if err := os.MkdirAll(cfg.SyncDir, vaultDirPerm); err != nil {
 		appState.Close()
 		return nil, fmt.Errorf("creating vault directory: %w", err)
 	}
@@ -351,9 +367,9 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 	server := &http.Server{
 		Addr:         cfg.MCPListenAddr,
 		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadTimeout:  mcpReadTimeout,
+		WriteTimeout: mcpWriteTimeout,
+		IdleTimeout:  mcpIdleTimeout,
 	}
 
 	mcpLogger.Info("starting MCP server",
@@ -367,7 +383,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		<-ctx.Done()
 		mcpLogger.Info("shutting down MCP server")
 
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), mcpShutdownTimeout)
 		defer cancel()
 
 		_ = server.Shutdown(shutdownCtx)
@@ -400,7 +416,7 @@ const (
 // retryDelay returns the backoff delay for the given attempt (0-indexed).
 // Uses exponential backoff: 2s, 4s, 8s, 16s, 30s.
 func retryDelay(attempt int) time.Duration {
-	d := retryBaseDelay * time.Duration(math.Pow(2, float64(attempt)))
+	d := retryBaseDelay * time.Duration(math.Pow(retryBackoffBase, float64(attempt)))
 	if d > retryMaxDelay {
 		d = retryMaxDelay
 	}

@@ -19,6 +19,19 @@ import (
 
 const configDir = ".obsidian"
 
+const (
+	// recentlyCreatedThresholdMs is the maximum age in milliseconds for a
+	// file to be considered "recently created" during merge. Files younger
+	// than this threshold let the server win unconditionally when no base
+	// version is available, matching app.js behavior (3 minutes).
+	recentlyCreatedThresholdMs = 180_000
+
+	// diffCleanupThreshold is the minimum number of diffs before running
+	// semantic and efficiency cleanup passes. Below this count the diffs
+	// are simple enough that cleanup would not improve the result.
+	diffCleanupThreshold = 2
+)
+
 // ReconcileDecision is the outcome of comparing local state against an
 // incoming server push. The caller performs I/O based on the decision.
 type ReconcileDecision int
@@ -328,7 +341,7 @@ func (r *Reconciler) executeDecision(ctx context.Context, decision ReconcileDeci
 				r.logger.Info("reconcile: folder not empty, skipping delete", slog.String("path", path))
 				r.persistServerPush(path, push, true)
 
-				return nil
+				return nil //nolint:nilerr // intentional: non-empty folder is not an error, skip delete
 			}
 		} else {
 			if err := r.vault.DeleteFile(path); err != nil {
@@ -479,7 +492,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 				age = -age
 			}
 
-			if age < 180_000 {
+			if age < recentlyCreatedThresholdMs {
 				r.logger.Info("reconcile: no base, recently created, server wins", slog.String("path", path))
 				return r.writeServerContent(path, push, []byte(serverText))
 			}
@@ -500,7 +513,7 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 	dmp := diffmatchpatch.New()
 
 	diffs := dmp.DiffMain(baseText, localText, true)
-	if len(diffs) > 2 {
+	if len(diffs) > diffCleanupThreshold {
 		diffs = dmp.DiffCleanupSemantic(diffs)
 		diffs = dmp.DiffCleanupEfficiency(diffs)
 	}

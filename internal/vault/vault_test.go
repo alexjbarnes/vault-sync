@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,7 +80,7 @@ func TestListAll_ReturnsAllFiles(t *testing.T) {
 
 	assert.True(t, paths["notes/hello.md"])
 	assert.True(t, paths["images/photo.png"])
-	assert.Equal(t, result.TotalFiles, len(result.Files))
+	assert.Len(t, result.Files, result.TotalFiles)
 }
 
 func TestListAll_ParsesFrontmatterTags(t *testing.T) {
@@ -117,7 +118,7 @@ func TestList_Root(t *testing.T) {
 	result, err := v.List("")
 	require.NoError(t, err)
 	assert.Equal(t, "/", result.Path)
-	assert.Greater(t, result.TotalEntries, 0)
+	assert.Positive(t, result.TotalEntries)
 
 	// Should have directories like "notes", "daily", etc.
 	names := make(map[string]string)
@@ -160,7 +161,9 @@ func TestList_NonexistentDir(t *testing.T) {
 	v := testVault(t)
 	_, err := v.List("nonexistent")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodeFileNotFound, vErr.Code)
 }
@@ -169,7 +172,9 @@ func TestList_PathTraversal(t *testing.T) {
 	v := testVault(t)
 	_, err := v.List("../etc")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 }
@@ -180,7 +185,7 @@ func TestList_ExcludesHiddenFiles(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, e := range result.Entries {
-		assert.False(t, e.Name[0] == '.', "hidden entry should be excluded: %s", e.Name)
+		assert.NotEqual(t, '.', e.Name[0], "hidden entry should be excluded: %s", e.Name)
 	}
 }
 
@@ -208,7 +213,9 @@ func TestRead_OffsetBeyondFile(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Read("notes/second.md", 100, 0)
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodeInvalidRange, vErr.Code)
 }
@@ -217,7 +224,9 @@ func TestRead_NonexistentFile(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Read("nonexistent.md", 0, 0)
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodeFileNotFound, vErr.Code)
 }
@@ -226,7 +235,9 @@ func TestRead_PathTraversal(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Read("../../etc/passwd", 0, 0)
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 }
@@ -283,7 +294,7 @@ func TestSearch_ByFilename(t *testing.T) {
 	v := testVault(t)
 	result, err := v.Search("cold-brew", 20)
 	require.NoError(t, err)
-	assert.Greater(t, result.TotalMatches, 0)
+	assert.Positive(t, result.TotalMatches)
 
 	found := false
 
@@ -335,7 +346,7 @@ func TestSearch_CaseInsensitive(t *testing.T) {
 	v := testVault(t)
 	result, err := v.Search("HELLO", 20)
 	require.NoError(t, err)
-	assert.Greater(t, result.TotalMatches, 0)
+	assert.Positive(t, result.TotalMatches)
 }
 
 func TestSearch_MaxResults(t *testing.T) {
@@ -396,7 +407,9 @@ func TestWrite_ProtectedPath(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Write(".obsidian/app.json", "hacked", true)
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 }
@@ -405,7 +418,9 @@ func TestWrite_PathTraversal(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Write("../etc/evil", "bad", true)
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 }
@@ -438,7 +453,9 @@ func TestEdit_TextNotFound(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Edit("notes/second.md", "nonexistent text", "replacement")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodeTextNotFound, vErr.Code)
 }
@@ -451,7 +468,9 @@ func TestEdit_TextNotUnique(t *testing.T) {
 
 	_, err = v.Edit("dup.md", "hello world", "replaced")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodeTextNotUnique, vErr.Code)
 	assert.Contains(t, vErr.Message, "2 times")
@@ -461,7 +480,9 @@ func TestEdit_NonexistentFile(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Edit("nonexistent.md", "old", "new")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodeFileNotFound, vErr.Code)
 }
@@ -470,7 +491,9 @@ func TestEdit_ProtectedPath(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Edit(".obsidian/app.json", "dark", "light")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 }
@@ -493,7 +516,7 @@ func TestEdit_UpdatesIndex(t *testing.T) {
 	entry := v.index.Get("notes/second.md")
 	require.NotNil(t, entry)
 	// Size should have changed.
-	assert.Greater(t, entry.Size, int64(0))
+	assert.Positive(t, entry.Size)
 }
 
 // --- Delete ---
@@ -513,7 +536,9 @@ func TestDelete_NonexistentFile(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Delete("nonexistent.md")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodeFileNotFound, vErr.Code)
 }
@@ -522,7 +547,9 @@ func TestDelete_Directory(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Delete("notes")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodeIsDirectory, vErr.Code)
 }
@@ -531,7 +558,9 @@ func TestDelete_ProtectedPath(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Delete(".obsidian/app.json")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 }
@@ -540,7 +569,9 @@ func TestDelete_PathTraversal(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Delete("../etc/passwd")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 }
@@ -624,7 +655,9 @@ func TestMove_NonexistentSource(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Move("nonexistent.md", "dest.md")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodeFileNotFound, vErr.Code)
 }
@@ -633,7 +666,9 @@ func TestMove_DestinationExists(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Move("notes/hello.md", "notes/second.md")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 	assert.Contains(t, vErr.Message, "already exists")
@@ -643,7 +678,9 @@ func TestMove_Directory(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Move("notes", "archive")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodeIsDirectory, vErr.Code)
 }
@@ -652,7 +689,9 @@ func TestMove_ProtectedSource(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Move(".obsidian/app.json", "moved.json")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 }
@@ -661,7 +700,9 @@ func TestMove_ProtectedDest(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Move("notes/hello.md", ".obsidian/hello.md")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 }
@@ -694,7 +735,7 @@ func TestCopy_ExistingFile(t *testing.T) {
 	assert.True(t, result.Copied)
 	assert.Equal(t, "notes/second.md", result.Source)
 	assert.Equal(t, "archive/second.md", result.Destination)
-	assert.Greater(t, result.Size, int64(0))
+	assert.Positive(t, result.Size)
 
 	// Both source and destination exist with same content.
 	srcData, err := os.ReadFile(filepath.Join(v.Root(), "notes/second.md"))
@@ -717,7 +758,9 @@ func TestCopy_NonexistentSource(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Copy("nonexistent.md", "dest.md")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodeFileNotFound, vErr.Code)
 }
@@ -726,7 +769,9 @@ func TestCopy_DestinationExists(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Copy("notes/hello.md", "notes/second.md")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 	assert.Contains(t, vErr.Message, "already exists")
@@ -736,7 +781,9 @@ func TestCopy_Directory(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Copy("notes", "archive")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodeIsDirectory, vErr.Code)
 }
@@ -745,7 +792,9 @@ func TestCopy_ProtectedSource(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Copy(".obsidian/app.json", "copied.json")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 }
@@ -754,7 +803,9 @@ func TestCopy_ProtectedDest(t *testing.T) {
 	v := testVault(t)
 	_, err := v.Copy("notes/hello.md", ".obsidian/hello.md")
 	require.Error(t, err)
-	vErr, ok := err.(*Error)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
 	require.True(t, ok)
 	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
 }
