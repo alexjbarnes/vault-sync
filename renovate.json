@@ -3,6 +3,7 @@
   "extends": ["config:recommended"],
   "labels": ["dependencies"],
   "automerge": false,
+  "prHourlyLimit": 0,
   "packageRules": [
     {
       "description": "Group all patch-level Go module updates",
