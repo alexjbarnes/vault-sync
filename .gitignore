@@ -4,3 +4,4 @@ bin/
 cover*.out
 coverage.html
 vault-sync
+*.log
