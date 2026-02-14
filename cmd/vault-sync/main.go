@@ -17,9 +17,9 @@ import (
 	"github.com/alexjbarnes/vault-sync/internal/config"
 	"github.com/alexjbarnes/vault-sync/internal/logging"
 	"github.com/alexjbarnes/vault-sync/internal/mcpserver"
+	"github.com/alexjbarnes/vault-sync/internal/obsidian"
 	"github.com/alexjbarnes/vault-sync/internal/state"
 	"github.com/alexjbarnes/vault-sync/internal/vault"
-	"github.com/alexjbarnes/vault-sync/obsidian"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/sync/errgroup"
 )

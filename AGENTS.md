@@ -13,8 +13,8 @@ just lint                           # golangci-lint run
 just check                          # lint + test + build
 just clean                          # remove bin/, coverage artifacts
 
-go test -v -race ./obsidian/...     # test one package
-go test -v -race -run TestFoo ./obsidian/...  # run a single test
+go test -v -race ./internal/obsidian/...     # test one package
+go test -v -race -run TestFoo ./internal/obsidian/...  # run a single test
 go build ./...                      # check compilation without producing binary
 go vet ./...                        # static analysis
 
@@ -37,22 +37,22 @@ internal/
   logging/                    slog setup (JSON for production, text for development)
   mcpserver/                  MCP tool registration (vault_list, vault_read, etc.)
   models/                     Shared types (OAuthToken, OAuthClient) to break circular deps
+  obsidian/                   Obsidian Sync protocol implementation
+    client.go                 REST API client (signin, signout, list vaults, transient retry)
+    types.go                  All JSON message types (REST + WebSocket)
+    crypto.go                 scrypt key derivation, AES-GCM encrypt/decrypt
+    sync.go                   WebSocket sync client, event loop, push/pull
+    reconcile.go              Reconciliation decision tree + three-phase startup
+    scanner.go                Local filesystem scan + diff against persisted state
+    vault.go                  Thread-safe filesystem operations + path normalization
+    watcher.go                fsnotify watcher with debounce + offline queue
+    filter.go                 Config sync filter (.obsidian/ path filtering)
+    ctime_{linux,darwin,other}.go  Platform-specific ctime extraction
   state/                      bbolt persistence (tokens, vault state, file tracking, OAuth)
   vault/                      Read-only vault access for MCP (file listing, search, editing, index)
-obsidian/
-  client.go                   REST API client (signin, signout, list vaults, transient retry)
-  types.go                    All JSON message types (REST + WebSocket)
-  crypto.go                   scrypt key derivation, AES-GCM encrypt/decrypt
-  sync.go                     WebSocket sync client, event loop, push/pull
-  reconcile.go                Reconciliation decision tree + three-phase startup
-  scanner.go                  Local filesystem scan + diff against persisted state
-  vault.go                    Thread-safe filesystem operations + path normalization
-  watcher.go                  fsnotify watcher with debounce + offline queue
-  filter.go                   Config sync filter (.obsidian/ path filtering)
-  ctime_{linux,darwin,other}.go  Platform-specific ctime extraction
 ```
 
-All domain logic lives in `obsidian/`. `internal/` is infrastructure. `cmd/` is the entry point only.
+All packages live under `internal/`. `cmd/` is the entry point only.
 
 ## Code style
 
@@ -152,7 +152,7 @@ Errors are always `slog.String("error", err.Error())`, not `slog.Any`.
 - Config is loaded from environment variables (or `.env` file). See `internal/config/config.go`.
 - State is persisted in `~/.vault-sync/state.db` (bbolt). OAuth tokens and clients are also persisted there.
 - Constructor-based dependency injection, no frameworks.
-- Two `Vault` types exist: `obsidian.Vault` (sync-oriented, RWMutex) and `internal/vault.Vault` (MCP-oriented, with index and search).
+- Two `Vault` types exist: `internal/obsidian.Vault` (sync-oriented, RWMutex) and `internal/vault.Vault` (MCP-oriented, with index and search).
 - Interfaces are only created when needed for testing. Both (`wsConn`, `syncPusher`) are unexported with minimal surface area.
 
 ## Dependencies
