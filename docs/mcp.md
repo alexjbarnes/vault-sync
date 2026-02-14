@@ -123,12 +123,4 @@ Copy a file. Creates destination parent directories automatically. Uses atomic w
 - Dynamic client registration supported
 - Access tokens expire; refresh token rotation enabled
 
-## Running Modes
 
-vault-sync supports three configurations:
-
-| Mode | `ENABLE_SYNC` | `ENABLE_MCP` | Use case |
-|---|---|---|---|
-| Sync only | `true` | `false` | Headless sync daemon |
-| MCP only | `false` | `true` | Serve an existing vault directory |
-| Both | `true` | `true` | Sync and serve in one process |
