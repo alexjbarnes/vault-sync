@@ -4,22 +4,14 @@
   "labels": ["dependencies"],
   "automerge": false,
   "prHourlyLimit": 0,
+  "groupName": "all dependencies",
+  "groupSlug": "all",
   "packageRules": [
     {
-      "description": "Group all patch-level Go module updates",
-      "matchManagers": ["gomod"],
-      "matchUpdateTypes": ["patch"],
-      "groupName": "go module patches"
-    },
-    {
-      "description": "Group GitHub Actions updates",
-      "matchManagers": ["github-actions"],
-      "groupName": "github actions"
-    },
-    {
-      "description": "Group Docker base image updates",
-      "matchManagers": ["dockerfile"],
-      "groupName": "docker base images"
+      "description": "Group all updates into a single PR",
+      "matchPackagePatterns": ["*"],
+      "groupName": "all dependencies",
+      "groupSlug": "all"
     }
   ]
 }
