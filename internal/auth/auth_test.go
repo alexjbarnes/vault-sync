@@ -374,7 +374,7 @@ func TestAuthorize_GET_ShowsLoginForm(t *testing.T) {
 	handler(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), "Vault Sync Login")
+	assert.Contains(t, rec.Body.String(), "vault-sync")
 	assert.Contains(t, rec.Body.String(), clientID)
 	assert.Contains(t, rec.Body.String(), "csrf_token")
 }
@@ -657,7 +657,7 @@ func TestAuthorize_GET_ResourceParameter(t *testing.T) {
 	handler(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), "Vault Sync Login")
+	assert.Contains(t, rec.Body.String(), "vault-sync")
 	assert.Contains(t, rec.Body.String(), testServerURL)
 }
 
