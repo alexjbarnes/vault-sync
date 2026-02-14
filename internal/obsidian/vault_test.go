@@ -264,6 +264,16 @@ func TestVault_RejectsPathTraversal(t *testing.T) {
 	assert.Contains(t, err.Error(), "path contains ..")
 }
 
+func TestVault_RejectsBackslashTraversal(t *testing.T) {
+	v := tempVault(t)
+
+	// Backslash-separated ".." should be caught after normalizePath
+	// converts backslashes to forward slashes.
+	_, err := v.ReadFile("notes\\..\\..\\etc\\passwd")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path contains ..")
+}
+
 func TestVault_RejectsEmptyPath(t *testing.T) {
 	v := tempVault(t)
 
@@ -341,9 +351,14 @@ func TestNormalizePath(t *testing.T) {
 			want:  "",
 		},
 		{
-			name:  "backslash not collapsed",
+			name:  "backslash converted to forward slash",
 			input: "notes\\hello.md",
-			want:  "notes\\hello.md",
+			want:  "notes/hello.md",
+		},
+		{
+			name:  "mixed separators normalized",
+			input: ".obsidian\\plugins/sync\\data.json",
+			want:  ".obsidian/plugins/sync/data.json",
 		},
 	}
 

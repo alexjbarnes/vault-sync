@@ -276,6 +276,11 @@ func (v *Vault) resolve(relPath string) (string, error) {
 	if strings.ContainsRune(relPath, 0) {
 		return "", fmt.Errorf("path contains null byte: %q", relPath)
 	}
+
+	// Normalize backslashes to forward slashes so the ".." segment check
+	// below catches Windows-style traversal like "foo\..\..\etc\passwd".
+	relPath = strings.ReplaceAll(relPath, "\\", "/")
+
 	// Reject paths containing ".." segments before filepath.Join cleans
 	// them, as defense in depth against traversal in decrypted server paths.
 	for _, seg := range strings.Split(relPath, "/") {
@@ -341,12 +346,14 @@ func clampMtime(t time.Time) time.Time {
 	return t
 }
 
-// normalizePath normalizes a vault-relative path. It replaces
-// non-breaking spaces with regular spaces, collapses repeated slashes,
-// trims leading/trailing slashes, and applies Unicode NFC normalization.
-// Call this on every path entering the system: scanner output, watcher
-// events, and decrypted server paths.
+// normalizePath normalizes a vault-relative path. It converts OS-native
+// path separators to forward slashes, replaces non-breaking spaces with
+// regular spaces, collapses repeated slashes, trims leading/trailing
+// slashes, and applies Unicode NFC normalization. Call this on every path
+// entering the system: scanner output, watcher events, and decrypted
+// server paths.
 func normalizePath(path string) string {
+	path = strings.ReplaceAll(path, "\\", "/")
 	path = strings.ReplaceAll(path, "\u00A0", " ")
 	path = strings.ReplaceAll(path, "\u202F", " ")
 

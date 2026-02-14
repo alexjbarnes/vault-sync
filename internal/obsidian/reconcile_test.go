@@ -402,6 +402,8 @@ func TestExtractExtension(t *testing.T) {
 		{"file.", ""},
 		{"a/b/c.tar.gz", "gz"},
 		{"photo.JPEG", "jpeg"},
+		{"notes\\hello.md", "md"},
+		{".obsidian\\plugins\\sync\\data.json", "json"},
 	}
 
 	for _, tt := range tests {

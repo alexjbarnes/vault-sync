@@ -160,6 +160,27 @@ func TestAllowPath_AllDisabled(t *testing.T) {
 	assert.False(t, f.AllowPath(".obsidian/graph.json"))
 }
 
+func TestAllowPath_BackslashPaths(t *testing.T) {
+	f := allEnabled()
+
+	// Paths with Windows-style backslashes should be normalized by
+	// normalizePath before matching, so filter checks still work.
+	assert.True(t, f.AllowPath(".obsidian\\app.json"))
+	assert.True(t, f.AllowPath(".obsidian\\themes\\minimal\\theme.css"))
+	assert.True(t, f.AllowPath(".obsidian\\plugins\\dataview\\main.js"))
+	assert.True(t, f.AllowPath(".obsidian\\snippets\\custom.css"))
+	assert.False(t, f.AllowPath(".obsidian\\workspace.json"))
+
+	// Non-.obsidian backslash paths always allowed.
+	assert.True(t, f.AllowPath("notes\\hello.md"))
+	assert.True(t, f.AllowPath("folder\\sub\\file.txt"))
+
+	// Disabled toggles still reject backslash paths.
+	d := allDisabled()
+	assert.False(t, d.AllowPath(".obsidian\\app.json"))
+	assert.False(t, d.AllowPath(".obsidian\\plugins\\foo\\main.js"))
+}
+
 func TestAllowPath_SelectiveToggles(t *testing.T) {
 	// Only main settings and hotkeys enabled.
 	f := &SyncFilter{
