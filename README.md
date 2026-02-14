@@ -1,6 +1,8 @@
 # vault-sync
 
-Headless CLI that syncs an Obsidian vault and optionally serves it over MCP with OAuth 2.1 auth. Single binary, no subcommands.
+Unofficial headless CLI that syncs an Obsidian vault using the [Obsidian Sync](https://obsidian.md/sync) service and optionally serves it over MCP with OAuth 2.1 auth. Single binary, no subcommands.
+
+This project is not affiliated with, endorsed by, or associated with Obsidian. It requires an active Obsidian Sync subscription. Use at your own risk.
 
 ## Features
 
@@ -96,6 +98,10 @@ internal/
 docker/                 Dockerfile and docker-compose.yml
 docs/                   Protocol spec, MCP docs
 ```
+
+## Disclaimer
+
+This is an unofficial, third-party client. It is not developed, maintained, or supported by the Obsidian team. The sync protocol is undocumented and may change without notice. No warranty is provided. The authors are not responsible for data loss or account issues arising from use of this software.
 
 ## License
 
