@@ -332,8 +332,8 @@ func (w *Watcher) addRecursive(dir string) error {
 
 func (w *Watcher) shouldIgnore(path string) bool {
 	base := filepath.Base(path)
-	// Ignore hidden files/dirs except .obsidian, which Obsidian Sync
-	// uses for workspace, plugins, and config.
+	// Ignore hidden files/dirs except .obsidian, which contains
+	// workspace, plugins, and config.
 	if strings.HasPrefix(base, ".") && base != ".obsidian" {
 		return true
 	}

@@ -79,11 +79,10 @@ const (
 	maxRetryShift = 10
 
 	// fileRetryBaseDelay is the base delay for per-file exponential
-	// backoff, matching app.js: 5s * 2^count.
+	// backoff: 5s * 2^count.
 	fileRetryBaseDelay = 5 * time.Second
 
-	// fileRetryMaxDelay is the ceiling for per-file retry backoff,
-	// matching the app.js 5-minute cap.
+	// fileRetryMaxDelay is the ceiling for per-file retry backoff.
 	fileRetryMaxDelay = 5 * time.Minute
 )
 
@@ -116,7 +115,7 @@ type wsConn interface {
 	SetReadLimit(n int64)
 }
 
-// SyncClient manages a WebSocket connection to an Obsidian Sync server.
+// SyncClient manages a WebSocket connection to a sync server.
 //
 // Architecture: a reader goroutine feeds inboundCh with raw WebSocket
 // messages. A single event loop goroutine (Listen) processes inbound
@@ -177,13 +176,12 @@ type SyncClient struct {
 	pendingPullsMu sync.Mutex
 
 	// retryBackoff tracks per-path retry state for failed operations.
-	// app.js uses: delay = 5s * 2^count, capped at 5 minutes.
+	// Delay = 5s * 2^count, capped at 5 minutes.
 	retryBackoff   map[string]retryEntry
 	retryBackoffMu sync.Mutex
 
 	// versionDirty tracks whether s.version was updated since the last
-	// persist. The event loop persists periodically (matching the
-	// Obsidian app's debounced saveData behavior).
+	// persist. The event loop persists periodically.
 	versionDirty bool
 }
 
@@ -833,7 +831,6 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	}
 
 	// Server error -- abort before sending any binary data.
-	// The Obsidian app's request() checks resp.err and throws on non-empty.
 	if resp.Err != "" {
 		s.recordRetryBackoff(op.path)
 		s.removeHashCache(op.path)
@@ -886,9 +883,8 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 
 // readResponse reads from inboundCh until a non-push, non-pong text
 // message arrives (the server's response to our request). Server pushes
-// that arrive while waiting are processed inline. This mirrors
-// Obsidian's onMessage handler which routes pushes and pongs separately
-// from request/response pairs.
+// that arrive while waiting are processed inline, since pushes and pongs
+// are routed separately from request/response pairs.
 func (s *SyncClient) readResponse(ctx context.Context) (json.RawMessage, error) {
 	timeout := time.NewTimer(responseTimeout)
 	defer timeout.Stop()
@@ -1286,8 +1282,8 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 		return nil
 	}
 
-	// No base available -- check ctime then use mtime comparison per
-	// app.js behavior. No conflict copy created, matching Obsidian exactly.
+	// No base available -- check ctime then use mtime comparison.
+	// No conflict copy is created in this case.
 	if baseText == "" {
 		// Files created less than 3 minutes ago: server wins unconditionally.
 		// This prevents newly-created files from shadowing existing server
@@ -2212,8 +2208,7 @@ func (s *SyncClient) touchLastMessage() {
 
 // persistVersionIfDirty saves the current version to bbolt if it changed
 // since the last persist. Called periodically from the event loop to
-// reduce the replay window on crash. The Obsidian app debounces version
-// persistence to 2 seconds; we do it on the heartbeat ticker (~20s).
+// reduce the replay window on crash.
 func (s *SyncClient) persistVersionIfDirty() {
 	if !s.versionDirty {
 		return
@@ -2237,7 +2232,7 @@ func (s *SyncClient) persistVersionIfDirty() {
 }
 
 // checkRetryBackoff returns (waitUntil, true) if path is in backoff,
-// or (zeroTime, false) if not. Matches app.js: 5s * 2^count, capped at 5min.
+// or (zeroTime, false) if not. Uses 5s * 2^count, capped at 5min.
 func (s *SyncClient) checkRetryBackoff(path string) (time.Time, bool) {
 	s.retryBackoffMu.Lock()
 	defer s.retryBackoffMu.Unlock()

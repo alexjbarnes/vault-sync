@@ -1,7 +1,7 @@
 package obsidian
 
 // SigninRequest is the payload for POST /user/signin.
-// The Obsidian app also sends an "mfa" field for 2FA users, but vault-sync
+// The server also supports an "mfa" field for 2FA users, but vault-sync
 // is a headless daemon with no way to prompt for a TOTP code. Users with
 // 2FA enabled must disable it or use a token obtained through other means.
 type SigninRequest struct {
@@ -67,7 +67,7 @@ type InitMessage struct {
 
 // InitResponse is the server reply to an init message.
 // On error, Res is "err" and Msg contains the human-readable reason
-// (e.g. "Your subscription to Obsidian Sync has expired").
+// (e.g. "Your subscription has expired").
 type InitResponse struct {
 	Res        string `json:"res"`
 	Msg        string `json:"msg"`

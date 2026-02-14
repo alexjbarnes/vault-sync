@@ -231,7 +231,7 @@ func TestLoad_DefaultDeviceName(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 
-	// Default should be the system hostname, matching Obsidian desktop behavior.
+	// Default should be the system hostname.
 	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "vault-sync"

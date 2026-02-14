@@ -2,7 +2,7 @@
 
 ## Project overview
 
-vault-sync is a headless CLI that syncs an Obsidian vault using the reverse-engineered Obsidian Sync protocol and optionally serves vault content over an MCP HTTP server with OAuth 2.1 auth. Single binary, no subcommands. The protocol spec lives in `docs/obsidian-sync-protocol.md` and the reference Obsidian app source is `app.js`.
+vault-sync is a headless CLI that syncs an Obsidian vault using the Obsidian Sync protocol and optionally serves vault content over an MCP HTTP server with OAuth 2.1 auth. Single binary, no subcommands. The protocol spec lives in `docs/obsidian-sync-protocol.md`.
 
 ## Build and test commands
 
@@ -121,12 +121,7 @@ Errors are always `slog.String("error", err.Error())`, not `slog.Any`.
 
 - All exported symbols have godoc comments: `// TypeName does X.`
 - Comments explain WHY, not WHAT. Protocol rationale is documented inline.
-- Reference the protocol doc or app.js behavior when deviating or matching:
-
-```go
-// The Obsidian app refuses to delete folders that still have children
-// (protocol doc lines 753 and 965).
-```
+- Do not reference the Obsidian app or app.js in comments.
 
 ### Formatting
 
@@ -176,4 +171,4 @@ Errors are always `slog.String("error", err.Error())`, not `slog.Any`.
 - Do not add unnecessary documentation files or READMEs.
 - Do not create interfaces unless they have multiple implementations or are needed for testing.
 - The `Reconcile()` function must stay pure (no I/O). Side effects go in executors.
-- The protocol doc (`docs/obsidian-sync-protocol.md`) and `app.js` are the source of truth for Obsidian behavior. When in doubt about sync behavior, check both.
+- The protocol doc (`docs/obsidian-sync-protocol.md`) is the source of truth for sync behavior.

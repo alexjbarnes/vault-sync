@@ -9,7 +9,6 @@ import (
 )
 
 // fileCtime returns the inode change time (ctime) in milliseconds.
-// Matches Node.js file.stat.ctimeMs which the Obsidian app uses.
 // On macOS, Stat_t has Ctimespec (not Ctim like Linux).
 func fileCtime(info os.FileInfo) int64 {
 	sys, ok := info.Sys().(*syscall.Stat_t)

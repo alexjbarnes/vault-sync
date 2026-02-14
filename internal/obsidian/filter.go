@@ -6,7 +6,6 @@ import (
 )
 
 // SyncFilter controls which .obsidian/ config files are synced.
-// Each field maps to an Obsidian app sync setting toggle.
 // Files outside .obsidian/ are always synced.
 type SyncFilter struct {
 	MainSettings       bool // app.json, types.json

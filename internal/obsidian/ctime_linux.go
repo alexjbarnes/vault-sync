@@ -18,7 +18,6 @@ const (
 )
 
 // fileCtime returns the inode change time (ctime) in milliseconds.
-// Matches Node.js file.stat.ctimeMs which the Obsidian app uses.
 func fileCtime(info os.FileInfo) int64 {
 	sys, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {

@@ -44,7 +44,7 @@ const (
 	maxAPIResponseBytes = 1024 * 1024
 
 	// supportedEncryptionVersion is the encryption version sent to the
-	// server in vault list requests. Must match the Obsidian app.
+	// server in vault list requests.
 	supportedEncryptionVersion = 3
 )
 

@@ -596,7 +596,7 @@ func TestPullDirect_PushBeforeResponse(t *testing.T) {
 	sc := newTestSyncClient(t, mock)
 
 	// A server push can arrive while we're waiting for the pull response.
-	// Per protocol doc, pushes are processed inline (handlePushWhileBusy)
+	// Pushes are processed inline (handlePushWhileBusy)
 	// and the pull continues. The push will fail to decode without cipher
 	// but should not break the pull flow.
 	pullResp := `{"size":3,"pieces":1,"deleted":false}`

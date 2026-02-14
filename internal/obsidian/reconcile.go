@@ -23,7 +23,7 @@ const (
 	// recentlyCreatedThresholdMs is the maximum age in milliseconds for a
 	// file to be considered "recently created" during merge. Files younger
 	// than this threshold let the server win unconditionally when no base
-	// version is available, matching app.js behavior (3 minutes).
+	// version is available (3 minutes).
 	recentlyCreatedThresholdMs = 180_000
 
 	// diffCleanupThreshold is the minimum number of diffs before running
@@ -142,7 +142,6 @@ func Reconcile(local *state.LocalFile, prev *state.ServerFile, push PushMessage,
 	}
 
 	// Step 7: initial sync -- use mtime comparison, never merge.
-	// app.js tags initial-sync records so they bypass merge logic entirely.
 	// Server wins if its mtime is strictly newer; otherwise local wins.
 	if initial {
 		if push.MTime > local.MTime {
@@ -169,8 +168,7 @@ func Reconcile(local *state.LocalFile, prev *state.ServerFile, push PushMessage,
 }
 
 // Reconciler runs the three-phase reconciliation between local state,
-// server pushes, and persisted state. It mirrors the logic in Obsidian's
-// app.js _sync function.
+// server pushes, and persisted state.
 type Reconciler struct {
 	vault       *Vault
 	client      *SyncClient
@@ -482,8 +480,8 @@ func (r *Reconciler) threeWayMerge(ctx context.Context, path string, push PushMe
 		return nil
 	}
 
-	// No base available -- check ctime then use mtime comparison per
-	// app.js behavior. Obsidian does NOT create conflict copies in this case.
+	// No base available -- check ctime then use mtime comparison.
+	// No conflict copy is created in this case.
 	if baseText == "" {
 		// Files created less than 3 minutes ago: server wins unconditionally.
 		if local.CTime > 0 {
@@ -749,8 +747,8 @@ func (r *Reconciler) deleteLocalState(path string) {
 }
 
 // deleteRemoteFiles is Phase 2: push deletions for files that were
-// deleted locally while offline. Matches app.js behavior: delete files
-// first (deepest first), then folders (deepest first) in separate passes.
+// deleted locally while offline. Deletes files first (deepest first),
+// then folders (deepest first) in separate passes.
 func (r *Reconciler) deleteRemoteFiles(ctx context.Context, scan *ScanResult, serverFiles map[string]state.ServerFile) error {
 	// Collect files and folders separately.
 	var filePaths, folderPaths []string
@@ -797,8 +795,7 @@ func (r *Reconciler) deletePaths(ctx context.Context, paths []string, serverFile
 	for _, path := range paths {
 		// Phase 1 may have re-created this file by downloading a server
 		// push. Check whether the file now exists on disk before pushing
-		// a delete. The Obsidian app checks its live localFiles dict
-		// which is updated during Phase 1 (protocol doc line 767).
+		// a delete.
 		if _, err := r.vault.Stat(path); err == nil {
 			r.logger.Info("reconcile: skipping delete, file re-created by phase 1", slog.String("path", path))
 			continue
@@ -826,7 +823,7 @@ func (r *Reconciler) deletePaths(ctx context.Context, paths []string, serverFile
 // uploadLocalChanges is Phase 3: push files that changed locally while offline.
 func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, serverFiles map[string]state.ServerFile) error {
 	// Separate folders and files. Upload folders first (shallowest first),
-	// then files (smallest first, matching Obsidian app behavior).
+	// then files (smallest first).
 	var (
 		folders []string
 		files   []string

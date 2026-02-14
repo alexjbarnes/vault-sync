@@ -120,7 +120,7 @@ func TestPost_NonOKStatusWithoutAPIError(t *testing.T) {
 }
 
 func TestPost_OKStatusWithAPIError(t *testing.T) {
-	// Obsidian's quirk: 200 OK with an error field in the body.
+	// Server quirk: 200 OK with an error field in the body.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"error":"subscription expired"}`))
 	}))

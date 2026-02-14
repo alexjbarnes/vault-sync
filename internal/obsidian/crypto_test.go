@@ -292,14 +292,14 @@ func TestContentDecrypt_TamperedCiphertext(t *testing.T) {
 	assert.Error(t, err, "tampered ciphertext must fail GCM authentication")
 }
 
-// --- Empty content handling (protocol doc lines 208-213) ---
+// --- Empty content handling ---
 
 func TestContentEncrypt_EmptyContent(t *testing.T) {
-	// Protocol doc line 210: empty content should be sent as zero bytes,
-	// not encrypted. Calling encrypt on empty produces 28 bytes (12 IV +
-	// 16 GCM tag) which differs from the expected 0-byte wire format.
-	// The caller is responsible for skipping encryption on empty content.
-	// But if someone does encrypt empty content, decrypt must handle it.
+	// Empty content should be sent as zero bytes, not encrypted. Calling
+	// encrypt on empty produces 28 bytes (12 IV + 16 GCM tag) which
+	// differs from the expected 0-byte wire format. The caller is
+	// responsible for skipping encryption on empty content. But if
+	// someone does encrypt empty content, decrypt must handle it.
 	c := testCipher(t)
 
 	enc, err := c.EncryptContent([]byte{})
@@ -325,8 +325,7 @@ func TestContentDecrypt_EmptyInput(t *testing.T) {
 }
 
 func TestContentDecrypt_ExactlyNonceSize(t *testing.T) {
-	// Protocol doc line 159: if data.length == 12 (nonce size), return empty.
-	// This matches the Obsidian app's behavior for empty files that were
+	// If data.length == 12 (nonce size), return empty. Empty files are
 	// transmitted as nonce-only payloads.
 	c := testCipher(t)
 

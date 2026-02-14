@@ -74,8 +74,8 @@ func (v *Vault) ReadFile(relPath string) ([]byte, error) {
 
 // WriteFile writes content to a file by relative path. Creates parent
 // directories as needed. If mtime is non-zero, the file's modification
-// time is set to that value after writing (matching Obsidian's behavior
-// of preserving server timestamps on downloaded files).
+// time is set to that value after writing to preserve server timestamps
+// on downloaded files.
 func (v *Vault) WriteFile(relPath string, data []byte, mtime time.Time) error {
 	absPath, err := v.resolve(relPath)
 	if err != nil {
@@ -145,9 +145,8 @@ func (v *Vault) DeleteDir(relPath string) error {
 
 // DeleteEmptyDir removes a directory only if it is empty. Returns nil
 // if the directory does not exist or was successfully removed. Returns
-// a non-nil error if the directory is non-empty. The Obsidian app
-// refuses to delete folders that still have children (protocol doc
-// lines 753 and 965).
+// a non-nil error if the directory is non-empty. Folders that still
+// have children must not be deleted.
 func (v *Vault) DeleteEmptyDir(relPath string) error {
 	absPath, err := v.resolve(relPath)
 	if err != nil {
@@ -342,7 +341,7 @@ func clampMtime(t time.Time) time.Time {
 	return t
 }
 
-// normalizePath matches Obsidian's normalizePath() function. It replaces
+// normalizePath normalizes a vault-relative path. It replaces
 // non-breaking spaces with regular spaces, collapses repeated slashes,
 // trims leading/trailing slashes, and applies Unicode NFC normalization.
 // Call this on every path entering the system: scanner output, watcher
