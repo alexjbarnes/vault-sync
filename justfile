@@ -28,5 +28,9 @@ lint:
 clean:
     rm -rf bin/ coverage.out coverage.html
 
+# Build Docker image
+docker-build:
+    docker build -f docker/Dockerfile -t vault-sync:{{version}} .
+
 # Quick check - lint, test, and build
 check: lint test build
