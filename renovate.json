@@ -2,19 +2,18 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
   "labels": ["dependencies"],
+  "automerge": false,
   "packageRules": [
     {
       "description": "Group all patch-level Go module updates",
       "matchManagers": ["gomod"],
       "matchUpdateTypes": ["patch"],
-      "groupName": "go module patches",
-      "automerge": true
+      "groupName": "go module patches"
     },
     {
       "description": "Group GitHub Actions updates",
       "matchManagers": ["github-actions"],
-      "groupName": "github actions",
-      "automerge": true
+      "groupName": "github actions"
     },
     {
       "description": "Group Docker base image updates",
