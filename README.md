@@ -1,8 +1,20 @@
 # vault-sync
 
-Unofficial headless CLI that syncs an Obsidian vault using the [Obsidian Sync](https://obsidian.md/sync) service and optionally serves it over MCP with OAuth 2.1 auth. Single binary, no subcommands.
+Let Claude read, search, create, and edit notes in your Obsidian vault. Changes sync to every device through Obsidian Sync.
 
-This project is not affiliated with, endorsed by, or associated with Obsidian. It requires an active Obsidian Sync subscription. Use at your own risk.
+vault-sync connects to the [Obsidian Sync](https://obsidian.md/sync) service as a headless client and exposes your vault over [MCP](https://modelcontextprotocol.io/) (Model Context Protocol). Claude on the web, Claude Code, or any MCP client can work with your notes directly, and every change propagates to your phone, tablet, and desktop through the same sync service your vault already uses.
+
+**This is an unofficial, third-party client.** It is not affiliated with or endorsed by Obsidian. Requires an active Obsidian Sync subscription. Use at your own risk.
+
+## Running Modes
+
+vault-sync is a single binary with two features that can be enabled independently.
+
+| `ENABLE_SYNC` | `ENABLE_MCP` | Use case |
+|---|---|---|
+| `true` | `false` | Headless sync daemon. Keep a server or NAS in sync without running the desktop app. |
+| `false` | `true` | MCP server only. Serve a vault directory that already exists on disk. |
+| `true` | `true` | Full pipeline. Sync from Obsidian servers and serve to Claude in one process. |
 
 ## Features
 
@@ -58,14 +70,6 @@ These control which `.obsidian/` files are synced. All default to `false`.
 
 `SYNC_MAIN_SETTINGS`, `SYNC_APPEARANCE`, `SYNC_THEMES_SNIPPETS`, `SYNC_HOTKEYS`, `SYNC_ACTIVE_CORE_PLUGINS`, `SYNC_CORE_PLUGIN_SETTINGS`, `SYNC_COMMUNITY_PLUGINS`, `SYNC_INSTALLED_PLUGINS`
 
-## Running Modes
-
-| `ENABLE_SYNC` | `ENABLE_MCP` | Behavior |
-|---|---|---|
-| `true` | `false` | Sync daemon only |
-| `false` | `true` | MCP server over an existing vault directory |
-| `true` | `true` | Sync and serve in one process |
-
 ## Development
 
 Requires Go 1.25+ and [just](https://github.com/casey/just).
@@ -101,7 +105,7 @@ docs/                   Protocol spec, MCP docs
 
 ## Disclaimer
 
-This is an unofficial, third-party client. It is not developed, maintained, or supported by the Obsidian team. The sync protocol is undocumented and may change without notice. No warranty is provided. The authors are not responsible for data loss or account issues arising from use of this software.
+This is an unofficial, third-party client. It is not developed, maintained, or supported by the Obsidian team. The sync protocol is undocumented and may change without notice. No warranty is provided. The authors are not responsible for data loss or account issues.
 
 ## License
 
