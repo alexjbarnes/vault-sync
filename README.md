@@ -9,7 +9,7 @@ This project is not affiliated with, endorsed by, or associated with Obsidian. I
 - Two-way encrypted sync via WebSocket (AES-256-GCM, scrypt key derivation)
 - Three-way merge for `.md` files, shallow JSON merge for `.obsidian/` config
 - Real-time file watching with debounce and offline queue
-- MCP server with 8 tools: list, read, search, write, edit, delete, move, copy
+- MCP server with 8 tools: list, read, search, write, edit, delete, move, copy ([docs](docs/mcp.md))
 - OAuth 2.1 with PKCE, dynamic client registration, and refresh token rotation
 - Full-text search using ripgrep (with Go fallback)
 - Cross-platform: Linux, macOS, Windows
