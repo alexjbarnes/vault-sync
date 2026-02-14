@@ -5,3 +5,4 @@ cover*.out
 coverage.html
 vault-sync
 *.log
+app.js
