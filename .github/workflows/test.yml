@@ -1,0 +1,47 @@
+name: Test
+
+on:
+  workflow_call:
+    inputs:
+      update-badge:
+        description: Update the coverage badge gist
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests with coverage
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Check coverage threshold
+        id: coverage
+        run: |
+          total=$(go tool cover -func=coverage.out | grep ^total: | awk '{print $3}' | tr -d '%')
+          echo "Total coverage: ${total}%"
+          echo "total=${total}" >> "$GITHUB_OUTPUT"
+          if [ "$(echo "$total < 80" | bc)" -eq 1 ]; then
+            echo "::error::Coverage ${total}% is below 80% threshold"
+            exit 1
+          fi
+
+      - name: Update coverage badge
+        if: inputs.update-badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: 81bb8ec507bc7d99a603143e2c7e40a5
+          filename: coverage.json
+          label: coverage
+          message: ${{ steps.coverage.outputs.total }}%
+          valColorRange: ${{ steps.coverage.outputs.total }}
+          minColorRange: 60
+          maxColorRange: 80

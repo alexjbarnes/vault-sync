@@ -1,0 +1,63 @@
+version: "2"
+
+formatters:
+  enable:
+    - gofumpt
+
+linters:
+  enable:
+    - bodyclose
+    - errcheck
+    - errorlint
+    - funlen
+    - gocognit
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - mnd
+    - nilerr
+    - nilnesserr
+    - noctx
+    - nolintlint
+    - recvcheck
+    - sloglint
+    - staticcheck
+    - testifylint
+    - unconvert
+    - unused
+    - wsl_v5
+
+    # --- Documentation ---
+    - revive          # checks for godoc comments on exported symbols
+
+  settings:
+    funlen:
+      lines: 200
+      statements: 100
+    gocognit:
+      min-complexity: 50
+    revive:
+      rules:
+        - name: exported
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      # G104 is redundant with the errcheck linter.
+      - linters:
+          - gosec
+        text: "G104:"
+      # Test files use standard permissions for fixtures and don't need
+      # funlen/gocognit/mnd enforcement.
+      - path: _test\.go
+        linters:
+          - gosec
+          - funlen
+          - gocognit
+          - mnd
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

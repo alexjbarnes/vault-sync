@@ -1,0 +1,35 @@
+version: 2
+
+project_name: vault-sync
+
+builds:
+  - main: ./cmd/vault-sync
+    binary: vault-sync
+    ldflags:
+      - -X main.Version={{.Tag}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  disable: true

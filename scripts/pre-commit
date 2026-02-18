@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Pre-commit hook: scan staged changes for secrets using TruffleHog.
+# Install with: just setup-hooks
+# Requires: trufflehog via mise (mise use --global trufflehog) or direct install
+
+set -euo pipefail
+
+TRUFFLEHOG=""
+if command -v trufflehog &> /dev/null; then
+    TRUFFLEHOG="trufflehog"
+elif command -v mise &> /dev/null; then
+    TRUFFLEHOG="mise exec -- trufflehog"
+else
+    echo "trufflehog not found. Install it:"
+    echo "  mise use --global trufflehog"
+    echo "  brew install trufflehog  (macOS)"
+    exit 1
+fi
+
+echo "Scanning for secrets..."
+$TRUFFLEHOG git file://. --since-commit HEAD --only-verified --fail

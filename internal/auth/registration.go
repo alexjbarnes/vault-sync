@@ -1,0 +1,147 @@
+package auth
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+
+	"github.com/alexjbarnes/vault-sync/internal/models"
+)
+
+// registrationRequest is the DCR POST body (RFC 7591).
+type registrationRequest struct {
+	ClientName              string   `json:"client_name,omitempty"`
+	RedirectURIs            []string `json:"redirect_uris"`
+	GrantTypes              []string `json:"grant_types,omitempty"`
+	ResponseTypes           []string `json:"response_types,omitempty"`
+	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"`
+}
+
+// registrationResponse is the DCR response.
+type registrationResponse struct {
+	ClientID                string   `json:"client_id"`
+	ClientName              string   `json:"client_name,omitempty"`
+	RedirectURIs            []string `json:"redirect_uris"`
+	GrantTypes              []string `json:"grant_types"`
+	ResponseTypes           []string `json:"response_types"`
+	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+}
+
+const (
+	// maxRequestBody caps the size of JSON request bodies to prevent
+	// memory exhaustion from oversized requests.
+	maxRequestBody = 64 * 1024 // 64KB
+
+	// clientIDBytes is the number of random bytes used to generate
+	// a client ID during dynamic registration (hex-encoded to twice this length).
+	clientIDBytes = 16
+)
+
+// HandleRegistration returns the /oauth/register handler.
+func HandleRegistration(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if !store.RegistrationAllowed() {
+			writeJSONError(w, http.StatusTooManyRequests, "rate_limit", "too many registration requests, try again later")
+			return
+		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+
+		var req registrationRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.RedirectURIs) == 0 {
+			writeJSONError(w, http.StatusBadRequest, "invalid_client_metadata", "redirect_uris is required")
+			return
+		}
+
+		for _, uri := range req.RedirectURIs {
+			if err := validateRedirectScheme(uri); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid_redirect_uri", err.Error())
+				return
+			}
+		}
+
+		clientID := RandomHex(clientIDBytes)
+
+		grantTypes := req.GrantTypes
+		if len(grantTypes) == 0 {
+			grantTypes = []string{"authorization_code"}
+		}
+
+		responseTypes := req.ResponseTypes
+		if len(responseTypes) == 0 {
+			responseTypes = []string{"code"}
+		}
+
+		authMethod := req.TokenEndpointAuthMethod
+		if authMethod == "" {
+			authMethod = "none"
+		}
+
+		ok := store.RegisterClient(&models.OAuthClient{
+			ClientID:     clientID,
+			ClientName:   req.ClientName,
+			RedirectURIs: req.RedirectURIs,
+		})
+		if !ok {
+			writeJSONError(w, http.StatusServiceUnavailable, "server_error", "maximum number of registered clients reached")
+			return
+		}
+
+		resp := registrationResponse{
+			ClientID:                clientID,
+			ClientName:              req.ClientName,
+			RedirectURIs:            req.RedirectURIs,
+			GrantTypes:              grantTypes,
+			ResponseTypes:           responseTypes,
+			TokenEndpointAuthMethod: authMethod,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// validateRedirectScheme checks that a redirect URI uses HTTPS or targets
+// localhost. Per RFC 8252, native apps may use http://localhost but all
+// other redirect URIs must use HTTPS to prevent code interception.
+func validateRedirectScheme(rawURI string) error {
+	u, err := url.Parse(rawURI)
+	if err != nil {
+		return fmt.Errorf("invalid URI: %s", rawURI)
+	}
+
+	if u.Scheme == "https" {
+		return nil
+	}
+	// Allow http://localhost and http://127.0.0.1 for native app flows.
+	if u.Scheme == "http" {
+		host := u.Hostname()
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("redirect_uri must use HTTPS (or http://localhost): %s", rawURI)
+}
+
+func writeJSONError(w http.ResponseWriter, status int, errCode, description string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error":             errCode,
+		"error_description": description,
+	})
+}

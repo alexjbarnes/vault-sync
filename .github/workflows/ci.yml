@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  secrets:
+    uses: ./.github/workflows/secrets.yml
+
+  socket:
+    uses: ./.github/workflows/socket.yml
+    secrets: inherit
+
+  lint:
+    uses: ./.github/workflows/lint.yml
+
+  test:
+    uses: ./.github/workflows/test.yml
+    with:
+      update-badge: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  cross-compile:
+    uses: ./.github/workflows/cross-compile.yml
