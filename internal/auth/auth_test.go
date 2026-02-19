@@ -642,7 +642,7 @@ func TestAuthorize_POST_RateLimited(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	}
 
-	// Next attempt should be rate limited.
+	// The next attempt should be rate-limited.
 	csrf := generateCSRFToken(store, clientID, redirectURI)
 	form := url.Values{
 		"csrf_token":     {csrf},
@@ -650,15 +650,226 @@ func TestAuthorize_POST_RateLimited(t *testing.T) {
 		"redirect_uri":   {redirectURI},
 		"code_challenge": {challenge},
 		"username":       {"testuser"},
-		"password":       {"password123"},
+		"password":       {"wrong"},
 	}
 	req := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	rec := httptest.NewRecorder()
 	handler(rec, req)
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+}
+
+// --- Token endpoint rate limiting and lockout ---
+
+func TestToken_IPRateLimit(t *testing.T) {
+	store := testStore(t)
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	// Send tokenRateLimitMaxFail+1 requests from the same IP with bad codes.
+	for i := 0; i < tokenRateLimitMaxFail; i++ {
+		body := url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {"bad-code"},
+			"code_verifier": {"verifier"},
+		}
+
+		req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.RemoteAddr = "1.2.3.4:5678"
+
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	}
+
+	// The next request from the same IP should be rate limited.
+	body := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {"bad-code"},
+		"code_verifier": {"verifier"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "1.2.3.4:5678"
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
 
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+	assert.Contains(t, rec.Body.String(), "slow_down")
+}
+
+func TestToken_ClientLockout(t *testing.T) {
+	store := testStore(t)
+
+	clientID := registerTestClient(t, store, []string{"https://example.com/cb"})
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	// Send lockoutThreshold requests with bad codes from different IPs.
+	for i := 0; i < lockoutThreshold; i++ {
+		body := url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {"bad-code"},
+			"client_id":     {clientID},
+			"code_verifier": {"verifier"},
+		}
+
+		req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.RemoteAddr = "10.0.0." + url.QueryEscape(strings.Repeat("1", i%10)) + ":5678"
+
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+	}
+
+	// The client should now be locked out even from a new IP.
+	body := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {"any-code"},
+		"client_id":     {clientID},
+		"code_verifier": {"verifier"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "99.99.99.99:5678"
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+	assert.Contains(t, rec.Body.String(), "account locked")
+}
+
+func TestToken_GrantTypeEnforcement(t *testing.T) {
+	store := testStore(t)
+
+	// Register client with only client_credentials grant.
+	clientID := RandomHex(16)
+	ok := store.RegisterClient(&models.OAuthClient{
+		ClientID:   clientID,
+		GrantTypes: []string{"client_credentials"},
+	})
+	require.True(t, ok)
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	// Attempt authorization_code grant with this client should fail.
+	body := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {"some-code"},
+		"client_id":     {clientID},
+		"code_verifier": {"verifier"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "unauthorized_client")
+}
+
+func TestToken_DefaultGrantTypeAllowsAuthCode(t *testing.T) {
+	store := testStore(t)
+
+	// Register client without explicit grant types (should default to authorization_code).
+	clientID := registerTestClient(t, store, []string{"https://example.com/cb"})
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	// authorization_code should be allowed (will fail on the code itself, not on grant type).
+	body := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {"bad-code"},
+		"client_id":     {clientID},
+		"code_verifier": {"verifier"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	// Should fail with invalid_grant (bad code), not unauthorized_client.
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid_grant")
+}
+
+func TestToken_RefreshAlwaysAllowed(t *testing.T) {
+	store := testStore(t)
+
+	// Register client with only authorization_code (no explicit refresh_token).
+	clientID := RandomHex(16)
+	ok := store.RegisterClient(&models.OAuthClient{
+		ClientID:   clientID,
+		GrantTypes: []string{"authorization_code"},
+	})
+	require.True(t, ok)
+
+	// Save a refresh token for this client.
+	store.SaveToken(&models.OAuthToken{
+		Token:     "test-refresh",
+		Kind:      "refresh",
+		UserID:    "testuser",
+		Resource:  testServerURL,
+		ExpiresAt: time.Now().Add(refreshTokenExpiry),
+		ClientID:  clientID,
+	})
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {"test-refresh"},
+		"client_id":     {clientID},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	// Should succeed -- refresh_token is always allowed.
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp tokenResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.NotEmpty(t, resp.AccessToken)
+	assert.NotEmpty(t, resp.RefreshToken)
+}
+
+func TestRegistration_StoresGrantTypes(t *testing.T) {
+	store := testStore(t)
+
+	handler := HandleRegistration(store)
+
+	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"],"grant_types":["authorization_code"]}`
+
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var resp registrationResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	// Verify the grant types are stored on the client.
+	client := store.GetClient(resp.ClientID)
+	require.NotNil(t, client)
+	assert.Equal(t, []string{"authorization_code"}, client.GrantTypes)
 }
 
 // --- Resource Parameter (RFC 8707) ---
@@ -754,7 +965,7 @@ func TestToken_ResourceParameter(t *testing.T) {
 		ExpiresAt:     time.Now().Add(5 * time.Minute),
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	form := url.Values{
 		"grant_type":    {"authorization_code"},
@@ -793,7 +1004,7 @@ func TestToken_WrongResourceParameter(t *testing.T) {
 		ExpiresAt:     time.Now().Add(5 * time.Minute),
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	form := url.Values{
 		"grant_type":    {"authorization_code"},
@@ -881,7 +1092,7 @@ func TestToken_FullFlow(t *testing.T) {
 		ExpiresAt:     time.Now().Add(5 * time.Minute),
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	form := url.Values{
 		"grant_type":    {"authorization_code"},
@@ -913,7 +1124,7 @@ func TestToken_FullFlow(t *testing.T) {
 
 func TestToken_InvalidCode(t *testing.T) {
 	store := testStore(t)
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	form := url.Values{
 		"grant_type": {"authorization_code"},
@@ -931,7 +1142,7 @@ func TestToken_InvalidCode(t *testing.T) {
 
 func TestToken_WrongGrantType(t *testing.T) {
 	store := testStore(t)
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	form := url.Values{
 		"grant_type": {"client_credentials"},
@@ -954,7 +1165,7 @@ func TestToken_PKCEVerificationFails(t *testing.T) {
 		ExpiresAt:     time.Now().Add(5 * time.Minute),
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	form := url.Values{
 		"grant_type":    {"authorization_code"},
@@ -981,7 +1192,7 @@ func TestToken_MissingPKCE(t *testing.T) {
 		ExpiresAt:     time.Now().Add(5 * time.Minute),
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	form := url.Values{
 		"grant_type": {"authorization_code"},
@@ -1006,7 +1217,7 @@ func TestToken_NoPKCEOnCode(t *testing.T) {
 		ExpiresAt: time.Now().Add(5 * time.Minute),
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	form := url.Values{
 		"grant_type": {"authorization_code"},
@@ -1032,7 +1243,7 @@ func TestToken_RedirectURIMismatch(t *testing.T) {
 		ExpiresAt:     time.Now().Add(5 * time.Minute),
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	form := url.Values{
 		"grant_type":    {"authorization_code"},
@@ -1061,7 +1272,7 @@ func TestToken_JSONBody(t *testing.T) {
 		ExpiresAt:     time.Now().Add(5 * time.Minute),
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	body := `{"grant_type":"authorization_code","code":"json-code","code_verifier":"` + verifier + `"}`
 	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body))
@@ -1201,7 +1412,7 @@ func TestToken_FullFlowWithRefresh(t *testing.T) {
 		ExpiresAt:     time.Now().Add(5 * time.Minute),
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	form := url.Values{
 		"grant_type":    {"authorization_code"},
@@ -1257,7 +1468,7 @@ func TestToken_RefreshGrant(t *testing.T) {
 		ClientID:     "client1",
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
@@ -1304,7 +1515,7 @@ func TestToken_RefreshRotation(t *testing.T) {
 		ClientID:  "client1",
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	// First refresh.
 	form := url.Values{
@@ -1356,7 +1567,7 @@ func TestToken_RefreshExpired(t *testing.T) {
 		ExpiresAt: time.Now().Add(-1 * time.Hour), // Expired
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
@@ -1386,7 +1597,7 @@ func TestToken_RefreshWrongClient(t *testing.T) {
 		ClientID:  "client1",
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	// Try to refresh with different client_id.
 	form := url.Values{
@@ -1419,7 +1630,7 @@ func TestToken_RefreshWrongResource(t *testing.T) {
 		ClientID:  "client1",
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	// Try to refresh with different resource.
 	form := url.Values{
@@ -1440,7 +1651,7 @@ func TestToken_RefreshWrongResource(t *testing.T) {
 
 func TestToken_RefreshMissingToken(t *testing.T) {
 	store := testStore(t)
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	form := url.Values{
 		"grant_type": {"refresh_token"},
@@ -1565,7 +1776,7 @@ func TestToken_RefreshWithoutClientID(t *testing.T) {
 		ClientID:  "client1",
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	// Try to refresh WITHOUT client_id - should fail because client_id is required
 	form := url.Values{
@@ -1616,7 +1827,7 @@ func TestToken_RefreshDeletesOldAccessToken(t *testing.T) {
 		ClientID:     "client1",
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	// Refresh the token
 	form := url.Values{
@@ -1654,7 +1865,7 @@ func TestToken_AccessTokenUsedAsRefresh(t *testing.T) {
 		ClientID:  "client1",
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	// Try to use access token as refresh token
 	form := url.Values{
@@ -1688,7 +1899,7 @@ func TestToken_RefreshTokenReuseFails(t *testing.T) {
 		ClientID:  "client1",
 	})
 
-	handler := HandleToken(store, testServerURL)
+	handler := HandleToken(store, testLogger(), testServerURL)
 
 	// First refresh should succeed
 	form := url.Values{

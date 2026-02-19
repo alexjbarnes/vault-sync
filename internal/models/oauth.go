@@ -22,4 +22,6 @@ type OAuthClient struct {
 	ClientID     string   `json:"client_id"`
 	ClientName   string   `json:"client_name,omitempty"`
 	RedirectURIs []string `json:"redirect_uris"`
+	GrantTypes   []string `json:"grant_types,omitempty"`
+	SecretHash   string   `json:"secret_hash,omitempty"`
 }

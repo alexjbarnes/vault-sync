@@ -92,6 +92,7 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 			ClientID:     clientID,
 			ClientName:   req.ClientName,
 			RedirectURIs: req.RedirectURIs,
+			GrantTypes:   grantTypes,
 		})
 		if !ok {
 			writeJSONError(w, http.StatusServiceUnavailable, "server_error", "maximum number of registered clients reached")

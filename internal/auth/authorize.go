@@ -415,7 +415,13 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 
 	// Validate credentials using constant-time comparison to prevent
 	// timing side channels from leaking whether the username exists.
+	// Always compare against a value (dummy if username not found) so
+	// the map lookup miss is not observable via timing.
 	expected, ok := users[username]
+	if !ok {
+		expected = "\x00invalid"
+	}
+
 	if !ok || subtle.ConstantTimeCompare([]byte(expected), []byte(password)) != 1 {
 		logger.Warn("login failed", slog.String("username", username))
 		limiter.record(ip)

@@ -435,6 +435,32 @@ func (s *Store) ConsumeCSRF(token, clientID, redirectURI string) bool {
 	return entry.clientID == clientID && entry.redirectURI == redirectURI
 }
 
+// ClientAllowsGrant checks whether the client is permitted to use the
+// given grant type. Clients without explicit GrantTypes default to
+// authorization_code for backward compatibility.
+func (s *Store) ClientAllowsGrant(clientID, grantType string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	client, ok := s.clients[clientID]
+	if !ok {
+		return false
+	}
+
+	grants := client.GrantTypes
+	if len(grants) == 0 {
+		grants = []string{"authorization_code"}
+	}
+
+	for _, g := range grants {
+		if g == grantType {
+			return true
+		}
+	}
+
+	return false
+}
+
 // RandomHex generates a cryptographically random hex string of the given byte length.
 func RandomHex(byteLen int) string {
 	b := make([]byte, byteLen)

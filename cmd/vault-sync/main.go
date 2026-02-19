@@ -367,7 +367,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 	mux.HandleFunc("/.well-known/oauth-authorization-server", auth.HandleServerMetadata(cfg.MCPServerURL))
 	mux.HandleFunc("/oauth/register", auth.HandleRegistration(store))
 	mux.HandleFunc("/oauth/authorize", auth.HandleAuthorize(store, users, mcpLogger, cfg.MCPServerURL))
-	mux.HandleFunc("/oauth/token", auth.HandleToken(store, cfg.MCPServerURL))
+	mux.HandleFunc("/oauth/token", auth.HandleToken(store, mcpLogger, cfg.MCPServerURL))
 	mux.Handle("/mcp", authMiddleware(mcpHandler))
 
 	server := &http.Server{
