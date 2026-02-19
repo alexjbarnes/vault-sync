@@ -27,7 +27,7 @@ vault-sync is a single binary with two features that can be enabled independentl
 - Three-way merge for `.md` files, shallow JSON merge for `.obsidian/` config
 - Real-time file watching with debounce and offline queue
 - MCP server with 8 tools: list, read, search, write, edit, delete, move, copy ([docs](docs/mcp.md))
-- OAuth 2.1 with PKCE, dynamic client registration, and refresh token rotation
+- OAuth 2.1 authentication (authorization code with PKCE, dynamic client registration, refresh token rotation)
 - Full-text search using ripgrep (with Go fallback)
 - Cross-platform: Linux, macOS, Windows
 
@@ -61,7 +61,7 @@ All configuration via environment variables or `.env` file.
 |---|---|---|
 | `ENABLE_MCP` | No | Enable MCP server (default: `false`) |
 | `MCP_SERVER_URL` | When MCP enabled | Public HTTPS URL (OAuth resource identifier) |
-| `MCP_AUTH_USERS` | When MCP enabled | Comma-separated `user:password` pairs |
+| `MCP_AUTH_USERS` | When MCP enabled | Comma-separated `user:password` pairs for the OAuth login page |
 | `MCP_LISTEN_ADDR` | No | Listen address (default: `:8090`) |
 
 ### Config Sync Toggles

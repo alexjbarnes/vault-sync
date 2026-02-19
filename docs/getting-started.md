@@ -109,9 +109,23 @@ vault.yourdomain.com {
 
 Set `MCP_SERVER_URL` to your public URL (e.g. `https://vault.yourdomain.com`).
 
-## 6. Connect an MCP client
+## 6. Authentication
 
-Point your MCP client at the server URL. vault-sync uses OAuth 2.1 with PKCE, so clients that support MCP authentication will handle the login flow automatically.
+vault-sync uses OAuth 2.1 with PKCE (authorization code flow). MCP clients that support OAuth handle this automatically. Here's what happens:
+
+1. Your MCP client discovers the OAuth endpoints from vault-sync's `/.well-known/oauth-authorization-server`
+2. The client registers itself via `/oauth/register` (one-time, automatic)
+3. The client opens a browser window pointing to vault-sync's login page
+4. You enter the username and password you configured in `MCP_AUTH_USERS`
+5. vault-sync redirects back to the client with an authorization code
+6. The client exchanges the code for an access token
+7. The client uses the access token for all subsequent requests to `/mcp`
+
+Access tokens expire after 1 hour. The client refreshes them automatically using a refresh token, so you only log in once.
+
+## 7. Connect an MCP client
+
+Point your MCP client at the server URL.
 
 ### Claude Desktop
 
@@ -133,7 +147,7 @@ Claude will prompt you to authorize through the OAuth login page on first connec
 
 Any MCP client that supports Streamable HTTP transport can connect. Point it at `https://your-server.example.com/mcp`. The client handles OAuth discovery and authentication automatically via the `/.well-known/oauth-authorization-server` endpoint.
 
-## 7. Verify
+## 8. Verify
 
 Once connected, ask your assistant to list your vault:
 
