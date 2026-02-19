@@ -849,15 +849,21 @@ func TestRegistration_RejectsPasswordGrant(t *testing.T) {
 
 // --- Client credentials grant ---
 
-// registerPreConfiguredClient creates a client with a hashed secret and
-// client_credentials grant type, simulating what main.go does.
+// registerPreConfiguredClient creates a client with a hashed secret,
+// simulating what main.go does. Pre-configured clients support all
+// grant types so they work with both headless (client_credentials)
+// and browser-based (authorization_code) flows.
 func registerPreConfiguredClient(t *testing.T, store *Store, clientID, secret string) {
 	t.Helper()
 
 	store.RegisterPreConfiguredClient(&models.OAuthClient{
 		ClientID:   clientID,
 		SecretHash: HashSecret(secret),
-		GrantTypes: []string{"client_credentials"},
+		GrantTypes: []string{"client_credentials", "authorization_code", "refresh_token"},
+		RedirectURIs: []string{
+			"http://127.0.0.1",
+			"http://localhost",
+		},
 	})
 }
 
@@ -1000,17 +1006,30 @@ func TestClientCredentials_DynamicClientCannotUse(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "invalid_client")
 }
 
-func TestClientCredentials_PreConfiguredCannotUseAuthCode(t *testing.T) {
+func TestPreConfigured_AuthCodeFlowAllowed(t *testing.T) {
 	store := testStore(t)
 	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
+
+	verifier := "preconfigured-verifier"
+	challenge := pkceChallenge(verifier)
+
+	store.SaveCode(&Code{
+		Code:          "preconfig-code",
+		ClientID:      "bot-client",
+		RedirectURI:   "http://127.0.0.1:19876/callback",
+		CodeChallenge: challenge,
+		UserID:        "testuser",
+		ExpiresAt:     time.Now().Add(5 * time.Minute),
+	})
 
 	handler := HandleToken(store, testLogger(), testServerURL)
 
 	body := url.Values{
 		"grant_type":    {"authorization_code"},
-		"code":          {"some-code"},
+		"code":          {"preconfig-code"},
+		"redirect_uri":  {"http://127.0.0.1:19876/callback"},
+		"code_verifier": {verifier},
 		"client_id":     {"bot-client"},
-		"code_verifier": {"verifier"},
 	}
 
 	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
@@ -1019,8 +1038,12 @@ func TestClientCredentials_PreConfiguredCannotUseAuthCode(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "unauthorized_client")
+	// Pre-configured clients now support auth code flow.
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp tokenResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.NotEmpty(t, resp.AccessToken)
 }
 
 func TestClientCredentials_WithResource(t *testing.T) {
@@ -2886,6 +2909,54 @@ func TestAuthorize_POST_ScopeBindsToCode(t *testing.T) {
 	ac := store.ConsumeCode(code)
 	require.NotNil(t, ac)
 	assert.Equal(t, []string{"vault:read", "vault:write"}, ac.Scopes)
+}
+
+func TestAuthorize_GET_LocalhostPrefixRedirect(t *testing.T) {
+	store := testStore(t)
+
+	// Register a client with localhost prefix redirect URIs
+	// (same as pre-configured clients).
+	store.RegisterClient(&models.OAuthClient{
+		ClientID: "localhost-client",
+		RedirectURIs: []string{
+			"http://127.0.0.1",
+			"http://localhost",
+		},
+	})
+
+	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
+	challenge := pkceChallenge("v")
+
+	// Any port and path on 127.0.0.1 should be accepted (RFC 8252 Section 7.3).
+	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id=localhost-client"+
+		"&redirect_uri="+url.QueryEscape("http://127.0.0.1:19876/mcp/oauth/callback")+
+		"&code_challenge="+challenge, nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "Sign in")
+}
+
+func TestAuthorize_GET_LocalhostPrefixRejectsHTTPS(t *testing.T) {
+	store := testStore(t)
+
+	store.RegisterClient(&models.OAuthClient{
+		ClientID:     "localhost-client",
+		RedirectURIs: []string{"http://127.0.0.1"},
+	})
+
+	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
+	challenge := pkceChallenge("v")
+
+	// HTTPS on 127.0.0.1 should not match the http:// prefix.
+	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id=localhost-client"+
+		"&redirect_uri="+url.QueryEscape("https://127.0.0.1:19876/callback")+
+		"&code_challenge="+challenge, nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestMetadata_IncludesBasicAuth(t *testing.T) {

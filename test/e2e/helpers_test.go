@@ -103,14 +103,19 @@ func newHarness(t *testing.T) *harness {
 	}
 }
 
-// registerPreConfiguredClient registers a client_credentials client
-// directly in the store (not via HTTP, since pre-configured clients
-// are loaded from env vars at startup).
+// registerPreConfiguredClient registers a pre-configured client directly
+// in the store (not via HTTP, since pre-configured clients are loaded
+// from env vars at startup). Supports all grant types so it matches
+// the production registration in main.go.
 func (h *harness) registerPreConfiguredClient(clientID, secret string) {
 	h.Store.RegisterPreConfiguredClient(&models.OAuthClient{
 		ClientID:   clientID,
 		SecretHash: auth.HashSecret(secret),
-		GrantTypes: []string{"client_credentials"},
+		GrantTypes: []string{"client_credentials", "authorization_code", "refresh_token"},
+		RedirectURIs: []string{
+			"http://127.0.0.1",
+			"http://localhost",
+		},
 	})
 }
 

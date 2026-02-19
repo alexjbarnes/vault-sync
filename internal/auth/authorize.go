@@ -291,15 +291,30 @@ func HandleAuthorize(store *Store, users UserCredentials, logger *slog.Logger, s
 }
 
 // validateRedirectURI checks that redirectURI matches one of the client's
-// registered redirect_uris. Returns true if valid.
+// registered redirect_uris. Exact match is required for HTTPS URIs.
+// For localhost URIs (http://127.0.0.1 or http://localhost), prefix
+// matching is used so any port and path are accepted. This follows
+// RFC 8252 Section 7.3 which allows dynamic ports for loopback redirects.
 func validateRedirectURI(client *models.OAuthClient, redirectURI string) bool {
 	for _, registered := range client.RedirectURIs {
 		if redirectURI == registered {
 			return true
 		}
+
+		// RFC 8252: loopback redirect URIs may use any port.
+		if isLocalhostPrefix(registered) && strings.HasPrefix(redirectURI, registered) {
+			return true
+		}
 	}
 
 	return false
+}
+
+// isLocalhostPrefix returns true if the URI is an HTTP loopback prefix
+// (http://127.0.0.1 or http://localhost) without a port or path, making
+// it suitable for prefix matching per RFC 8252 Section 7.3.
+func isLocalhostPrefix(uri string) bool {
+	return uri == "http://127.0.0.1" || uri == "http://localhost"
 }
 
 // generateCSRFToken creates a random CSRF token bound to specific
