@@ -56,5 +56,17 @@ setup-hooks:
     chmod +x .git/hooks/pre-commit
     @echo "Pre-commit hook installed"
 
+# Tag and push a dev image with label (e.g. just dev-push opencode)
+dev-push label:
+    git tag -f dev-{{label}}
+    git push origin dev-{{label}} --force
+
+# Tag and push a dev image with short commit SHA (e.g. just dev-push-commit)
+dev-push-commit:
+    #!/usr/bin/env bash
+    sha=$(git rev-parse --short HEAD)
+    git tag -f "dev-${sha}"
+    git push origin "dev-${sha}" --force
+
 # Quick check - lint, test, build, and cross-compile
 check: lint test build cross-compile
