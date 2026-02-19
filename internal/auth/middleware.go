@@ -1,10 +1,38 @@
 package auth
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 )
+
+type contextKey int
+
+const (
+	ctxUserID contextKey = iota
+	ctxClientID
+	ctxRemoteIP
+)
+
+// RequestUserID returns the authenticated user ID from the context, or "".
+func RequestUserID(ctx context.Context) string {
+	v, _ := ctx.Value(ctxUserID).(string)
+	return v
+}
+
+// RequestClientID returns the OAuth client ID from the context, or "".
+func RequestClientID(ctx context.Context) string {
+	v, _ := ctx.Value(ctxClientID).(string)
+	return v
+}
+
+// RequestRemoteIP returns the client IP from the context, or "".
+func RequestRemoteIP(ctx context.Context) string {
+	v, _ := ctx.Value(ctxRemoteIP).(string)
+	return v
+}
 
 // Middleware returns HTTP middleware that validates Bearer tokens.
 // Unauthenticated requests get a 401 with the WWW-Authenticate header
@@ -45,7 +73,20 @@ func Middleware(store *Store, serverURL string) func(http.Handler) http.Handler 
 				return
 			}
 
-			next.ServeHTTP(w, r)
+			// Inject authenticated identity into the request context
+			// so downstream handlers (MCP tools) can log it.
+			ctx := r.Context()
+			ctx = context.WithValue(ctx, ctxUserID, ti.UserID)
+			ctx = context.WithValue(ctx, ctxClientID, ti.ClientID)
+
+			ip, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				ip = r.RemoteAddr
+			}
+
+			ctx = context.WithValue(ctx, ctxRemoteIP, ip)
+
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }

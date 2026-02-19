@@ -1952,6 +1952,32 @@ func TestVerifyPKCE_Invalid(t *testing.T) {
 
 // --- Middleware ---
 
+func TestMiddleware_InjectsRequestContext(t *testing.T) {
+	store := testStore(t)
+	store.SaveToken(&models.OAuthToken{
+		Token:     "ctx-token",
+		UserID:    "ctx-user",
+		ClientID:  "ctx-client",
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+	})
+
+	mw := Middleware(store, "https://vault.example.com")
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "ctx-user", RequestUserID(r.Context()))
+		assert.Equal(t, "ctx-client", RequestClientID(r.Context()))
+		assert.NotEmpty(t, RequestRemoteIP(r.Context()))
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer ctx-token")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
 func TestMiddleware_ValidToken(t *testing.T) {
 	store := testStore(t)
 	store.SaveToken(&models.OAuthToken{
