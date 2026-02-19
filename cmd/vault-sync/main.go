@@ -19,6 +19,7 @@ import (
 	"github.com/alexjbarnes/vault-sync/internal/mcpserver"
 	"github.com/alexjbarnes/vault-sync/internal/models"
 	"github.com/alexjbarnes/vault-sync/internal/obsidian"
+	"github.com/alexjbarnes/vault-sync/internal/server"
 	"github.com/alexjbarnes/vault-sync/internal/state"
 	"github.com/alexjbarnes/vault-sync/internal/vault"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -379,15 +380,13 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 	// Clear secrets from config after hashing.
 	cfg.MCPClientCredentials = ""
 
-	authMiddleware := auth.Middleware(store, cfg.MCPServerURL)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/.well-known/oauth-protected-resource", auth.HandleProtectedResourceMetadata(cfg.MCPServerURL))
-	mux.HandleFunc("/.well-known/oauth-authorization-server", auth.HandleServerMetadata(cfg.MCPServerURL))
-	mux.HandleFunc("/oauth/register", auth.HandleRegistration(store))
-	mux.HandleFunc("/oauth/authorize", auth.HandleAuthorize(store, users, mcpLogger, cfg.MCPServerURL))
-	mux.HandleFunc("/oauth/token", auth.HandleToken(store, mcpLogger, cfg.MCPServerURL))
-	mux.Handle("/mcp", authMiddleware(mcpHandler))
+	mux := server.NewMux(server.MuxConfig{
+		Store:      store,
+		Users:      users,
+		MCPHandler: mcpHandler,
+		Logger:     mcpLogger,
+		ServerURL:  cfg.MCPServerURL,
+	})
 
 	server := &http.Server{
 		Addr:         cfg.MCPListenAddr,
