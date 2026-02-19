@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"html/template"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +15,17 @@ import (
 
 	"github.com/alexjbarnes/vault-sync/internal/models"
 )
+
+// remoteIP extracts the IP address from r.RemoteAddr, stripping the
+// port. Falls back to the raw value if parsing fails.
+func remoteIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+
+	return host
+}
 
 // resourceMatches compares a client-supplied resource URI against the
 // server's canonical URL. Trailing slashes are stripped before comparison
@@ -347,6 +359,8 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, se
 	}
 
 	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	_ = loginPage.Execute(w, data)
 }
 
@@ -405,7 +419,7 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 	}
 
 	// Rate limiting by remote IP.
-	ip := r.RemoteAddr
+	ip := remoteIP(r)
 	if limiter.check(ip) {
 		logger.Warn("login rate limited", slog.String("ip", ip))
 		http.Error(w, "too many failed login attempts, try again later", http.StatusTooManyRequests)
@@ -440,6 +454,8 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		}
 
 		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = loginPage.Execute(w, data)
 

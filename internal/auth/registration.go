@@ -71,12 +71,13 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 			}
 		}
 
-		// client_credentials cannot be requested through dynamic registration.
-		// Pre-configured clients (MCP_CLIENT_CREDENTIALS) are the only way to
-		// obtain client_credentials access.
+		// Validate requested grant types against the allowed set.
+		// Only authorization_code is available through dynamic
+		// registration. client_credentials requires pre-configuration
+		// via MCP_CLIENT_CREDENTIALS.
 		for _, gt := range req.GrantTypes {
-			if gt == "client_credentials" {
-				writeJSONError(w, http.StatusBadRequest, "invalid_client_metadata", "client_credentials grant type is not available through dynamic registration")
+			if gt != "authorization_code" {
+				writeJSONError(w, http.StatusBadRequest, "invalid_client_metadata", fmt.Sprintf("grant type %q is not available through dynamic registration", gt))
 				return
 			}
 		}

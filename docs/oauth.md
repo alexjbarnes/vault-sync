@@ -81,3 +81,4 @@ curl -X POST https://your-server.example.com/oauth/token \
 - Constant-time comparison for all credential validation.
 - Dynamically registered clients cannot use the `client_credentials` flow. Only pre-configured clients from `MCP_CLIENT_CREDENTIALS` can.
 - Pre-configured clients cannot use the interactive `authorization_code` flow.
+- Scopes (`vault:read`, `vault:write`) are advertised in server metadata for forward compatibility but are not currently enforced. All authenticated requests get full vault access.

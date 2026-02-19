@@ -440,20 +440,31 @@ func (s *Store) ConsumeCSRF(token, clientID, redirectURI string) bool {
 // ValidateClientSecret checks the provided secret against the stored
 // SHA-256 hash for the given client. Returns false if the client does
 // not exist or has no secret hash.
+//
+// The stored hash is read under the lock, then the comparison happens
+// outside the lock to avoid holding it during the hash computation.
+// A dummy hash is used for missing clients so the code path (hash +
+// constant-time compare) is identical regardless of client existence.
 func (s *Store) ValidateClientSecret(clientID, secret string) bool {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 
-	client, ok := s.clients[clientID]
-	if !ok || client.SecretHash == "" {
-		// Always hash to prevent timing leaks on missing clients.
-		_ = HashSecret(secret)
-		return false
+	storedHash := ""
+	if client, ok := s.clients[clientID]; ok {
+		storedHash = client.SecretHash
+	}
+
+	s.mu.RUnlock()
+
+	if storedHash == "" {
+		// Use a dummy hash so the code path is identical to a real
+		// comparison (hash + constant-time compare). The dummy never
+		// matches any real hash.
+		storedHash = "0000000000000000000000000000000000000000000000000000000000000000"
 	}
 
 	computed := HashSecret(secret)
 
-	return subtle.ConstantTimeCompare([]byte(computed), []byte(client.SecretHash)) == 1
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(storedHash)) == 1
 }
 
 // RegisterPreConfiguredClient stores a pre-configured client (from

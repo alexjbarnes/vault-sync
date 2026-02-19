@@ -193,7 +193,7 @@ func HandleToken(store *Store, logger *slog.Logger, serverURL string) http.Handl
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 
 		// Per-IP rate limiting.
-		ip := r.RemoteAddr
+		ip := remoteIP(r)
 		if limiter.checkIP(ip) {
 			logger.Warn("token endpoint rate limited", slog.String("ip", ip))
 			writeJSONError(w, http.StatusTooManyRequests, "slow_down", "too many failed attempts, try again later")
@@ -247,8 +247,10 @@ func HandleToken(store *Store, logger *slog.Logger, serverURL string) http.Handl
 
 		// Enforce grant type against client registration. The
 		// refresh_token grant is always allowed since it continues
-		// an existing authorized session.
-		if req.GrantType != "refresh_token" && req.ClientID != "" && !store.ClientAllowsGrant(req.ClientID, req.GrantType) {
+		// an existing authorized session. client_credentials is
+		// checked inside handleClientCredentials after secret
+		// validation to avoid leaking client existence.
+		if req.GrantType != "refresh_token" && req.GrantType != "client_credentials" && req.ClientID != "" && !store.ClientAllowsGrant(req.ClientID, req.GrantType) {
 			writeJSONError(w, http.StatusBadRequest, "unauthorized_client", "client is not authorized for this grant type")
 			return
 		}
@@ -309,6 +311,14 @@ func handleClientCredentials(w http.ResponseWriter, store *Store, limiter *token
 		return
 	}
 
+	// Grant type check runs after secret validation so that unknown
+	// clients, dynamic clients (no secret), and wrong-secret attempts
+	// all produce the same 401 response above.
+	if !store.ClientAllowsGrant(req.ClientID, "client_credentials") {
+		writeJSONError(w, http.StatusBadRequest, "unauthorized_client", "client is not authorized for this grant type")
+		return
+	}
+
 	limiter.clearLockout(req.ClientID)
 
 	resource := req.Resource
@@ -337,6 +347,12 @@ func handleAuthorizationCode(w http.ResponseWriter, store *Store, limiter *token
 		limiter.recordFailure(ip, req.ClientID)
 		writeJSONError(w, http.StatusBadRequest, "invalid_grant", "invalid or expired authorization code")
 
+		return
+	}
+
+	// RFC 6749 Section 4.1.3: verify client_id matches the auth code.
+	if ac.ClientID != "" && req.ClientID != ac.ClientID {
+		writeJSONError(w, http.StatusBadRequest, "invalid_grant", "client_id mismatch")
 		return
 	}
 

@@ -660,6 +660,96 @@ func TestAuthorize_POST_RateLimited(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
 }
 
+// --- Security fix tests ---
+
+func TestToken_AuthCodeClientIDMismatch(t *testing.T) {
+	store := testStore(t)
+	store.RegisterClient(&models.OAuthClient{ClientID: "client-A", RedirectURIs: []string{"https://example.com/callback"}})
+	store.RegisterClient(&models.OAuthClient{ClientID: "client-B", RedirectURIs: []string{"https://example.com/callback"}})
+
+	verifier := "mismatch-verifier"
+	challenge := pkceChallenge(verifier)
+
+	store.SaveCode(&Code{
+		Code:          "bound-code",
+		ClientID:      "client-A",
+		RedirectURI:   "https://example.com/callback",
+		CodeChallenge: challenge,
+		UserID:        "testuser",
+		ExpiresAt:     time.Now().Add(5 * time.Minute),
+	})
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {"bound-code"},
+		"redirect_uri":  {"https://example.com/callback"},
+		"code_verifier": {verifier},
+		"client_id":     {"client-B"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "client_id mismatch")
+}
+
+func TestAuthorize_GET_ClickjackHeaders(t *testing.T) {
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
+	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
+
+	challenge := pkceChallenge("v")
+	req := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+
+		"&redirect_uri=https://example.com/callback"+
+		"&code_challenge="+challenge, nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "DENY", rec.Header().Get("X-Frame-Options"))
+	assert.Equal(t, "frame-ancestors 'none'", rec.Header().Get("Content-Security-Policy"))
+}
+
+func TestRegistration_RejectsImplicitGrant(t *testing.T) {
+	store := testStore(t)
+
+	handler := HandleRegistration(store)
+
+	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"],"grant_types":["implicit"]}`
+
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "not available through dynamic registration")
+}
+
+func TestRegistration_RejectsPasswordGrant(t *testing.T) {
+	store := testStore(t)
+
+	handler := HandleRegistration(store)
+
+	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"],"grant_types":["password"]}`
+
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "not available through dynamic registration")
+}
+
 // --- Client credentials grant ---
 
 // registerPreConfiguredClient creates a client with a hashed secret and
@@ -781,9 +871,10 @@ func TestClientCredentials_UnknownClient(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 
-	// Unknown client fails grant type check first (client not registered).
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "unauthorized_client")
+	// Unknown client gets the same 401 as wrong-secret to avoid
+	// leaking whether the client_id is registered.
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid_client")
 }
 
 func TestClientCredentials_DynamicClientCannotUse(t *testing.T) {
@@ -806,10 +897,10 @@ func TestClientCredentials_DynamicClientCannotUse(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 
-	// Should be rejected by grant type enforcement (unauthorized_client),
-	// not by secret validation.
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "unauthorized_client")
+	// Dynamic client has no secret hash, so secret validation fails
+	// with the same 401 as an unknown client (no information leak).
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid_client")
 }
 
 func TestClientCredentials_PreConfiguredCannotUseAuthCode(t *testing.T) {
@@ -1354,6 +1445,8 @@ func TestAuthorize_POST_ResourceBindsToCode(t *testing.T) {
 
 func TestToken_ResourceParameter(t *testing.T) {
 	store := testStore(t)
+	store.RegisterClient(&models.OAuthClient{ClientID: "client1", RedirectURIs: []string{"https://example.com/callback"}})
+
 	verifier := "resource-test-verifier"
 	challenge := pkceChallenge(verifier)
 
@@ -1374,6 +1467,7 @@ func TestToken_ResourceParameter(t *testing.T) {
 		"code":          {"res-code"},
 		"redirect_uri":  {"https://example.com/callback"},
 		"code_verifier": {verifier},
+		"client_id":     {"client1"},
 		"resource":      {testServerURL},
 	}
 
@@ -1482,6 +1576,8 @@ func TestMetadata_CacheControl(t *testing.T) {
 
 func TestToken_FullFlow(t *testing.T) {
 	store := testStore(t)
+	store.RegisterClient(&models.OAuthClient{ClientID: "client1", RedirectURIs: []string{"https://example.com/callback"}})
+
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	challenge := pkceChallenge(verifier)
 
@@ -1501,6 +1597,7 @@ func TestToken_FullFlow(t *testing.T) {
 		"code":          {"authcode123"},
 		"redirect_uri":  {"https://example.com/callback"},
 		"code_verifier": {verifier},
+		"client_id":     {"client1"},
 	}
 
 	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
@@ -1802,6 +1899,8 @@ func TestMiddleware_NonBearerAuth(t *testing.T) {
 
 func TestToken_FullFlowWithRefresh(t *testing.T) {
 	store := testStore(t)
+	store.RegisterClient(&models.OAuthClient{ClientID: "client1", RedirectURIs: []string{"https://example.com/callback"}})
+
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	challenge := pkceChallenge(verifier)
 
@@ -1821,6 +1920,7 @@ func TestToken_FullFlowWithRefresh(t *testing.T) {
 		"code":          {"authcode-with-refresh"},
 		"redirect_uri":  {"https://example.com/callback"},
 		"code_verifier": {verifier},
+		"client_id":     {"client1"},
 	}
 
 	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
