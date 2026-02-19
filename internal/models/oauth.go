@@ -19,9 +19,12 @@ type OAuthToken struct {
 
 // OAuthClient represents a dynamically registered OAuth client.
 type OAuthClient struct {
-	ClientID     string   `json:"client_id"`
-	ClientName   string   `json:"client_name,omitempty"`
-	RedirectURIs []string `json:"redirect_uris"`
-	GrantTypes   []string `json:"grant_types,omitempty"`
-	SecretHash   string   `json:"secret_hash,omitempty"`
+	ClientID                string   `json:"client_id"`
+	ClientName              string   `json:"client_name,omitempty"`
+	RedirectURIs            []string `json:"redirect_uris"`
+	GrantTypes              []string `json:"grant_types,omitempty"`
+	ResponseTypes           []string `json:"response_types,omitempty"`
+	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"`
+	SecretHash              string   `json:"secret_hash,omitempty"`
+	IssuedAt                int64    `json:"client_id_issued_at,omitempty"`
 }

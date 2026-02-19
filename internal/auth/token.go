@@ -62,6 +62,7 @@ type tokenResponse struct {
 	TokenType    string `json:"token_type"`
 	ExpiresIn    int    `json:"expires_in"`
 	RefreshToken string `json:"refresh_token,omitempty"`
+	Scope        string `json:"scope,omitempty"`
 }
 
 // lockoutEntry tracks consecutive failures and lockout state for a
@@ -240,6 +241,15 @@ func HandleToken(store *Store, logger *slog.Logger, serverURL string) http.Handl
 				Resource:     r.FormValue("resource"),
 				RefreshToken: r.FormValue("refresh_token"),
 			}
+		}
+
+		// RFC 6749 Section 2.3.1: support client_secret_basic (HTTP
+		// Basic auth). If the Authorization header carries Basic
+		// credentials, they override any client_id/client_secret in
+		// the request body.
+		if basicUser, basicPass, ok := r.BasicAuth(); ok {
+			req.ClientID = basicUser
+			req.ClientSecret = basicPass
 		}
 
 		switch req.GrantType {
@@ -458,10 +468,12 @@ func issueTokenPair(w http.ResponseWriter, store *Store, userID, resource string
 		TokenType:    "Bearer",
 		ExpiresIn:    int(tokenExpiry.Seconds()),
 		RefreshToken: refreshToken,
+		Scope:        strings.Join(scopes, " "),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
@@ -485,10 +497,12 @@ func issueAccessToken(w http.ResponseWriter, store *Store, userID, resource stri
 		AccessToken: accessToken,
 		TokenType:   "Bearer",
 		ExpiresIn:   int(tokenExpiry.Seconds()),
+		Scope:       strings.Join(scopes, " "),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	_ = json.NewEncoder(w).Encode(resp)
 }
 

@@ -58,7 +58,7 @@ func HandleServerMetadata(serverURL string) http.HandlerFunc {
 		ResponseTypesSupported:            []string{"code"},
 		GrantTypesSupported:               []string{"authorization_code", "client_credentials", "refresh_token"},
 		CodeChallengeMethodsSupported:     []string{"S256"},
-		TokenEndpointAuthMethodsSupported: []string{"none", "client_secret_post"},
+		TokenEndpointAuthMethodsSupported: []string{"none", "client_secret_post", "client_secret_basic"},
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {

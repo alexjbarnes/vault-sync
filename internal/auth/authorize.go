@@ -252,9 +252,29 @@ func (rl *loginRateLimiter) record(ip string) {
 	rl.mu.Unlock()
 }
 
-// HandleAuthorize returns the /oauth/authorize handler. The serverURL is
-// the canonical resource identifier (RFC 8707) used to validate the
-// resource parameter that clients include in authorization requests.
+// redirectWithError redirects the user-agent back to the client with an
+// error response per RFC 6749 Section 4.1.2.1. This must only be called
+// after the redirect_uri and client_id have been validated.
+func redirectWithError(w http.ResponseWriter, r *http.Request, redirectURI, state, errCode, description string) {
+	params := url.Values{}
+	params.Set("error", errCode)
+	params.Set("error_description", description)
+
+	if state != "" {
+		params.Set("state", state)
+	}
+
+	sep := "?"
+	if strings.Contains(redirectURI, "?") {
+		sep = "&"
+	}
+
+	http.Redirect(w, r, redirectURI+sep+params.Encode(), http.StatusFound)
+}
+
+// HandleAuthorize returns the /oauth/authorize handler. The serverURL
+// serves as both the canonical resource identifier (RFC 8707) and the
+// issuer identifier for mix-up attack prevention (RFC 9207).
 func HandleAuthorize(store *Store, users UserCredentials, logger *slog.Logger, serverURL string) http.HandlerFunc {
 	limiter := newLoginRateLimiter()
 
@@ -326,15 +346,32 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, se
 		return
 	}
 
+	// RFC 6749 Section 4.1.1: response_type is REQUIRED and must be "code".
+	// Errors after redirect_uri validation are returned as query params on
+	// the redirect URI per RFC 6749 Section 4.1.2.1.
+	responseType := q.Get("response_type")
+	state := q.Get("state")
+
+	if responseType != "code" {
+		errCode := "unsupported_response_type"
+		if responseType == "" {
+			errCode = "invalid_request"
+		}
+
+		redirectWithError(w, r, redirectURI, state, errCode, "response_type must be \"code\"")
+
+		return
+	}
+
 	codeChallenge := q.Get("code_challenge")
 	if codeChallenge == "" {
-		http.Error(w, "code_challenge is required (PKCE)", http.StatusBadRequest)
+		redirectWithError(w, r, redirectURI, state, "invalid_request", "code_challenge is required (PKCE)")
 		return
 	}
 
 	codeChallengeMethod := q.Get("code_challenge_method")
 	if codeChallengeMethod != "" && codeChallengeMethod != "S256" {
-		http.Error(w, "only S256 code_challenge_method is supported", http.StatusBadRequest)
+		redirectWithError(w, r, redirectURI, state, "invalid_request", "only S256 code_challenge_method is supported")
 		return
 	}
 
@@ -342,7 +379,7 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, se
 	// but we tolerate its absence for backward compatibility.
 	resource := q.Get("resource")
 	if resource != "" && !resourceMatches(resource, serverURL) {
-		http.Error(w, "resource parameter does not match this server", http.StatusBadRequest)
+		redirectWithError(w, r, redirectURI, state, "invalid_request", "resource parameter does not match this server")
 		return
 	}
 
@@ -351,7 +388,7 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, se
 		ClientID:            clientID,
 		ClientName:          client.ClientName,
 		RedirectURI:         redirectURI,
-		State:               q.Get("state"),
+		State:               state,
 		CodeChallenge:       codeChallenge,
 		CodeChallengeMethod: codeChallengeMethod,
 		Scope:               q.Get("scope"),
@@ -400,19 +437,22 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		return
 	}
 
-	// PKCE is mandatory.
+	// PKCE is mandatory. Return error as redirect since client_id and
+	// redirect_uri have been validated.
 	if codeChallenge == "" {
-		http.Error(w, "code_challenge is required (PKCE)", http.StatusBadRequest)
+		redirectWithError(w, r, redirectURI, state, "invalid_request", "code_challenge is required (PKCE)")
 		return
 	}
 
 	// RFC 8707: validate resource parameter matches this server.
 	if resource != "" && !resourceMatches(resource, serverURL) {
-		http.Error(w, "resource parameter does not match this server", http.StatusBadRequest)
+		redirectWithError(w, r, redirectURI, state, "invalid_request", "resource parameter does not match this server")
 		return
 	}
 
-	// CSRF validation.
+	// CSRF validation. A failed CSRF check may indicate a cross-site
+	// attack, so return a plain error rather than redirecting to the
+	// client (which could be the attacker's URI in a forged form).
 	if !store.ConsumeCSRF(csrfToken, clientID, redirectURI) {
 		http.Error(w, "invalid or expired CSRF token", http.StatusForbidden)
 		return
@@ -465,6 +505,14 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 	logger.Info("login successful", slog.String("username", username))
 
 	// Issue authorization code bound to the resource (RFC 8707).
+	// Parse the scope parameter into individual scope values. The
+	// authorize endpoint carries scope through the form; store them
+	// on the code so they propagate to the issued token.
+	var scopes []string
+	if scopeParam := r.FormValue("scope"); scopeParam != "" {
+		scopes = strings.Fields(scopeParam)
+	}
+
 	code := RandomHex(authCodeBytes)
 	store.SaveCode(&Code{
 		Code:          code,
@@ -473,6 +521,7 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		CodeChallenge: codeChallenge,
 		Resource:      resource,
 		UserID:        username,
+		Scopes:        scopes,
 		ExpiresAt:     time.Now().Add(codeExpiry),
 	})
 
@@ -484,6 +533,11 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 
 	if state != "" {
 		params.Set("state", state)
+	}
+
+	// RFC 9207: include the issuer identifier to prevent mix-up attacks.
+	if serverURL != "" {
+		params.Set("iss", serverURL)
 	}
 
 	sep := "?"

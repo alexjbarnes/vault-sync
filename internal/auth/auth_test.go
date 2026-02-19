@@ -63,7 +63,7 @@ func getCSRFToken(t *testing.T, handler http.HandlerFunc, clientID, redirectURI 
 	t.Helper()
 
 	challenge := pkceChallenge("test-verifier")
-	req := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+"&redirect_uri="+url.QueryEscape(redirectURI)+"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
+	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id="+clientID+"&redirect_uri="+url.QueryEscape(redirectURI)+"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -385,7 +385,7 @@ func TestAuthorize_GET_ShowsLoginForm(t *testing.T) {
 
 	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
 	challenge := pkceChallenge("test-verifier")
-	req := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+"&redirect_uri=https://example.com/callback&state=xyz&code_challenge="+challenge+"&code_challenge_method=S256", nil)
+	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id="+clientID+"&redirect_uri=https://example.com/callback&state=xyz&code_challenge="+challenge+"&code_challenge_method=S256", nil)
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 
@@ -423,7 +423,7 @@ func TestAuthorize_GET_InvalidRedirectURI(t *testing.T) {
 
 	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
 	challenge := pkceChallenge("v")
-	req := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+"&redirect_uri=https://evil.com/steal&code_challenge="+challenge, nil)
+	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id="+clientID+"&redirect_uri=https://evil.com/steal&code_challenge="+challenge, nil)
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 
@@ -436,12 +436,17 @@ func TestAuthorize_GET_MissingPKCE(t *testing.T) {
 	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
 
 	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
-	req := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+"&redirect_uri=https://example.com/callback", nil)
+	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id="+clientID+"&redirect_uri=https://example.com/callback&state=xyz", nil)
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "code_challenge is required")
+	// After redirect_uri is validated, errors redirect to the client
+	// per RFC 6749 Section 4.1.2.1.
+	assert.Equal(t, http.StatusFound, rec.Code)
+	location := rec.Header().Get("Location")
+	assert.Contains(t, location, "error=invalid_request")
+	assert.Contains(t, location, "code_challenge")
+	assert.Contains(t, location, "state=xyz")
 }
 
 func TestAuthorize_POST_ValidLogin(t *testing.T) {
@@ -522,7 +527,7 @@ func TestAuthorize_POST_RedirectURIWithQueryParams(t *testing.T) {
 	// Get CSRF token (need to build the request manually since
 	// getCSRFToken hardcodes a simple redirect URI).
 	challenge := pkceChallenge("test-verifier")
-	getReq := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+
+	getReq := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id="+clientID+
 		"&redirect_uri="+url.QueryEscape(redirectURI)+
 		"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
 	getRec := httptest.NewRecorder()
@@ -649,6 +654,7 @@ func TestAuthorize_POST_MissingPKCE(t *testing.T) {
 		"csrf_token":   {"manual-csrf"},
 		"client_id":    {clientID},
 		"redirect_uri": {"https://example.com/callback"},
+		"state":        {"xyz"},
 		"username":     {"testuser"},
 		"password":     {"password123"},
 	}
@@ -659,8 +665,12 @@ func TestAuthorize_POST_MissingPKCE(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "code_challenge is required")
+	// Missing PKCE redirects with error after redirect_uri is validated.
+	assert.Equal(t, http.StatusFound, rec.Code)
+	location := rec.Header().Get("Location")
+	assert.Contains(t, location, "error=invalid_request")
+	assert.Contains(t, location, "code_challenge")
+	assert.Contains(t, location, "state=xyz")
 }
 
 func TestAuthorize_POST_RateLimited(t *testing.T) {
@@ -710,6 +720,43 @@ func TestAuthorize_POST_RateLimited(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
 }
 
+func TestAuthorize_GET_MissingResponseType(t *testing.T) {
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
+	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
+	challenge := pkceChallenge("v")
+
+	// No response_type parameter at all.
+	req := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+
+		"&redirect_uri=https://example.com/callback"+
+		"&code_challenge="+challenge+"&state=abc", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusFound, rec.Code)
+	location := rec.Header().Get("Location")
+	assert.Contains(t, location, "error=invalid_request")
+	assert.Contains(t, location, "state=abc")
+}
+
+func TestAuthorize_GET_WrongResponseType(t *testing.T) {
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
+	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
+	challenge := pkceChallenge("v")
+
+	// response_type=token (implicit flow) should be rejected.
+	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=token&client_id="+clientID+
+		"&redirect_uri=https://example.com/callback"+
+		"&code_challenge="+challenge, nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusFound, rec.Code)
+	location := rec.Header().Get("Location")
+	assert.Contains(t, location, "error=unsupported_response_type")
+}
+
 // --- Security fix tests ---
 
 func TestToken_AuthCodeClientIDMismatch(t *testing.T) {
@@ -755,7 +802,7 @@ func TestAuthorize_GET_ClickjackHeaders(t *testing.T) {
 	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
 
 	challenge := pkceChallenge("v")
-	req := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+
+	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id="+clientID+
 		"&redirect_uri=https://example.com/callback"+
 		"&code_challenge="+challenge, nil)
 	rec := httptest.NewRecorder()
@@ -1456,7 +1503,7 @@ func TestAuthorize_GET_ResourceParameter(t *testing.T) {
 	challenge := pkceChallenge("test-verifier")
 
 	// Valid resource parameter shows login form.
-	req := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+
+	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id="+clientID+
 		"&redirect_uri=https://example.com/callback"+
 		"&code_challenge="+challenge+
 		"&resource="+url.QueryEscape(testServerURL), nil)
@@ -1474,15 +1521,18 @@ func TestAuthorize_GET_WrongResource(t *testing.T) {
 	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
 	challenge := pkceChallenge("test-verifier")
 
-	req := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+
+	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id="+clientID+
 		"&redirect_uri=https://example.com/callback"+
 		"&code_challenge="+challenge+
 		"&resource="+url.QueryEscape("https://evil.example.com"), nil)
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "resource parameter does not match")
+	// Bad resource redirects with error after redirect_uri is validated.
+	assert.Equal(t, http.StatusFound, rec.Code)
+	location := rec.Header().Get("Location")
+	assert.Contains(t, location, "error=invalid_request")
+	assert.Contains(t, location, "resource")
 }
 
 func TestAuthorize_POST_ResourceBindsToCode(t *testing.T) {
@@ -2515,6 +2565,341 @@ func TestToken_RefreshTokenReuseFails(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, rec2.Code)
 	assert.Contains(t, rec2.Body.String(), "invalid or expired refresh token")
+}
+
+// --- Spec compliance tests ---
+
+func TestClientCredentials_BasicAuth(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "basic-client", "basic-secret")
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	// Send client_id and client_secret via HTTP Basic auth header
+	// (client_secret_basic per RFC 6749 Section 2.3.1).
+	body := url.Values{
+		"grant_type": {"client_credentials"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("basic-client", "basic-secret")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp tokenResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.NotEmpty(t, resp.AccessToken)
+	assert.Equal(t, "Bearer", resp.TokenType)
+}
+
+func TestClientCredentials_BasicAuthOverridesBody(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "basic-client", "basic-secret")
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	// Body has wrong credentials, Basic auth has correct ones.
+	body := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {"wrong-client"},
+		"client_secret": {"wrong-secret"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("basic-client", "basic-secret")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	// Basic auth overrides body credentials.
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestClientCredentials_BasicAuthWrongPassword(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "basic-client", "basic-secret")
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := url.Values{
+		"grant_type": {"client_credentials"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("basic-client", "wrong")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestToken_ScopeInResponse(t *testing.T) {
+	store := testStore(t)
+	store.RegisterClient(&models.OAuthClient{ClientID: "client1", RedirectURIs: []string{"https://example.com/callback"}})
+
+	verifier := "scope-test-verifier"
+	challenge := pkceChallenge(verifier)
+
+	store.SaveCode(&Code{
+		Code:          "scope-code",
+		ClientID:      "client1",
+		RedirectURI:   "https://example.com/callback",
+		CodeChallenge: challenge,
+		UserID:        "testuser",
+		Scopes:        []string{"vault:read", "vault:write"},
+		ExpiresAt:     time.Now().Add(5 * time.Minute),
+	})
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {"scope-code"},
+		"redirect_uri":  {"https://example.com/callback"},
+		"code_verifier": {verifier},
+		"client_id":     {"client1"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp tokenResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "vault:read vault:write", resp.Scope)
+}
+
+func TestToken_PragmaNoCache(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {"bot-client"},
+		"client_secret": {"s3cret"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+	assert.Equal(t, "no-cache", rec.Header().Get("Pragma"))
+}
+
+func TestRegistration_ConfidentialClientGetsSecret(t *testing.T) {
+	store := testStore(t)
+	handler := HandleRegistration(store)
+
+	body := `{"client_name":"Confidential","redirect_uris":["https://example.com/cb"],"token_endpoint_auth_method":"client_secret_post"}`
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var resp registrationResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.NotEmpty(t, resp.ClientSecret, "confidential client should receive a client_secret")
+	assert.Equal(t, "client_secret_post", resp.TokenEndpointAuthMethod)
+
+	// The secret should authenticate against the store.
+	assert.True(t, store.ValidateClientSecret(resp.ClientID, resp.ClientSecret))
+}
+
+func TestRegistration_PublicClientNoSecret(t *testing.T) {
+	store := testStore(t)
+	handler := HandleRegistration(store)
+
+	body := `{"client_name":"Public","redirect_uris":["https://example.com/cb"]}`
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var resp registrationResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Empty(t, resp.ClientSecret, "public client should not receive a client_secret")
+	assert.Equal(t, "none", resp.TokenEndpointAuthMethod)
+}
+
+func TestRegistration_ClientIDIssuedAt(t *testing.T) {
+	store := testStore(t)
+	handler := HandleRegistration(store)
+
+	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"]}`
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var resp registrationResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Positive(t, resp.ClientIDIssuedAt, "client_id_issued_at should be a positive Unix timestamp")
+}
+
+func TestRegistration_PersistsResponseTypesAndAuthMethod(t *testing.T) {
+	store := testStore(t)
+	handler := HandleRegistration(store)
+
+	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"],"response_types":["code"],"token_endpoint_auth_method":"none"}`
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var resp registrationResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	client := store.GetClient(resp.ClientID)
+	require.NotNil(t, client)
+	assert.Equal(t, []string{"code"}, client.ResponseTypes)
+	assert.Equal(t, "none", client.TokenEndpointAuthMethod)
+}
+
+func TestRegistration_RejectsWrongContentType(t *testing.T) {
+	store := testStore(t)
+	handler := HandleRegistration(store)
+
+	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"]}`
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "text/plain")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusUnsupportedMediaType, rec.Code)
+}
+
+func TestRegistration_AcceptsNoContentType(t *testing.T) {
+	store := testStore(t)
+	handler := HandleRegistration(store)
+
+	// Some clients may omit Content-Type entirely. We accept it
+	// rather than being overly strict, since json.Decoder handles it.
+	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"]}`
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusCreated, rec.Code)
+}
+
+func TestAuthorize_POST_IssInResponse(t *testing.T) {
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
+	users := testUsers(t)
+	handler := HandleAuthorize(store, users, testLogger(), testServerURL)
+
+	csrfToken := getCSRFToken(t, handler, clientID, "https://example.com/callback")
+	challenge := pkceChallenge("test-verifier")
+
+	form := url.Values{
+		"csrf_token":            {csrfToken},
+		"client_id":             {clientID},
+		"redirect_uri":          {"https://example.com/callback"},
+		"state":                 {"mystate"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"username":              {"testuser"},
+		"password":              {"password123"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusFound, rec.Code)
+	location := rec.Header().Get("Location")
+
+	u, err := url.Parse(location)
+	require.NoError(t, err)
+
+	// RFC 9207: iss parameter prevents mix-up attacks.
+	assert.Equal(t, testServerURL, u.Query().Get("iss"))
+}
+
+func TestAuthorize_POST_ScopeBindsToCode(t *testing.T) {
+	store := testStore(t)
+	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
+	users := testUsers(t)
+	handler := HandleAuthorize(store, users, testLogger(), testServerURL)
+
+	csrfToken := getCSRFToken(t, handler, clientID, "https://example.com/callback")
+	challenge := pkceChallenge("test-verifier")
+
+	form := url.Values{
+		"csrf_token":            {csrfToken},
+		"client_id":             {clientID},
+		"redirect_uri":          {"https://example.com/callback"},
+		"state":                 {"mystate"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"scope":                 {"vault:read vault:write"},
+		"username":              {"testuser"},
+		"password":              {"password123"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusFound, rec.Code)
+	location := rec.Header().Get("Location")
+
+	u, err := url.Parse(location)
+	require.NoError(t, err)
+
+	code := u.Query().Get("code")
+	ac := store.ConsumeCode(code)
+	require.NotNil(t, ac)
+	assert.Equal(t, []string{"vault:read", "vault:write"}, ac.Scopes)
+}
+
+func TestMetadata_IncludesBasicAuth(t *testing.T) {
+	handler := HandleServerMetadata(testServerURL)
+
+	req := httptest.NewRequest("GET", "/.well-known/oauth-authorization-server", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var meta ServerMetadata
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&meta))
+	assert.Contains(t, meta.TokenEndpointAuthMethodsSupported, "client_secret_basic")
 }
 
 func TestMiddleware_RefreshTokenAsBearer(t *testing.T) {
