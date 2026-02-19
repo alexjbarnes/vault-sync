@@ -127,12 +127,26 @@ func (trl *tokenRateLimiter) checkLockout(clientID string) bool {
 	trl.mu.Lock()
 	defer trl.mu.Unlock()
 
+	now := time.Now()
+
+	// Prune stale lockout entries to prevent unbounded map growth
+	// from requests with rotating client IDs. Active lockouts are
+	// kept; expired lockouts and sub-threshold entries are removed.
+	if len(trl.lockouts) > tokenLimiterPruneThreshold {
+		for k, e := range trl.lockouts {
+			activeLock := !e.lockedAt.IsZero() && now.Before(e.lockedAt.Add(lockoutDuration))
+			if !activeLock {
+				delete(trl.lockouts, k)
+			}
+		}
+	}
+
 	entry, ok := trl.lockouts[clientID]
 	if !ok {
 		return false
 	}
 
-	if !entry.lockedAt.IsZero() && time.Now().Before(entry.lockedAt.Add(lockoutDuration)) {
+	if !entry.lockedAt.IsZero() && now.Before(entry.lockedAt.Add(lockoutDuration)) {
 		return true
 	}
 
@@ -205,7 +219,7 @@ func HandleToken(store *Store, logger *slog.Logger, serverURL string) http.Handl
 		var req tokenRequest
 
 		contentType := r.Header.Get("Content-Type")
-		if contentType == "application/json" {
+		if strings.HasPrefix(contentType, "application/json") {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				writeJSONError(w, http.StatusBadRequest, "invalid_request", "invalid request body")
 				return
@@ -332,8 +346,10 @@ func handleClientCredentials(w http.ResponseWriter, store *Store, limiter *token
 	}
 
 	// The client itself is the resource owner for client_credentials.
-	// Use the client_id as the user_id on the tokens.
-	issueTokenPair(w, store, req.ClientID, resource, nil, req.ClientID)
+	// Use the client_id as the user_id on the token. Per RFC 6749
+	// Section 4.4.3, no refresh token is issued because the client
+	// already holds credentials to re-authenticate.
+	issueAccessToken(w, store, req.ClientID, resource, nil, req.ClientID)
 }
 
 func handleAuthorizationCode(w http.ResponseWriter, store *Store, limiter *tokenRateLimiter, ip string, req tokenRequest, serverURL string) {
@@ -442,6 +458,33 @@ func issueTokenPair(w http.ResponseWriter, store *Store, userID, resource string
 		TokenType:    "Bearer",
 		ExpiresIn:    int(tokenExpiry.Seconds()),
 		RefreshToken: refreshToken,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// issueAccessToken generates and saves an access token without a refresh
+// token. Used for client_credentials where the client can re-authenticate
+// with its secret (RFC 6749 Section 4.4.3).
+func issueAccessToken(w http.ResponseWriter, store *Store, userID, resource string, scopes []string, clientID string) {
+	accessToken := RandomHex(accessTokenBytes)
+
+	store.SaveToken(&models.OAuthToken{
+		Token:     accessToken,
+		Kind:      "access",
+		UserID:    userID,
+		Resource:  resource,
+		Scopes:    scopes,
+		ExpiresAt: time.Now().Add(tokenExpiry),
+		ClientID:  clientID,
+	})
+
+	resp := tokenResponse{
+		AccessToken: accessToken,
+		TokenType:   "Bearer",
+		ExpiresIn:   int(tokenExpiry.Seconds()),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -42,6 +42,8 @@ The login form includes a CSRF token bound to the specific client_id and redirec
 
 Only available to pre-configured clients from `MCP_CLIENT_CREDENTIALS`. Cannot be obtained through dynamic client registration. Pre-configured clients cannot use the authorization_code flow. Grant types are mutually exclusive between the two client types.
 
+No refresh token is issued for this grant type (RFC 6749 Section 4.4.3). The client already holds credentials to re-authenticate, so a refresh token would only widen the attack surface: a leaked refresh token would grant 30 days of access without needing the client secret. Clients should re-authenticate with their credentials when the access token expires.
+
 ## Rate limiting and lockout
 
 ### Token endpoint
@@ -55,6 +57,14 @@ Per-IP sliding window: 10 failed attempts per 5 minutes.
 ### Registration endpoint
 
 Global rate limit: 10 registrations per minute.
+
+### Reverse proxy limitation
+
+All rate limiters use `r.RemoteAddr` to identify the client IP. Behind a reverse proxy (including Tailscale Funnel, the recommended HTTPS setup), all external clients appear as the proxy's IP address. This collapses per-IP rate limits into a single global bucket.
+
+The standard fix is reading `X-Forwarded-For`, but this introduces spoofing risk. An attacker sending requests directly to the server (bypassing the proxy) can forge the header to bypass rate limits or poison another client's rate limit budget.
+
+For the target deployment model (single user, private network or Tailscale), the shared bucket is acceptable. The per-client_id lockout on the token endpoint still provides per-client protection regardless of IP. If multi-user deployments become a priority, proxy-aware IP extraction with a configurable trusted proxy count should be added.
 
 ## Scope enforcement
 

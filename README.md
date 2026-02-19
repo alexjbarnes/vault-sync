@@ -31,6 +31,17 @@ vault-sync is a single binary with two features that can be enabled independentl
 - Full-text search using ripgrep (with Go fallback)
 - Cross-platform: Linux, macOS, Windows
 
+## Authentication
+
+| Method | Status | Use case |
+|---|---|---|
+| OAuth 2.1 (authorization code + PKCE) | Supported | Interactive login from browser-based MCP clients |
+| OAuth 2.1 (client credentials) | Supported | Headless agents and CI/CD pipelines |
+| API key | Planned | Single static token for simple deployments |
+| No auth | Planned | Localhost or trusted network only |
+
+See [OAuth documentation](docs/oauth.md) for setup and usage.
+
 ## Quick Start
 
 ```bash

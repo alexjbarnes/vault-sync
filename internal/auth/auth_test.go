@@ -512,6 +512,56 @@ func TestAuthorize_POST_StateURLEncoded(t *testing.T) {
 	assert.Equal(t, "has&equals=and spaces", u.Query().Get("state"))
 }
 
+func TestAuthorize_POST_RedirectURIWithQueryParams(t *testing.T) {
+	store := testStore(t)
+	redirectURI := "https://example.com/callback?existing=param"
+	clientID := registerTestClient(t, store, []string{redirectURI})
+	users := testUsers(t)
+	handler := HandleAuthorize(store, users, testLogger(), testServerURL)
+
+	// Get CSRF token (need to build the request manually since
+	// getCSRFToken hardcodes a simple redirect URI).
+	challenge := pkceChallenge("test-verifier")
+	getReq := httptest.NewRequest("GET", "/oauth/authorize?client_id="+clientID+
+		"&redirect_uri="+url.QueryEscape(redirectURI)+
+		"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
+	getRec := httptest.NewRecorder()
+	handler(getRec, getReq)
+	require.Equal(t, http.StatusOK, getRec.Code)
+
+	re := regexp.MustCompile(`name="csrf_token" value="([a-f0-9]+)"`)
+	matches := re.FindStringSubmatch(getRec.Body.String())
+	require.Len(t, matches, 2)
+	csrfToken := matches[1]
+
+	form := url.Values{
+		"csrf_token":            {csrfToken},
+		"client_id":             {clientID},
+		"redirect_uri":          {redirectURI},
+		"state":                 {"mystate"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"username":              {"testuser"},
+		"password":              {"password123"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusFound, rec.Code)
+	location := rec.Header().Get("Location")
+
+	// The redirect should use "&" not "?" since the URI already has query params.
+	u, err := url.Parse(location)
+	require.NoError(t, err)
+	assert.Equal(t, "param", u.Query().Get("existing"))
+	assert.NotEmpty(t, u.Query().Get("code"))
+	assert.Equal(t, "mystate", u.Query().Get("state"))
+}
+
 func TestAuthorize_POST_InvalidPassword(t *testing.T) {
 	store := testStore(t)
 	clientID := registerTestClient(t, store, []string{"https://example.com/callback"})
@@ -787,7 +837,7 @@ func TestClientCredentials_Success(t *testing.T) {
 	var resp tokenResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.NotEmpty(t, resp.AccessToken)
-	assert.NotEmpty(t, resp.RefreshToken)
+	assert.Empty(t, resp.RefreshToken, "client_credentials should not issue refresh tokens (RFC 6749 4.4.3)")
 	assert.Equal(t, "Bearer", resp.TokenType)
 	assert.Equal(t, int(tokenExpiry.Seconds()), resp.ExpiresIn)
 }
@@ -950,6 +1000,7 @@ func TestClientCredentials_WithResource(t *testing.T) {
 	var resp tokenResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.NotEmpty(t, resp.AccessToken)
+	assert.Empty(t, resp.RefreshToken)
 }
 
 func TestClientCredentials_WrongResource(t *testing.T) {
@@ -994,6 +1045,28 @@ func TestClientCredentials_JSONBody(t *testing.T) {
 	var resp tokenResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.NotEmpty(t, resp.AccessToken)
+	assert.Empty(t, resp.RefreshToken)
+}
+
+func TestClientCredentials_JSONBodyWithCharset(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := `{"grant_type":"client_credentials","client_id":"bot-client","client_secret":"s3cret"}`
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp tokenResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.NotEmpty(t, resp.AccessToken)
 }
 
 func TestClientCredentials_TokenUsableAsBearer(t *testing.T) {
@@ -1025,15 +1098,17 @@ func TestClientCredentials_TokenUsableAsBearer(t *testing.T) {
 	assert.Equal(t, "bot-client", token.UserID)
 	assert.Equal(t, "bot-client", token.ClientID)
 	assert.Equal(t, testServerURL, token.Resource)
+
+	// No refresh token on the access token record either.
+	assert.Empty(t, token.RefreshToken)
 }
 
-func TestClientCredentials_RefreshTokenWorks(t *testing.T) {
+func TestClientCredentials_NoRefreshToken(t *testing.T) {
 	store := testStore(t)
 	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
 
 	handler := HandleToken(store, testLogger(), testServerURL)
 
-	// First, get tokens via client_credentials.
 	body := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {"bot-client"},
@@ -1051,25 +1126,9 @@ func TestClientCredentials_RefreshTokenWorks(t *testing.T) {
 	var resp tokenResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
-	// Now refresh the token.
-	refreshBody := url.Values{
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {resp.RefreshToken},
-		"client_id":     {"bot-client"},
-	}
-
-	req2 := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(refreshBody.Encode()))
-	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	rec2 := httptest.NewRecorder()
-	handler(rec2, req2)
-
-	assert.Equal(t, http.StatusOK, rec2.Code)
-
-	var resp2 tokenResponse
-	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp2))
-	assert.NotEmpty(t, resp2.AccessToken)
-	assert.NotEqual(t, resp.AccessToken, resp2.AccessToken)
+	// RFC 6749 Section 4.4.3: no refresh token for client_credentials.
+	assert.Empty(t, resp.RefreshToken)
+	assert.NotEmpty(t, resp.AccessToken)
 }
 
 func TestRegistration_BlocksClientCredentials(t *testing.T) {

@@ -476,7 +476,9 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		ExpiresAt:     time.Now().Add(codeExpiry),
 	})
 
-	// Build redirect URL with proper encoding.
+	// Build redirect URL with proper encoding. Use "&" if the
+	// redirect URI already contains a query component (RFC 6749
+	// Section 4.1.2 requires retaining existing query parameters).
 	params := url.Values{}
 	params.Set("code", code)
 
@@ -484,6 +486,11 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		params.Set("state", state)
 	}
 
-	redirectURL := redirectURI + "?" + params.Encode()
+	sep := "?"
+	if strings.Contains(redirectURI, "?") {
+		sep = "&"
+	}
+
+	redirectURL := redirectURI + sep + params.Encode()
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
