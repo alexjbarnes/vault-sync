@@ -1,0 +1,60 @@
+name: Cleanup Dev Images
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Monday 6am UTC
+  workflow_dispatch:
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old dev images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          PACKAGE="vault-sync"
+          KEEP_DAYS=7
+          KEEP_LATEST=3
+          CUTOFF=$(date -u -d "${KEEP_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ)
+
+          echo "Cutoff: ${CUTOFF}"
+          echo "Keeping ${KEEP_LATEST} most recent dev versions regardless of age"
+
+          VERSIONS=$(gh api \
+            "/users/${OWNER}/packages/container/${PACKAGE}/versions" \
+            --paginate)
+
+          # Delete old dev-commit versions, keeping the N most recent.
+          # Only targets versions whose tags ALL start with "dev-".
+          # This preserves the floating "dev" tag, semver tags, and "latest".
+          echo "${VERSIONS}" | jq -r --arg cutoff "${CUTOFF}" --argjson keep "${KEEP_LATEST}" '
+            [.[] | select(
+              (.metadata.container.tags | length > 0) and
+              (.metadata.container.tags | all(startswith("dev-")))
+            )]
+            | sort_by(.created_at) | reverse
+            | .[$keep:]
+            | .[] | select(.created_at < $cutoff)
+            | "\(.id)\t\(.metadata.container.tags | join(","))"
+          ' | while IFS=$'\t' read -r id tags; do
+            echo "Deleting dev version ${id} (${tags})"
+            gh api -X DELETE \
+              "/users/${OWNER}/packages/container/${PACKAGE}/versions/${id}" || true
+          done
+
+          # Delete untagged versions (orphaned manifests) older than cutoff.
+          echo "${VERSIONS}" | jq -r --arg cutoff "${CUTOFF}" '
+            .[] | select(
+              (.metadata.container.tags | length == 0) and
+              (.created_at < $cutoff)
+            ) | .id
+          ' | while read -r id; do
+            echo "Deleting untagged version ${id}"
+            gh api -X DELETE \
+              "/users/${OWNER}/packages/container/${PACKAGE}/versions/${id}" || true
+          done
