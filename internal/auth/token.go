@@ -52,6 +52,7 @@ type tokenRequest struct {
 	RedirectURI  string `json:"redirect_uri"`
 	CodeVerifier string `json:"code_verifier"`
 	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
 	Resource     string `json:"resource"`
 	RefreshToken string `json:"refresh_token"`
 }
@@ -221,13 +222,17 @@ func HandleToken(store *Store, logger *slog.Logger, serverURL string) http.Handl
 				RedirectURI:  r.FormValue("redirect_uri"),
 				CodeVerifier: r.FormValue("code_verifier"),
 				ClientID:     r.FormValue("client_id"),
+				ClientSecret: r.FormValue("client_secret"),
 				Resource:     r.FormValue("resource"),
 				RefreshToken: r.FormValue("refresh_token"),
 			}
 		}
 
-		if req.GrantType != "authorization_code" && req.GrantType != "refresh_token" {
-			writeJSONError(w, http.StatusBadRequest, "unsupported_grant_type", "only authorization_code and refresh_token are supported")
+		switch req.GrantType {
+		case "authorization_code", "refresh_token", "client_credentials":
+			// supported
+		default:
+			writeJSONError(w, http.StatusBadRequest, "unsupported_grant_type", "unsupported grant_type")
 			return
 		}
 
@@ -248,14 +253,14 @@ func HandleToken(store *Store, logger *slog.Logger, serverURL string) http.Handl
 			return
 		}
 
-		// Handle refresh_token grant
-		if req.GrantType == "refresh_token" {
+		switch req.GrantType {
+		case "refresh_token":
 			handleRefreshToken(w, store, limiter, ip, req, serverURL)
-			return
+		case "client_credentials":
+			handleClientCredentials(w, store, limiter, logger, ip, req, serverURL)
+		default:
+			handleAuthorizationCode(w, store, limiter, ip, req, serverURL)
 		}
-
-		// Handle authorization_code grant
-		handleAuthorizationCode(w, store, limiter, ip, req, serverURL)
 	}
 }
 
@@ -286,6 +291,39 @@ func handleRefreshToken(w http.ResponseWriter, store *Store, limiter *tokenRateL
 	}
 
 	issueTokenPair(w, store, rt.UserID, resource, rt.Scopes, rt.ClientID)
+}
+
+func handleClientCredentials(w http.ResponseWriter, store *Store, limiter *tokenRateLimiter, logger *slog.Logger, ip string, req tokenRequest, serverURL string) {
+	if req.ClientID == "" || req.ClientSecret == "" {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", "client_id and client_secret are required")
+		return
+	}
+
+	if !store.ValidateClientSecret(req.ClientID, req.ClientSecret) {
+		limiter.recordFailure(ip, req.ClientID)
+		logger.Warn("client_credentials authentication failed",
+			slog.String("client_id", req.ClientID),
+			slog.String("ip", ip))
+		writeJSONError(w, http.StatusUnauthorized, "invalid_client", "invalid client credentials")
+
+		return
+	}
+
+	limiter.clearLockout(req.ClientID)
+
+	resource := req.Resource
+	if resource == "" {
+		resource = serverURL
+	}
+
+	if resource != "" && strings.TrimRight(resource, "/") != strings.TrimRight(serverURL, "/") {
+		writeJSONError(w, http.StatusBadRequest, "invalid_target", "resource parameter does not match this server")
+		return
+	}
+
+	// The client itself is the resource owner for client_credentials.
+	// Use the client_id as the user_id on the tokens.
+	issueTokenPair(w, store, req.ClientID, resource, nil, req.ClientID)
 }
 
 func handleAuthorizationCode(w http.ResponseWriter, store *Store, limiter *tokenRateLimiter, ip string, req tokenRequest, serverURL string) {

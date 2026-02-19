@@ -660,6 +660,408 @@ func TestAuthorize_POST_RateLimited(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
 }
 
+// --- Client credentials grant ---
+
+// registerPreConfiguredClient creates a client with a hashed secret and
+// client_credentials grant type, simulating what main.go does.
+func registerPreConfiguredClient(t *testing.T, store *Store, clientID, secret string) {
+	t.Helper()
+
+	store.RegisterPreConfiguredClient(&models.OAuthClient{
+		ClientID:   clientID,
+		SecretHash: HashSecret(secret),
+		GrantTypes: []string{"client_credentials"},
+	})
+}
+
+func TestClientCredentials_Success(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {"bot-client"},
+		"client_secret": {"s3cret"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp tokenResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.NotEmpty(t, resp.AccessToken)
+	assert.NotEmpty(t, resp.RefreshToken)
+	assert.Equal(t, "Bearer", resp.TokenType)
+	assert.Equal(t, int(tokenExpiry.Seconds()), resp.ExpiresIn)
+}
+
+func TestClientCredentials_WrongSecret(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {"bot-client"},
+		"client_secret": {"wrong-secret"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid_client")
+}
+
+func TestClientCredentials_MissingSecret(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := url.Values{
+		"grant_type": {"client_credentials"},
+		"client_id":  {"bot-client"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "client_id and client_secret are required")
+}
+
+func TestClientCredentials_MissingClientID(t *testing.T) {
+	store := testStore(t)
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_secret": {"s3cret"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestClientCredentials_UnknownClient(t *testing.T) {
+	store := testStore(t)
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {"nonexistent"},
+		"client_secret": {"whatever"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	// Unknown client fails grant type check first (client not registered).
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "unauthorized_client")
+}
+
+func TestClientCredentials_DynamicClientCannotUse(t *testing.T) {
+	store := testStore(t)
+
+	// Dynamically registered client has authorization_code grant.
+	clientID := registerTestClient(t, store, []string{"https://example.com/cb"})
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {clientID},
+		"client_secret": {"anything"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	// Should be rejected by grant type enforcement (unauthorized_client),
+	// not by secret validation.
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "unauthorized_client")
+}
+
+func TestClientCredentials_PreConfiguredCannotUseAuthCode(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {"some-code"},
+		"client_id":     {"bot-client"},
+		"code_verifier": {"verifier"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "unauthorized_client")
+}
+
+func TestClientCredentials_WithResource(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {"bot-client"},
+		"client_secret": {"s3cret"},
+		"resource":      {testServerURL},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp tokenResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.NotEmpty(t, resp.AccessToken)
+}
+
+func TestClientCredentials_WrongResource(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {"bot-client"},
+		"client_secret": {"s3cret"},
+		"resource":      {"https://evil.example.com"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid_target")
+}
+
+func TestClientCredentials_JSONBody(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := `{"grant_type":"client_credentials","client_id":"bot-client","client_secret":"s3cret"}`
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp tokenResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.NotEmpty(t, resp.AccessToken)
+}
+
+func TestClientCredentials_TokenUsableAsBearer(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	body := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {"bot-client"},
+		"client_secret": {"s3cret"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp tokenResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	// Verify the access token passes bearer validation.
+	token := store.ValidateToken(resp.AccessToken)
+	require.NotNil(t, token)
+	assert.Equal(t, "bot-client", token.UserID)
+	assert.Equal(t, "bot-client", token.ClientID)
+	assert.Equal(t, testServerURL, token.Resource)
+}
+
+func TestClientCredentials_RefreshTokenWorks(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
+
+	handler := HandleToken(store, testLogger(), testServerURL)
+
+	// First, get tokens via client_credentials.
+	body := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {"bot-client"},
+		"client_secret": {"s3cret"},
+	}
+
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(body.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp tokenResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	// Now refresh the token.
+	refreshBody := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {resp.RefreshToken},
+		"client_id":     {"bot-client"},
+	}
+
+	req2 := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(refreshBody.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec2 := httptest.NewRecorder()
+	handler(rec2, req2)
+
+	assert.Equal(t, http.StatusOK, rec2.Code)
+
+	var resp2 tokenResponse
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp2))
+	assert.NotEmpty(t, resp2.AccessToken)
+	assert.NotEqual(t, resp.AccessToken, resp2.AccessToken)
+}
+
+func TestRegistration_BlocksClientCredentials(t *testing.T) {
+	store := testStore(t)
+
+	handler := HandleRegistration(store)
+
+	body := `{"client_name":"Bot","redirect_uris":["https://example.com/cb"],"grant_types":["client_credentials"]}`
+
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "not available through dynamic registration")
+}
+
+func TestRegistration_BlocksClientCredentialsMixed(t *testing.T) {
+	store := testStore(t)
+
+	handler := HandleRegistration(store)
+
+	body := `{"client_name":"Bot","redirect_uris":["https://example.com/cb"],"grant_types":["authorization_code","client_credentials"]}`
+
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "not available through dynamic registration")
+}
+
+func TestStore_ValidateClientSecret(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "test-client", "correct-secret")
+
+	assert.True(t, store.ValidateClientSecret("test-client", "correct-secret"))
+	assert.False(t, store.ValidateClientSecret("test-client", "wrong-secret"))
+	assert.False(t, store.ValidateClientSecret("nonexistent", "any-secret"))
+}
+
+func TestStore_ValidateClientSecret_NoHash(t *testing.T) {
+	store := testStore(t)
+
+	// Client without SecretHash (dynamically registered).
+	registerTestClient(t, store, []string{"https://example.com/cb"})
+
+	// ValidateClientSecret should return false for clients without a hash.
+	clients := store.clients
+	for clientID := range clients {
+		assert.False(t, store.ValidateClientSecret(clientID, "any"))
+	}
+}
+
+func TestHashSecret_Deterministic(t *testing.T) {
+	h1 := HashSecret("test-secret")
+	h2 := HashSecret("test-secret")
+	assert.Equal(t, h1, h2)
+
+	h3 := HashSecret("different-secret")
+	assert.NotEqual(t, h1, h3)
+}
+
+func TestMetadata_IncludesClientCredentials(t *testing.T) {
+	handler := HandleServerMetadata(testServerURL)
+
+	req := httptest.NewRequest("GET", "/.well-known/oauth-authorization-server", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var meta ServerMetadata
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&meta))
+
+	assert.Contains(t, meta.GrantTypesSupported, "client_credentials")
+	assert.Contains(t, meta.TokenEndpointAuthMethodsSupported, "client_secret_post")
+}
+
 // --- Token endpoint rate limiting and lockout ---
 
 func TestToken_IPRateLimit(t *testing.T) {

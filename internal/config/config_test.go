@@ -25,6 +25,7 @@ func clearConfigEnv(t *testing.T) {
 		"MCP_LISTEN_ADDR",
 		"MCP_SERVER_URL",
 		"MCP_AUTH_USERS",
+		"MCP_CLIENT_CREDENTIALS",
 		"MCP_LOG_LEVEL",
 	} {
 		t.Setenv(key, "")
@@ -401,4 +402,63 @@ func TestValidate_MCPAllPresent(t *testing.T) {
 		MCPAuthUsers: "user:hash",
 	}
 	assert.NoError(t, cfg.validate())
+}
+
+// --- ParseMCPClientCredentials ---
+
+func TestParseMCPClientCredentials_Valid(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "bot1:secret1,bot2:secret2"}
+	creds, err := cfg.ParseMCPClientCredentials()
+	require.NoError(t, err)
+	require.Len(t, creds, 2)
+	assert.Equal(t, "bot1", creds[0].ClientID)
+	assert.Equal(t, "secret1", creds[0].Secret)
+	assert.Equal(t, "bot2", creds[1].ClientID)
+	assert.Equal(t, "secret2", creds[1].Secret)
+}
+
+func TestParseMCPClientCredentials_Single(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "bot:s3cret"}
+	creds, err := cfg.ParseMCPClientCredentials()
+	require.NoError(t, err)
+	require.Len(t, creds, 1)
+	assert.Equal(t, "bot", creds[0].ClientID)
+	assert.Equal(t, "s3cret", creds[0].Secret)
+}
+
+func TestParseMCPClientCredentials_Empty(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: ""}
+	creds, err := cfg.ParseMCPClientCredentials()
+	require.NoError(t, err)
+	assert.Nil(t, creds)
+}
+
+func TestParseMCPClientCredentials_MissingColon(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "invalid"}
+	_, err := cfg.ParseMCPClientCredentials()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing ':'")
+}
+
+func TestParseMCPClientCredentials_EmptyClientID(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: ":secret"}
+	_, err := cfg.ParseMCPClientCredentials()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty client_id or secret")
+}
+
+func TestParseMCPClientCredentials_EmptySecret(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "bot:"}
+	_, err := cfg.ParseMCPClientCredentials()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty client_id or secret")
+}
+
+func TestParseMCPClientCredentials_ColonInSecret(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "bot:secret:with:colons"}
+	creds, err := cfg.ParseMCPClientCredentials()
+	require.NoError(t, err)
+	require.Len(t, creds, 1)
+	assert.Equal(t, "bot", creds[0].ClientID)
+	assert.Equal(t, "secret:with:colons", creds[0].Secret)
 }

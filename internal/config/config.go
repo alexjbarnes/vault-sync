@@ -53,10 +53,11 @@ type Config struct {
 	Environment string `env:"ENVIRONMENT" envDefault:"development"`
 
 	// MCP server settings (required when MCP is enabled)
-	MCPListenAddr string `env:"MCP_LISTEN_ADDR" envDefault:":8090"`
-	MCPServerURL  string `env:"MCP_SERVER_URL"`
-	MCPAuthUsers  string `env:"MCP_AUTH_USERS"`
-	MCPLogLevel   string `env:"MCP_LOG_LEVEL" envDefault:"info"`
+	MCPListenAddr        string `env:"MCP_LISTEN_ADDR" envDefault:":8090"`
+	MCPServerURL         string `env:"MCP_SERVER_URL"`
+	MCPAuthUsers         string `env:"MCP_AUTH_USERS"`
+	MCPClientCredentials string `env:"MCP_CLIENT_CREDENTIALS"`
+	MCPLogLevel          string `env:"MCP_LOG_LEVEL" envDefault:"info"`
 }
 
 // warnInsecureEnvFile checks whether the .env file (if present) has
@@ -189,6 +190,46 @@ func (c *Config) SetSyncDir(dir string) error {
 // IsProduction returns true when the environment is set to production.
 func (c *Config) IsProduction() bool {
 	return c.Environment == "production"
+}
+
+// ClientCredential holds a pre-configured client ID and plain-text secret
+// parsed from MCP_CLIENT_CREDENTIALS. The secret is hashed before storage.
+type ClientCredential struct {
+	ClientID string
+	Secret   string
+}
+
+// ParseMCPClientCredentials parses the MCP_CLIENT_CREDENTIALS string.
+// Format: "client1:secret1,client2:secret2"
+func (c *Config) ParseMCPClientCredentials() ([]ClientCredential, error) {
+	if c.MCPClientCredentials == "" {
+		return nil, nil
+	}
+
+	var creds []ClientCredential
+
+	for _, pair := range strings.Split(c.MCPClientCredentials, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		idx := strings.Index(pair, ":")
+		if idx < 0 {
+			return nil, fmt.Errorf("invalid client credential entry (missing ':')")
+		}
+
+		clientID := pair[:idx]
+
+		secret := pair[idx+1:]
+		if clientID == "" || secret == "" {
+			return nil, fmt.Errorf("empty client_id or secret in entry %d", len(creds)+1)
+		}
+
+		creds = append(creds, ClientCredential{ClientID: clientID, Secret: secret})
+	}
+
+	return creds, nil
 }
 
 // ParseMCPUsers parses the MCP_AUTH_USERS string into a UserCredentials map.

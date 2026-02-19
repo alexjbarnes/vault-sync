@@ -56,9 +56,9 @@ func HandleServerMetadata(serverURL string) http.HandlerFunc {
 		RegistrationEndpoint:              serverURL + "/oauth/register",
 		ScopesSupported:                   []string{"vault:read", "vault:write"},
 		ResponseTypesSupported:            []string{"code"},
-		GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
+		GrantTypesSupported:               []string{"authorization_code", "client_credentials", "refresh_token"},
 		CodeChallengeMethodsSupported:     []string{"S256"},
-		TokenEndpointAuthMethodsSupported: []string{"none"},
+		TokenEndpointAuthMethodsSupported: []string{"none", "client_secret_post"},
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {

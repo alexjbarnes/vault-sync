@@ -6,6 +6,8 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"log/slog"
 	"strings"
@@ -433,6 +435,47 @@ func (s *Store) ConsumeCSRF(token, clientID, redirectURI string) bool {
 	}
 
 	return entry.clientID == clientID && entry.redirectURI == redirectURI
+}
+
+// ValidateClientSecret checks the provided secret against the stored
+// SHA-256 hash for the given client. Returns false if the client does
+// not exist or has no secret hash.
+func (s *Store) ValidateClientSecret(clientID, secret string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	client, ok := s.clients[clientID]
+	if !ok || client.SecretHash == "" {
+		// Always hash to prevent timing leaks on missing clients.
+		_ = HashSecret(secret)
+		return false
+	}
+
+	computed := HashSecret(secret)
+
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(client.SecretHash)) == 1
+}
+
+// RegisterPreConfiguredClient stores a pre-configured client (from
+// MCP_CLIENT_CREDENTIALS) with its secret hash and grant types. Unlike
+// RegisterClient, this bypasses the maxClients cap since pre-configured
+// clients are operator-managed.
+func (s *Store) RegisterPreConfiguredClient(client *models.OAuthClient) {
+	s.mu.Lock()
+	s.clients[client.ClientID] = client
+	s.mu.Unlock()
+
+	if s.persist != nil {
+		if err := s.persist.SaveOAuthClient(*client); err != nil && s.logger != nil {
+			s.logger.Warn("persisting pre-configured client", slog.String("error", err.Error()))
+		}
+	}
+}
+
+// HashSecret returns the hex-encoded SHA-256 hash of a secret string.
+func HashSecret(secret string) string {
+	h := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(h[:])
 }
 
 // ClientAllowsGrant checks whether the client is permitted to use the
