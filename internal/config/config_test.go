@@ -27,6 +27,7 @@ func clearConfigEnv(t *testing.T) {
 		"MCP_AUTH_USERS",
 		"MCP_CLIENT_CREDENTIALS",
 		"MCP_LOG_LEVEL",
+		"DEVICE_NAME",
 	} {
 		t.Setenv(key, "")
 		os.Unsetenv(key)
@@ -239,6 +240,17 @@ func TestLoad_DefaultDeviceName(t *testing.T) {
 	}
 
 	assert.Equal(t, hostname, cfg.DeviceName)
+}
+
+func TestLoad_ExplicitDeviceName(t *testing.T) {
+	clearConfigEnv(t)
+	setSyncEnv(t, t.TempDir())
+	t.Setenv("DEVICE_NAME", "alexs-docker")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, "alexs-docker", cfg.DeviceName)
 }
 
 func TestLoad_DefaultEnvironment(t *testing.T) {

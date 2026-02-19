@@ -346,6 +346,31 @@ func TestHandleDelete_SkipsUnknownPath(t *testing.T) {
 	w.handleDelete(context.Background(), absPath)
 }
 
+// TestHandleDelete_SkipsServerInitiatedDelete verifies that the watcher
+// does not echo a delete back to the server when the server state has
+// already been cleared. This prevents a feedback loop: the server tells
+// us to delete a file, executeLiveDecision clears the server state and
+// then removes the file from disk. fsnotify fires and handleDelete runs,
+// but ServerFileState returns nil because state was cleared first.
+func TestHandleDelete_SkipsServerInitiatedDelete(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mock := NewMockSyncPusher(ctrl)
+	v := tempVault(t)
+	w := newTestWatcher(t, v, mock)
+
+	// Simulate: the file existed on disk and was deleted by
+	// executeLiveDecision. The server state was cleared before the
+	// file was removed, so ServerFileState returns nil by the time
+	// the watcher's handleDelete runs.
+	absPath := filepath.Join(v.Dir(), "server-deleted.md")
+
+	mock.EXPECT().Connected().Return(true)
+	mock.EXPECT().ServerFileState("server-deleted.md").Return(nil)
+	// Push must NOT be called -- no feedback loop.
+
+	w.handleDelete(context.Background(), absPath)
+}
+
 func TestHandleDelete_PushFailureRequeuesIfDisconnected(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mock := NewMockSyncPusher(ctrl)

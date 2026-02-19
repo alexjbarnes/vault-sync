@@ -36,7 +36,7 @@ type Config struct {
 	SyncDir string `env:"OBSIDIAN_SYNC_DIR"`
 
 	// Device name this client identifies as. Defaults to system hostname.
-	DeviceName string
+	DeviceName string `env:"DEVICE_NAME"`
 
 	// Config sync toggles for .obsidian/ files.
 	// All default to false (no .obsidian/ config synced unless opted in).

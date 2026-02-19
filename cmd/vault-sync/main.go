@@ -58,6 +58,7 @@ func run() error {
 	logger := logging.NewLogger(cfg.Environment)
 	logger.Info("vault-sync starting",
 		slog.String("version", Version),
+		slog.String("device", cfg.DeviceName),
 		slog.Bool("sync", cfg.EnableSync),
 		slog.Bool("mcp", cfg.EnableMCP),
 	)
