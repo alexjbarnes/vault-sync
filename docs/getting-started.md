@@ -123,6 +123,16 @@ vault-sync uses OAuth 2.1 with PKCE (authorization code flow). MCP clients that 
 
 Access tokens expire after 1 hour. The client refreshes them automatically using a refresh token, so you only log in once.
 
+### Headless authentication (no browser)
+
+For automated pipelines and headless MCP clients that cannot open a browser, vault-sync supports the OAuth `client_credentials` flow. Pre-configure client credentials in `.env`:
+
+```
+MCP_CLIENT_CREDENTIALS=my-bot:a-strong-random-secret
+```
+
+The client authenticates by posting its `client_id` and `client_secret` directly to the token endpoint. No browser interaction is needed. See the [OAuth documentation](oauth.md) for request examples and details.
+
 ## 7. Connect an MCP client
 
 Point your MCP client at the server URL.
