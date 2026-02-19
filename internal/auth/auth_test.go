@@ -1424,6 +1424,29 @@ func TestRegistration_StoresGrantTypes(t *testing.T) {
 	assert.Equal(t, []string{"authorization_code"}, client.GrantTypes)
 }
 
+func TestRegistration_AllowsRefreshTokenGrant(t *testing.T) {
+	store := testStore(t)
+
+	handler := HandleRegistration(store)
+
+	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"],"grant_types":["authorization_code","refresh_token"]}`
+
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var resp registrationResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	client := store.GetClient(resp.ClientID)
+	require.NotNil(t, client)
+	assert.Equal(t, []string{"authorization_code", "refresh_token"}, client.GrantTypes)
+}
+
 // --- Resource Parameter (RFC 8707) ---
 
 func TestAuthorize_GET_ResourceParameter(t *testing.T) {

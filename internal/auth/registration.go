@@ -71,12 +71,12 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 			}
 		}
 
-		// Validate requested grant types against the allowed set.
-		// Only authorization_code is available through dynamic
-		// registration. client_credentials requires pre-configuration
-		// via MCP_CLIENT_CREDENTIALS.
+		// Validate requested grant types. Dynamic registration allows
+		// authorization_code and refresh_token (companion grant for
+		// obtaining refresh tokens). client_credentials requires
+		// pre-configuration via MCP_CLIENT_CREDENTIALS.
 		for _, gt := range req.GrantTypes {
-			if gt != "authorization_code" {
+			if gt != "authorization_code" && gt != "refresh_token" {
 				writeJSONError(w, http.StatusBadRequest, "invalid_client_metadata", fmt.Sprintf("grant type %q is not available through dynamic registration", gt))
 				return
 			}
