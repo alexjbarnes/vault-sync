@@ -373,10 +373,6 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 			ClientID:   cred.ClientID,
 			SecretHash: auth.HashSecret(cred.Secret),
 			GrantTypes: []string{"client_credentials", "authorization_code", "refresh_token"},
-			RedirectURIs: []string{
-				"http://127.0.0.1",
-				"http://localhost",
-			},
 		})
 		mcpLogger.Info("registered pre-configured client", slog.String("client_id", cred.ClientID))
 	}

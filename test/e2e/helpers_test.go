@@ -112,10 +112,6 @@ func (h *harness) registerPreConfiguredClient(clientID, secret string) {
 		ClientID:   clientID,
 		SecretHash: auth.HashSecret(secret),
 		GrantTypes: []string{"client_credentials", "authorization_code", "refresh_token"},
-		RedirectURIs: []string{
-			"http://127.0.0.1",
-			"http://localhost",
-		},
 	})
 }
 

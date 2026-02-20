@@ -860,10 +860,6 @@ func registerPreConfiguredClient(t *testing.T, store *Store, clientID, secret st
 		ClientID:   clientID,
 		SecretHash: HashSecret(secret),
 		GrantTypes: []string{"client_credentials", "authorization_code", "refresh_token"},
-		RedirectURIs: []string{
-			"http://127.0.0.1",
-			"http://localhost",
-		},
 	})
 }
 
@@ -2978,6 +2974,59 @@ func TestAuthorize_GET_LocalhostPrefixRejectsHTTPS(t *testing.T) {
 	// HTTPS on 127.0.0.1 should not match the http:// prefix.
 	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id=localhost-client"+
 		"&redirect_uri="+url.QueryEscape("https://127.0.0.1:19876/callback")+
+		"&code_challenge="+challenge, nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestAuthorize_GET_PreConfiguredNoRedirectURIs_AcceptsHTTPS(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "preconfig-client", "s3cret")
+
+	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
+	challenge := pkceChallenge("v")
+
+	// Pre-configured clients with no registered redirect URIs should accept
+	// any HTTPS redirect URI per RFC 6749 Section 3.1.2.2.
+	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id=preconfig-client"+
+		"&redirect_uri="+url.QueryEscape("https://claude.ai/api/mcp/auth_callback")+
+		"&code_challenge="+challenge, nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "Sign in")
+}
+
+func TestAuthorize_GET_PreConfiguredNoRedirectURIs_AcceptsLoopback(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "preconfig-client", "s3cret")
+
+	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
+	challenge := pkceChallenge("v")
+
+	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id=preconfig-client"+
+		"&redirect_uri="+url.QueryEscape("http://127.0.0.1:19876/callback")+
+		"&code_challenge="+challenge, nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "Sign in")
+}
+
+func TestAuthorize_GET_PreConfiguredNoRedirectURIs_RejectsHTTP(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "preconfig-client", "s3cret")
+
+	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
+	challenge := pkceChallenge("v")
+
+	// Plain HTTP to a non-loopback host should be rejected.
+	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id=preconfig-client"+
+		"&redirect_uri="+url.QueryEscape("http://evil.com/steal")+
 		"&code_challenge="+challenge, nil)
 	rec := httptest.NewRecorder()
 	handler(rec, req)

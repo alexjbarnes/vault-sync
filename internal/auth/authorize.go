@@ -295,7 +295,19 @@ func HandleAuthorize(store *Store, users UserCredentials, logger *slog.Logger, s
 // For localhost URIs (http://127.0.0.1 or http://localhost), prefix
 // matching is used so any port and path are accepted. This follows
 // RFC 8252 Section 7.3 which allows dynamic ports for loopback redirects.
+//
+// When a client has no registered redirect URIs, any HTTPS URI or
+// loopback URI is accepted. RFC 6749 Section 3.1.2.2 makes redirect
+// URI registration SHOULD (not MUST) for confidential clients. This
+// applies to pre-configured clients whose operator chose not to
+// restrict redirect targets.
 func validateRedirectURI(client *models.OAuthClient, redirectURI string) bool {
+	if len(client.RedirectURIs) == 0 {
+		return strings.HasPrefix(redirectURI, "https://") ||
+			strings.HasPrefix(redirectURI, "http://127.0.0.1") ||
+			strings.HasPrefix(redirectURI, "http://localhost")
+	}
+
 	for _, registered := range client.RedirectURIs {
 		if redirectURI == registered {
 			return true
