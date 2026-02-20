@@ -26,6 +26,7 @@ func clearConfigEnv(t *testing.T) {
 		"MCP_SERVER_URL",
 		"MCP_AUTH_USERS",
 		"MCP_CLIENT_CREDENTIALS",
+		"MCP_API_KEYS",
 		"MCP_LOG_LEVEL",
 		"DEVICE_NAME",
 	} {
@@ -129,7 +130,7 @@ func TestLoad_MCPMode_MissingServerURL(t *testing.T) {
 	assert.Contains(t, err.Error(), "MCP_SERVER_URL")
 }
 
-func TestLoad_MCPMode_MissingAuthUsers(t *testing.T) {
+func TestLoad_MCPMode_MissingAllAuth(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("ENABLE_SYNC", "false")
 	t.Setenv("ENABLE_MCP", "true")
@@ -138,7 +139,7 @@ func TestLoad_MCPMode_MissingAuthUsers(t *testing.T) {
 
 	_, err := Load()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "MCP_AUTH_USERS")
+	assert.Contains(t, err.Error(), "at least one auth method")
 }
 
 // --- Load: MCP mode does not require sync fields ---
@@ -473,4 +474,73 @@ func TestParseMCPClientCredentials_ColonInSecret(t *testing.T) {
 	require.Len(t, creds, 1)
 	assert.Equal(t, "bot", creds[0].ClientID)
 	assert.Equal(t, "secret:with:colons", creds[0].Secret)
+}
+
+// --- ParseMCPAPIKeys ---
+
+func TestParseMCPAPIKeys_Valid(t *testing.T) {
+	key := "vs_" + hexString(32)
+	cfg := &Config{MCPAPIKeys: "bot:" + key}
+	entries, err := cfg.ParseMCPAPIKeys()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "bot", entries[0].UserID)
+	assert.Equal(t, key, entries[0].Key)
+}
+
+func TestParseMCPAPIKeys_Empty(t *testing.T) {
+	cfg := &Config{MCPAPIKeys: ""}
+	entries, err := cfg.ParseMCPAPIKeys()
+	require.NoError(t, err)
+	assert.Nil(t, entries)
+}
+
+func TestParseMCPAPIKeys_MissingPrefix(t *testing.T) {
+	cfg := &Config{MCPAPIKeys: "bot:" + hexString(32)}
+	_, err := cfg.ParseMCPAPIKeys()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vs_")
+}
+
+func TestParseMCPAPIKeys_TooShort(t *testing.T) {
+	cfg := &Config{MCPAPIKeys: "bot:vs_abcd"}
+	_, err := cfg.ParseMCPAPIKeys()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "too short")
+}
+
+func TestParseMCPAPIKeys_NonHexChars(t *testing.T) {
+	// 64 chars but with non-hex characters (Z, G, etc.)
+	badKey := "vs_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+	cfg := &Config{MCPAPIKeys: "bot:" + badKey}
+	_, err := cfg.ParseMCPAPIKeys()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "non-hex")
+}
+
+func TestParseMCPAPIKeys_OddHexLength(t *testing.T) {
+	// 65 hex chars after prefix = odd length, hex.DecodeString rejects this.
+	oddKey := "vs_" + hexString(32) + "a"
+	cfg := &Config{MCPAPIKeys: "bot:" + oddKey}
+	_, err := cfg.ParseMCPAPIKeys()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "non-hex")
+}
+
+// hexString returns a string of n*2 hex characters (n bytes of data).
+func hexString(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(i % 256)
+	}
+
+	const hextable = "0123456789abcdef"
+
+	out := make([]byte, n*2)
+	for i, v := range b {
+		out[i*2] = hextable[v>>4]
+		out[i*2+1] = hextable[v&0x0f]
+	}
+
+	return string(out)
 }

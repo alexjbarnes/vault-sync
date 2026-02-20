@@ -57,6 +57,33 @@ func Middleware(store *Store, serverURL string) func(http.Handler) http.Handler 
 
 			token := strings.TrimPrefix(authHeader, "Bearer ")
 
+			ip, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				ip = r.RemoteAddr
+			}
+
+			// API key authentication: keys use the "vs_" prefix to
+			// distinguish them from OAuth Bearer tokens.
+			if strings.HasPrefix(token, APIKeyPrefix) {
+				ak := store.ValidateAPIKey(token)
+				if ak == nil {
+					w.Header().Set("WWW-Authenticate", wwwAuthInvalid)
+					w.WriteHeader(http.StatusUnauthorized)
+
+					return
+				}
+
+				ctx := r.Context()
+				ctx = context.WithValue(ctx, ctxUserID, ak.UserID)
+				ctx = context.WithValue(ctx, ctxClientID, ak.UserID)
+				ctx = context.WithValue(ctx, ctxRemoteIP, ip)
+
+				next.ServeHTTP(w, r.WithContext(ctx))
+
+				return
+			}
+
+			// OAuth Bearer token authentication.
 			ti := store.ValidateToken(token)
 			if ti == nil {
 				w.Header().Set("WWW-Authenticate", wwwAuthInvalid)
@@ -78,12 +105,6 @@ func Middleware(store *Store, serverURL string) func(http.Handler) http.Handler 
 			ctx := r.Context()
 			ctx = context.WithValue(ctx, ctxUserID, ti.UserID)
 			ctx = context.WithValue(ctx, ctxClientID, ti.ClientID)
-
-			ip, _, err := net.SplitHostPort(r.RemoteAddr)
-			if err != nil {
-				ip = r.RemoteAddr
-			}
-
 			ctx = context.WithValue(ctx, ctxRemoteIP, ip)
 
 			next.ServeHTTP(w, r.WithContext(ctx))

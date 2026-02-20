@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"html/template"
@@ -296,16 +297,18 @@ func HandleAuthorize(store *Store, users UserCredentials, logger *slog.Logger, s
 // matching is used so any port and path are accepted. This follows
 // RFC 8252 Section 7.3 which allows dynamic ports for loopback redirects.
 //
-// When a client has no registered redirect URIs, any HTTPS URI or
-// loopback URI is accepted. RFC 6749 Section 3.1.2.2 makes redirect
-// URI registration SHOULD (not MUST) for confidential clients. This
-// applies to pre-configured clients whose operator chose not to
-// restrict redirect targets.
+// When a client has no registered redirect URIs, only loopback URIs
+// are accepted. This prevents open redirect attacks where an attacker
+// uses a known client_id to redirect authorization codes to an
+// external server they control.
 func validateRedirectURI(client *models.OAuthClient, redirectURI string) bool {
 	if len(client.RedirectURIs) == 0 {
-		return strings.HasPrefix(redirectURI, "https://") ||
-			strings.HasPrefix(redirectURI, "http://127.0.0.1") ||
-			strings.HasPrefix(redirectURI, "http://localhost")
+		u, err := url.Parse(redirectURI)
+		if err != nil {
+			return false
+		}
+
+		return u.Scheme == "http" && isLoopbackHost(u.Hostname())
 	}
 
 	for _, registered := range client.RedirectURIs {
@@ -313,8 +316,10 @@ func validateRedirectURI(client *models.OAuthClient, redirectURI string) bool {
 			return true
 		}
 
-		// RFC 8252: loopback redirect URIs may use any port.
-		if isLocalhostPrefix(registered) && strings.HasPrefix(redirectURI, registered) {
+		// RFC 8252 Section 7.3: loopback redirect URIs may use any
+		// port. Parse both as URLs and compare hostnames to prevent
+		// DNS confusion (e.g. 127.0.0.1.evil.com).
+		if isLocalhostPrefix(registered) && isLoopbackRedirect(redirectURI, registered) {
 			return true
 		}
 	}
@@ -327,6 +332,29 @@ func validateRedirectURI(client *models.OAuthClient, redirectURI string) bool {
 // it suitable for prefix matching per RFC 8252 Section 7.3.
 func isLocalhostPrefix(uri string) bool {
 	return uri == "http://127.0.0.1" || uri == "http://localhost"
+}
+
+// isLoopbackHost returns true if the hostname is a loopback address.
+func isLoopbackHost(host string) bool {
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+// isLoopbackRedirect checks if redirectURI is a valid loopback redirect
+// matching the registered prefix URI. It parses both as URLs and
+// compares scheme and hostname to prevent DNS confusion attacks
+// (e.g. 127.0.0.1.evil.com matching a 127.0.0.1 prefix).
+func isLoopbackRedirect(redirectURI, registeredPrefix string) bool {
+	ru, err := url.Parse(redirectURI)
+	if err != nil {
+		return false
+	}
+
+	pu, err := url.Parse(registeredPrefix)
+	if err != nil {
+		return false
+	}
+
+	return ru.Scheme == pu.Scheme && ru.Hostname() == pu.Hostname()
 }
 
 // generateCSRFToken creates a random CSRF token bound to specific
@@ -477,15 +505,8 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		return
 	}
 
-	// CSRF validation. A failed CSRF check may indicate a cross-site
-	// attack, so return a plain error rather than redirecting to the
-	// client (which could be the attacker's URI in a forged form).
-	if !store.ConsumeCSRF(csrfToken, clientID, redirectURI) {
-		http.Error(w, "invalid or expired CSRF token", http.StatusForbidden)
-		return
-	}
-
-	// Rate limiting by remote IP.
+	// Rate limiting by remote IP. Check before consuming CSRF so a
+	// rate-limited request does not destroy the user's CSRF token.
 	ip := remoteIP(r)
 	if limiter.check(ip) {
 		logger.Warn("login rate limited", slog.String("ip", ip))
@@ -494,16 +515,27 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		return
 	}
 
-	// Validate credentials using constant-time comparison to prevent
-	// timing side channels from leaking whether the username exists.
-	// Always compare against a value (dummy if username not found) so
-	// the map lookup miss is not observable via timing.
+	// CSRF validation. A failed CSRF check may indicate a cross-site
+	// attack, so return a plain error rather than redirecting to the
+	// client (which could be the attacker's URI in a forged form).
+	if !store.ConsumeCSRF(csrfToken, clientID, redirectURI) {
+		http.Error(w, "invalid or expired CSRF token", http.StatusForbidden)
+		return
+	}
+
+	// Validate credentials. Both sides are SHA-256 hashed before
+	// comparison to normalize length. subtle.ConstantTimeCompare
+	// returns 0 immediately when lengths differ, which would leak
+	// password length if raw values were compared.
 	expected, ok := users[username]
 	if !ok {
 		expected = "\x00invalid"
 	}
 
-	if !ok || subtle.ConstantTimeCompare([]byte(expected), []byte(password)) != 1 {
+	expectedH := sha256.Sum256([]byte(expected))
+	passwordH := sha256.Sum256([]byte(password))
+
+	if !ok || subtle.ConstantTimeCompare(expectedH[:], passwordH[:]) != 1 {
 		logger.Warn("login failed", slog.String("username", username))
 		limiter.record(ip)
 

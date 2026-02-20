@@ -99,6 +99,17 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 			}
 		}
 
+		// Validate token_endpoint_auth_method against supported values.
+		if req.TokenEndpointAuthMethod != "" &&
+			req.TokenEndpointAuthMethod != "none" &&
+			req.TokenEndpointAuthMethod != "client_secret_post" &&
+			req.TokenEndpointAuthMethod != "client_secret_basic" {
+			writeJSONError(w, http.StatusBadRequest, "invalid_client_metadata",
+				fmt.Sprintf("unsupported token_endpoint_auth_method %q", req.TokenEndpointAuthMethod))
+
+			return
+		}
+
 		clientID := RandomHex(clientIDBytes)
 
 		grantTypes := req.GrantTypes

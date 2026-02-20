@@ -443,14 +443,14 @@ func issueTokenPair(w http.ResponseWriter, store *Store, userID, resource string
 	refreshToken := RandomHex(refreshTokenBytes)
 
 	store.SaveToken(&models.OAuthToken{
-		Token:        accessToken,
-		Kind:         "access",
-		UserID:       userID,
-		Resource:     resource,
-		Scopes:       scopes,
-		ExpiresAt:    time.Now().Add(tokenExpiry),
-		RefreshToken: refreshToken,
-		ClientID:     clientID,
+		Token:       accessToken,
+		Kind:        "access",
+		UserID:      userID,
+		Resource:    resource,
+		Scopes:      scopes,
+		ExpiresAt:   time.Now().Add(tokenExpiry),
+		RefreshHash: HashSecret(refreshToken),
+		ClientID:    clientID,
 	})
 
 	store.SaveToken(&models.OAuthToken{

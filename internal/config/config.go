@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -57,6 +58,7 @@ type Config struct {
 	MCPServerURL         string `env:"MCP_SERVER_URL"`
 	MCPAuthUsers         string `env:"MCP_AUTH_USERS"`
 	MCPClientCredentials string `env:"MCP_CLIENT_CREDENTIALS"`
+	MCPAPIKeys           string `env:"MCP_API_KEYS"`
 	MCPLogLevel          string `env:"MCP_LOG_LEVEL" envDefault:"info"`
 }
 
@@ -154,8 +156,8 @@ func (c *Config) validate() error {
 			return fmt.Errorf("MCP_SERVER_URL is required when MCP is enabled")
 		}
 
-		if c.MCPAuthUsers == "" {
-			return fmt.Errorf("MCP_AUTH_USERS is required when MCP is enabled")
+		if c.MCPAuthUsers == "" && c.MCPAPIKeys == "" && c.MCPClientCredentials == "" {
+			return fmt.Errorf("at least one auth method required when MCP is enabled: MCP_AUTH_USERS, MCP_API_KEYS, or MCP_CLIENT_CREDENTIALS")
 		}
 	}
 
@@ -230,6 +232,59 @@ func (c *Config) ParseMCPClientCredentials() ([]ClientCredential, error) {
 	}
 
 	return creds, nil
+}
+
+// APIKeyEntry holds a pre-configured API key and its associated user
+// identity parsed from MCP_API_KEYS.
+type APIKeyEntry struct {
+	UserID string
+	Key    string
+}
+
+// ParseMCPAPIKeys parses the MCP_API_KEYS string.
+// Format: "user1:vs_key1,user2:vs_key2"
+func (c *Config) ParseMCPAPIKeys() ([]APIKeyEntry, error) {
+	if c.MCPAPIKeys == "" {
+		return nil, nil
+	}
+
+	var entries []APIKeyEntry
+
+	for _, pair := range strings.Split(c.MCPAPIKeys, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		idx := strings.Index(pair, ":")
+		if idx < 0 {
+			return nil, fmt.Errorf("invalid API key entry (missing ':')")
+		}
+
+		userID := pair[:idx]
+
+		key := pair[idx+1:]
+		if userID == "" || key == "" {
+			return nil, fmt.Errorf("empty user or key in entry %d", len(entries)+1)
+		}
+
+		if !strings.HasPrefix(key, auth.APIKeyPrefix) {
+			return nil, fmt.Errorf("API key must start with %q prefix in entry %d", auth.APIKeyPrefix, len(entries)+1)
+		}
+
+		if len(key) < auth.APIKeyMinLen {
+			return nil, fmt.Errorf("API key too short in entry %d (minimum %d characters)", len(entries)+1, auth.APIKeyMinLen)
+		}
+
+		suffix := key[len(auth.APIKeyPrefix):]
+		if _, err := hex.DecodeString(suffix); err != nil {
+			return nil, fmt.Errorf("API key contains non-hex characters after %q prefix in entry %d", auth.APIKeyPrefix, len(entries)+1)
+		}
+
+		entries = append(entries, APIKeyEntry{UserID: userID, Key: key})
+	}
+
+	return entries, nil
 }
 
 // ParseMCPUsers parses the MCP_AUTH_USERS string into a UserCredentials map.

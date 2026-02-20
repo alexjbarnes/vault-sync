@@ -105,14 +105,20 @@ func newHarness(t *testing.T) *harness {
 
 // registerPreConfiguredClient registers a pre-configured client directly
 // in the store (not via HTTP, since pre-configured clients are loaded
-// from env vars at startup). Supports all grant types so it matches
-// the production registration in main.go.
+// from env vars at startup). Only supports client_credentials grant,
+// matching the production registration in main.go.
 func (h *harness) registerPreConfiguredClient(clientID, secret string) {
 	h.Store.RegisterPreConfiguredClient(&models.OAuthClient{
 		ClientID:   clientID,
 		SecretHash: auth.HashSecret(secret),
-		GrantTypes: []string{"client_credentials", "authorization_code", "refresh_token"},
+		GrantTypes: []string{"client_credentials"},
 	})
+}
+
+// registerAPIKey registers an API key directly in the store, matching
+// how main.go registers keys from MCP_API_KEYS at startup.
+func (h *harness) registerAPIKey(rawKey, userID string) {
+	h.Store.RegisterAPIKey(rawKey, userID)
 }
 
 // tokenResponse is the JSON body returned by POST /oauth/token.

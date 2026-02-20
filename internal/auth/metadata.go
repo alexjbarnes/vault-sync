@@ -9,7 +9,7 @@ import (
 type ProtectedResourceMetadata struct {
 	Resource               string   `json:"resource"`
 	AuthorizationServers   []string `json:"authorization_servers"`
-	ScopesSupported        []string `json:"scopes_supported"`
+	ScopesSupported        []string `json:"scopes_supported,omitempty"`
 	BearerMethodsSupported []string `json:"bearer_methods_supported"`
 }
 
@@ -31,7 +31,6 @@ func HandleProtectedResourceMetadata(serverURL string) http.HandlerFunc {
 	meta := ProtectedResourceMetadata{
 		Resource:               serverURL,
 		AuthorizationServers:   []string{serverURL},
-		ScopesSupported:        []string{"vault:read", "vault:write"},
 		BearerMethodsSupported: []string{"header"},
 	}
 
@@ -54,7 +53,6 @@ func HandleServerMetadata(serverURL string) http.HandlerFunc {
 		AuthorizationEndpoint:             serverURL + "/oauth/authorize",
 		TokenEndpoint:                     serverURL + "/oauth/token",
 		RegistrationEndpoint:              serverURL + "/oauth/register",
-		ScopesSupported:                   []string{"vault:read", "vault:write"},
 		ResponseTypesSupported:            []string{"code"},
 		GrantTypesSupported:               []string{"authorization_code", "client_credentials", "refresh_token"},
 		CodeChallengeMethodsSupported:     []string{"S256"},

@@ -256,7 +256,7 @@ func TestProtectedResourceMetadata(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&meta))
 	assert.Equal(t, "https://vault.example.com", meta.Resource)
 	assert.Contains(t, meta.AuthorizationServers, "https://vault.example.com")
-	assert.Contains(t, meta.ScopesSupported, "vault:read")
+	assert.Empty(t, meta.ScopesSupported)
 }
 
 func TestServerMetadata(t *testing.T) {
@@ -850,16 +850,15 @@ func TestRegistration_RejectsPasswordGrant(t *testing.T) {
 // --- Client credentials grant ---
 
 // registerPreConfiguredClient creates a client with a hashed secret,
-// simulating what main.go does. Pre-configured clients support all
-// grant types so they work with both headless (client_credentials)
-// and browser-based (authorization_code) flows.
+// simulating what main.go does. Pre-configured clients only support
+// the client_credentials grant type for headless authentication.
 func registerPreConfiguredClient(t *testing.T, store *Store, clientID, secret string) {
 	t.Helper()
 
 	store.RegisterPreConfiguredClient(&models.OAuthClient{
 		ClientID:   clientID,
 		SecretHash: HashSecret(secret),
-		GrantTypes: []string{"client_credentials", "authorization_code", "refresh_token"},
+		GrantTypes: []string{"client_credentials"},
 	})
 }
 
@@ -1002,7 +1001,7 @@ func TestClientCredentials_DynamicClientCannotUse(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "invalid_client")
 }
 
-func TestPreConfigured_AuthCodeFlowAllowed(t *testing.T) {
+func TestPreConfigured_AuthCodeFlowRejected(t *testing.T) {
 	store := testStore(t)
 	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
 
@@ -1034,12 +1033,9 @@ func TestPreConfigured_AuthCodeFlowAllowed(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 
-	// Pre-configured clients now support auth code flow.
-	assert.Equal(t, http.StatusOK, rec.Code)
-
-	var resp tokenResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.NotEmpty(t, resp.AccessToken)
+	// Pre-configured clients only support client_credentials.
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "unauthorized_client")
 }
 
 func TestClientCredentials_WithResource(t *testing.T) {
@@ -2120,7 +2116,7 @@ func TestToken_FullFlowWithRefresh(t *testing.T) {
 	require.NotNil(t, ti)
 	assert.Equal(t, "testuser", ti.UserID)
 	assert.Equal(t, "access", ti.Kind)
-	assert.Equal(t, resp.RefreshToken, ti.RefreshToken)
+	assert.Equal(t, HashSecret(resp.RefreshToken), ti.RefreshHash)
 	assert.Equal(t, "client1", ti.ClientID)
 
 	// Validate the refresh token exists.
@@ -2981,23 +2977,22 @@ func TestAuthorize_GET_LocalhostPrefixRejectsHTTPS(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestAuthorize_GET_PreConfiguredNoRedirectURIs_AcceptsHTTPS(t *testing.T) {
+func TestAuthorize_GET_PreConfiguredNoRedirectURIs_RejectsHTTPS(t *testing.T) {
 	store := testStore(t)
 	registerPreConfiguredClient(t, store, "preconfig-client", "s3cret")
 
 	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
 	challenge := pkceChallenge("v")
 
-	// Pre-configured clients with no registered redirect URIs should accept
-	// any HTTPS redirect URI per RFC 6749 Section 3.1.2.2.
+	// Pre-configured clients with no registered redirect URIs only accept
+	// loopback URIs. Non-loopback HTTPS URIs should be rejected.
 	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id=preconfig-client"+
 		"&redirect_uri="+url.QueryEscape("https://claude.ai/api/mcp/auth_callback")+
 		"&code_challenge="+challenge, nil)
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), "Sign in")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestAuthorize_GET_PreConfiguredNoRedirectURIs_AcceptsLoopback(t *testing.T) {
@@ -3073,4 +3068,271 @@ func TestMiddleware_RefreshTokenAsBearer(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// --- API Key Store ---
+
+func TestStore_RegisterAndValidateAPIKey(t *testing.T) {
+	s := testStore(t)
+	rawKey := "vs_" + RandomHex(32)
+
+	s.RegisterAPIKey(rawKey, "deploy-bot")
+
+	ak := s.ValidateAPIKey(rawKey)
+	require.NotNil(t, ak)
+	assert.Equal(t, "deploy-bot", ak.UserID)
+	assert.Equal(t, HashSecret(rawKey), ak.KeyHash)
+	assert.False(t, ak.CreatedAt.IsZero())
+}
+
+func TestStore_ValidateAPIKey_Unknown(t *testing.T) {
+	s := testStore(t)
+
+	ak := s.ValidateAPIKey("vs_" + RandomHex(32))
+	assert.Nil(t, ak)
+}
+
+func TestStore_ValidateAPIKey_WrongKey(t *testing.T) {
+	s := testStore(t)
+	rawKey := "vs_" + RandomHex(32)
+	wrongKey := "vs_" + RandomHex(32)
+
+	s.RegisterAPIKey(rawKey, "user1")
+
+	assert.Nil(t, s.ValidateAPIKey(wrongKey))
+	assert.NotNil(t, s.ValidateAPIKey(rawKey))
+}
+
+func TestStore_RevokeAPIKey(t *testing.T) {
+	s := testStore(t)
+	rawKey := "vs_" + RandomHex(32)
+
+	s.RegisterAPIKey(rawKey, "user1")
+	require.NotNil(t, s.ValidateAPIKey(rawKey))
+
+	s.RevokeAPIKey(HashSecret(rawKey))
+	assert.Nil(t, s.ValidateAPIKey(rawKey))
+}
+
+func TestStore_ListAPIKeys(t *testing.T) {
+	s := testStore(t)
+
+	assert.Empty(t, s.ListAPIKeys())
+
+	s.RegisterAPIKey("vs_"+RandomHex(32), "user1")
+	s.RegisterAPIKey("vs_"+RandomHex(32), "user2")
+
+	keys := s.ListAPIKeys()
+	assert.Len(t, keys, 2)
+
+	users := map[string]bool{}
+	for _, k := range keys {
+		users[k.UserID] = true
+	}
+
+	assert.True(t, users["user1"])
+	assert.True(t, users["user2"])
+}
+
+func TestStore_RegisterAPIKey_OverwritesSameKey(t *testing.T) {
+	s := testStore(t)
+	rawKey := "vs_" + RandomHex(32)
+
+	s.RegisterAPIKey(rawKey, "original-user")
+	s.RegisterAPIKey(rawKey, "new-user")
+
+	ak := s.ValidateAPIKey(rawKey)
+	require.NotNil(t, ak)
+	assert.Equal(t, "new-user", ak.UserID)
+	assert.Len(t, s.ListAPIKeys(), 1)
+}
+
+// --- API Key Middleware ---
+
+func TestMiddleware_APIKey_Valid(t *testing.T) {
+	store := testStore(t)
+	rawKey := "vs_" + RandomHex(32)
+	store.RegisterAPIKey(rawKey, "apikey-user")
+
+	mw := Middleware(store, testServerURL)
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "apikey-user", RequestUserID(r.Context()))
+		assert.Equal(t, "apikey-user", RequestClientID(r.Context()))
+		assert.NotEmpty(t, RequestRemoteIP(r.Context()))
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestMiddleware_APIKey_Invalid(t *testing.T) {
+	store := testStore(t)
+
+	mw := Middleware(store, testServerURL)
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be called")
+	}))
+
+	req := httptest.NewRequest("GET", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer vs_"+RandomHex(32))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `error="invalid_token"`)
+}
+
+func TestMiddleware_APIKey_RevokedReturns401(t *testing.T) {
+	store := testStore(t)
+	rawKey := "vs_" + RandomHex(32)
+	store.RegisterAPIKey(rawKey, "user1")
+
+	// Verify it works first.
+	mw := Middleware(store, testServerURL)
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Revoke and verify 401.
+	store.RevokeAPIKey(HashSecret(rawKey))
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestMiddleware_APIKey_DoesNotAffectOAuthTokens(t *testing.T) {
+	store := testStore(t)
+
+	// Register an API key and an OAuth token.
+	rawKey := "vs_" + RandomHex(32)
+	store.RegisterAPIKey(rawKey, "apikey-user")
+
+	store.SaveToken(&models.OAuthToken{
+		Token:     "oauth-token-123",
+		Kind:      "access",
+		UserID:    "oauth-user",
+		ClientID:  "oauth-client",
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+
+	mw := Middleware(store, testServerURL)
+
+	// API key path.
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(RequestUserID(r.Context())))
+	}))
+
+	req := httptest.NewRequest("GET", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "apikey-user", rec.Body.String())
+
+	// OAuth token path.
+	req = httptest.NewRequest("GET", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer oauth-token-123")
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "oauth-user", rec.Body.String())
+}
+
+// --- API Key Reconciliation ---
+
+func TestStore_ReconcileAPIKeys_RemovesStaleKeys(t *testing.T) {
+	s := testStore(t)
+	key1 := "vs_" + RandomHex(32)
+	key2 := "vs_" + RandomHex(32)
+	key3 := "vs_" + RandomHex(32)
+
+	s.RegisterAPIKey(key1, "user1")
+	s.RegisterAPIKey(key2, "user2")
+	s.RegisterAPIKey(key3, "user3")
+	require.Len(t, s.ListAPIKeys(), 3)
+
+	// Reconcile with only key1 and key3 as current.
+	current := map[string]struct{}{
+		HashSecret(key1): {},
+		HashSecret(key3): {},
+	}
+	removed := s.ReconcileAPIKeys(current)
+
+	assert.Equal(t, 1, removed)
+	assert.Len(t, s.ListAPIKeys(), 2)
+	assert.NotNil(t, s.ValidateAPIKey(key1))
+	assert.Nil(t, s.ValidateAPIKey(key2))
+	assert.NotNil(t, s.ValidateAPIKey(key3))
+}
+
+func TestStore_ReconcileAPIKeys_KeepsAllCurrent(t *testing.T) {
+	s := testStore(t)
+	key1 := "vs_" + RandomHex(32)
+	key2 := "vs_" + RandomHex(32)
+
+	s.RegisterAPIKey(key1, "user1")
+	s.RegisterAPIKey(key2, "user2")
+
+	current := map[string]struct{}{
+		HashSecret(key1): {},
+		HashSecret(key2): {},
+	}
+	removed := s.ReconcileAPIKeys(current)
+
+	assert.Equal(t, 0, removed)
+	assert.Len(t, s.ListAPIKeys(), 2)
+}
+
+func TestStore_ReconcileAPIKeys_EmptyConfigPurgesAll(t *testing.T) {
+	s := testStore(t)
+	s.RegisterAPIKey("vs_"+RandomHex(32), "user1")
+	s.RegisterAPIKey("vs_"+RandomHex(32), "user2")
+	require.Len(t, s.ListAPIKeys(), 2)
+
+	removed := s.ReconcileAPIKeys(map[string]struct{}{})
+
+	assert.Equal(t, 2, removed)
+	assert.Empty(t, s.ListAPIKeys())
+}
+
+func TestMiddleware_APIKey_ClientIDMatchesUserID(t *testing.T) {
+	store := testStore(t)
+	rawKey := "vs_" + RandomHex(32)
+	store.RegisterAPIKey(rawKey, "deploy-bot")
+
+	mw := Middleware(store, testServerURL)
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "deploy-bot", RequestUserID(r.Context()))
+		assert.Equal(t, "deploy-bot", RequestClientID(r.Context()))
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
 }

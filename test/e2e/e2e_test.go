@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alexjbarnes/vault-sync/internal/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -257,6 +258,88 @@ func TestDynamicClientRegistration_RejectsHTTP(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// --- API key authentication ---
+
+func TestAPIKey_MCPToolCall(t *testing.T) {
+	h := newHarness(t)
+	rawKey := "vs_" + auth.RandomHex(32)
+	h.registerAPIKey(rawKey, "deploy-bot")
+
+	session := h.mcpSession(t, rawKey)
+
+	result, err := session.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:      "vault_list",
+		Arguments: map[string]any{"path": ""},
+	})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+
+	text := extractTextContent(t, result)
+	assert.Contains(t, text, "notes/hello.md")
+	assert.Contains(t, text, "readme.md")
+}
+
+func TestAPIKey_ReadFile(t *testing.T) {
+	h := newHarness(t)
+	rawKey := "vs_" + auth.RandomHex(32)
+	h.registerAPIKey(rawKey, "reader")
+
+	session := h.mcpSession(t, rawKey)
+
+	result, err := session.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:      "vault_read",
+		Arguments: map[string]any{"path": "notes/hello.md"},
+	})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+
+	text := extractTextContent(t, result)
+	assert.Contains(t, text, "This is a test note")
+}
+
+func TestAPIKey_InvalidKeyReturns401(t *testing.T) {
+	h := newHarness(t)
+
+	req, err := http.NewRequestWithContext(t.Context(), "POST", h.URL+"/mcp", strings.NewReader("{}"))
+	require.NoError(t, err)
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer vs_"+auth.RandomHex(32))
+
+	resp, err := h.Client.Do(req)
+	require.NoError(t, err)
+
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("WWW-Authenticate"), `error="invalid_token"`)
+}
+
+func TestAPIKey_WriteAndRead(t *testing.T) {
+	h := newHarness(t)
+	rawKey := "vs_" + auth.RandomHex(32)
+	h.registerAPIKey(rawKey, "writer")
+
+	session := h.mcpSession(t, rawKey)
+
+	_, err := session.CallTool(t.Context(), &mcp.CallToolParams{
+		Name: "vault_write",
+		Arguments: map[string]any{
+			"path":    "apikey-created.md",
+			"content": "created with API key auth",
+		},
+	})
+	require.NoError(t, err)
+
+	result, err := session.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:      "vault_read",
+		Arguments: map[string]any{"path": "apikey-created.md"},
+	})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, extractTextContent(t, result), "created with API key auth")
 }
 
 // --- helpers ---

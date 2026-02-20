@@ -340,6 +340,11 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		return fmt.Errorf("parsing MCP client credentials: %w", err)
 	}
 
+	apiKeys, err := cfg.ParseMCPAPIKeys()
+	if err != nil {
+		return fmt.Errorf("parsing MCP API keys: %w", err)
+	}
+
 	mcpLogger := logger.With(slog.String("service", "mcp"))
 
 	mcpLogger.Info("opening vault", slog.String("path", cfg.SyncDir))
@@ -372,13 +377,30 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		store.RegisterPreConfiguredClient(&models.OAuthClient{
 			ClientID:   cred.ClientID,
 			SecretHash: auth.HashSecret(cred.Secret),
-			GrantTypes: []string{"client_credentials", "authorization_code", "refresh_token"},
+			GrantTypes: []string{"client_credentials"},
 		})
 		mcpLogger.Info("registered pre-configured client", slog.String("client_id", cred.ClientID))
 	}
 
+	for _, ak := range apiKeys {
+		store.RegisterAPIKey(ak.Key, ak.UserID)
+		mcpLogger.Info("registered API key", slog.String("user", ak.UserID))
+	}
+
+	// Reconcile persisted API keys against current config to remove
+	// keys deleted from MCP_API_KEYS between restarts.
+	currentKeyHashes := make(map[string]struct{}, len(apiKeys))
+	for _, ak := range apiKeys {
+		currentKeyHashes[auth.HashSecret(ak.Key)] = struct{}{}
+	}
+
+	if removed := store.ReconcileAPIKeys(currentKeyHashes); removed > 0 {
+		mcpLogger.Info("removed stale API keys", slog.Int("count", removed))
+	}
+
 	// Clear secrets from config after hashing.
 	cfg.MCPClientCredentials = ""
+	cfg.MCPAPIKeys = ""
 
 	mux := server.NewMux(server.MuxConfig{
 		Store:      store,

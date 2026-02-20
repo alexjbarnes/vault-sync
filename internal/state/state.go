@@ -30,6 +30,7 @@ var (
 	tokenKey          = []byte("token")
 	oauthTokensBucket = []byte("oauth_tokens")
 	oauthClientBucket = []byte("oauth_clients")
+	apiKeysBucket     = []byte("api_keys")
 )
 
 func vaultMetaBucket(vaultID string) []byte {
@@ -46,6 +47,9 @@ func vaultServerBucket(vaultID string) []byte {
 
 // tokenKeyHash returns the SHA-256 hex digest of a token string.
 // Used as the bbolt key so raw tokens are not stored on disk.
+//
+// Deprecated: new code uses OAuthToken.TokenHash directly. Kept
+// for GetOAuthToken which accepts a raw token for convenience.
 func tokenKeyHash(token string) []byte {
 	h := sha256.Sum256([]byte(token))
 	dst := make([]byte, hex.EncodedLen(len(h)))
@@ -122,7 +126,11 @@ func LoadAt(path string) (*State, error) {
 			return err
 		}
 
-		_, err := tx.CreateBucketIfNotExists(oauthClientBucket)
+		if _, err := tx.CreateBucketIfNotExists(oauthClientBucket); err != nil {
+			return err
+		}
+
+		_, err := tx.CreateBucketIfNotExists(apiKeysBucket)
 
 		return err
 	})
@@ -367,17 +375,27 @@ func (s *State) AllServerFiles(vaultID string) (map[string]ServerFile, error) {
 	return result, err
 }
 
-// SaveOAuthToken persists an OAuth access token.
+// SaveOAuthToken persists an OAuth token. The TokenHash field must
+// be set by the caller. Raw secrets (Token, RefreshToken) are cleared
+// before writing so they never reach disk.
 func (s *State) SaveOAuthToken(t models.OAuthToken) error {
+	if t.TokenHash == "" {
+		return fmt.Errorf("token hash is required for persistence")
+	}
+
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(oauthTokensBucket)
+
+		// Clear raw secrets before serializing to disk.
+		t.Token = ""
+		t.RefreshToken = ""
 
 		data, err := json.Marshal(t)
 		if err != nil {
 			return err
 		}
 
-		return b.Put(tokenKeyHash(t.Token), data)
+		return b.Put([]byte(t.TokenHash), data)
 	})
 }
 
@@ -401,10 +419,10 @@ func (s *State) GetOAuthToken(token string) (*models.OAuthToken, error) {
 	return t, err
 }
 
-// DeleteOAuthToken removes an OAuth token.
-func (s *State) DeleteOAuthToken(token string) error {
+// DeleteOAuthToken removes an OAuth token by its hash.
+func (s *State) DeleteOAuthToken(tokenHash string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(oauthTokensBucket).Delete(tokenKeyHash(token))
+		return tx.Bucket(oauthTokensBucket).Delete([]byte(tokenHash))
 	})
 }
 
@@ -484,6 +502,49 @@ func (s *State) AllOAuthClients() ([]models.OAuthClient, error) {
 	})
 
 	return clients, err
+}
+
+// SaveAPIKey persists an API key, keyed by its hash.
+func (s *State) SaveAPIKey(keyHash string, ak models.APIKey) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(apiKeysBucket)
+
+		data, err := json.Marshal(ak)
+		if err != nil {
+			return err
+		}
+
+		return b.Put([]byte(keyHash), data)
+	})
+}
+
+// DeleteAPIKey removes an API key by its hash.
+func (s *State) DeleteAPIKey(keyHash string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(apiKeysBucket).Delete([]byte(keyHash))
+	})
+}
+
+// AllAPIKeys returns all stored API keys, keyed by hash.
+func (s *State) AllAPIKeys() (map[string]models.APIKey, error) {
+	result := make(map[string]models.APIKey)
+
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(apiKeysBucket)
+
+		return b.ForEach(func(k, v []byte) error {
+			var ak models.APIKey
+			if err := json.Unmarshal(v, &ak); err != nil {
+				return err
+			}
+
+			result[string(k)] = ak
+
+			return nil
+		})
+	})
+
+	return result, err
 }
 
 // OAuthClientCount returns the number of registered OAuth clients.
