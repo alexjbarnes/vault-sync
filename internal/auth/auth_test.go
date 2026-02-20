@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/alexjbarnes/vault-sync/internal/models"
+	"github.com/alexjbarnes/vault-sync/internal/state"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -3335,4 +3337,690 @@ func TestMiddleware_APIKey_ClientIDMatchesUserID(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// --- remoteIP fallback ---
+
+func TestRemoteIP_WithPort(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.1:12345"
+	assert.Equal(t, "10.0.0.1", remoteIP(r))
+}
+
+func TestRemoteIP_WithoutPort(t *testing.T) {
+	// net.SplitHostPort fails when there is no port, so remoteIP
+	// should fall back to returning RemoteAddr as-is.
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "1.2.3.4"
+	assert.Equal(t, "1.2.3.4", remoteIP(r))
+}
+
+func TestRemoteIP_IPv6WithPort(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "[::1]:9999"
+	assert.Equal(t, "::1", remoteIP(r))
+}
+
+func TestRemoteIP_IPv6WithoutPort(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "::1"
+	assert.Equal(t, "::1", remoteIP(r))
+}
+
+// --- isLoopbackRedirect error paths ---
+
+func TestIsLoopbackRedirect_InvalidRedirectURI(t *testing.T) {
+	// url.Parse fails on the redirect URI.
+	assert.False(t, isLoopbackRedirect("://bad", "http://127.0.0.1"))
+}
+
+func TestIsLoopbackRedirect_InvalidRegisteredPrefix(t *testing.T) {
+	// url.Parse fails on the registered prefix.
+	assert.False(t, isLoopbackRedirect("http://127.0.0.1:8080/cb", "://bad"))
+}
+
+func TestIsLoopbackRedirect_BothInvalid(t *testing.T) {
+	assert.False(t, isLoopbackRedirect("://bad", "://bad"))
+}
+
+func TestIsLoopbackRedirect_PercentEncodingInvalid(t *testing.T) {
+	// %zz is not valid percent-encoding, url.Parse returns an error.
+	assert.False(t, isLoopbackRedirect("http://127.0.0.1:8080/%zz", "http://127.0.0.1"))
+}
+
+func TestIsLoopbackRedirect_ValidMatch(t *testing.T) {
+	assert.True(t, isLoopbackRedirect("http://127.0.0.1:9999/callback", "http://127.0.0.1"))
+}
+
+func TestIsLoopbackRedirect_SchemeMismatch(t *testing.T) {
+	assert.False(t, isLoopbackRedirect("https://127.0.0.1:9999/callback", "http://127.0.0.1"))
+}
+
+// --- checkLockout coverage ---
+
+func TestCheckLockout_EmptyClientID(t *testing.T) {
+	trl := newTokenRateLimiter()
+	assert.False(t, trl.checkLockout(""))
+}
+
+func TestCheckLockout_NoEntry(t *testing.T) {
+	trl := newTokenRateLimiter()
+	assert.False(t, trl.checkLockout("unknown-client"))
+}
+
+func TestCheckLockout_SubThresholdEntry(t *testing.T) {
+	// An entry with some failures but no lockout should return false.
+	trl := newTokenRateLimiter()
+	trl.lockouts["client-a"] = &lockoutEntry{failures: 3}
+	assert.False(t, trl.checkLockout("client-a"))
+}
+
+func TestCheckLockout_ActiveLockout(t *testing.T) {
+	trl := newTokenRateLimiter()
+	trl.lockouts["client-a"] = &lockoutEntry{
+		failures: lockoutThreshold,
+		lockedAt: time.Now(),
+	}
+	assert.True(t, trl.checkLockout("client-a"))
+}
+
+func TestCheckLockout_ExpiredLockoutResets(t *testing.T) {
+	// When lockedAt is non-zero but the lockout has expired, checkLockout
+	// should delete the entry and return false. This covers lines 155-157.
+	trl := newTokenRateLimiter()
+	trl.lockouts["client-a"] = &lockoutEntry{
+		failures: lockoutThreshold,
+		lockedAt: time.Now().Add(-lockoutDuration - time.Minute),
+	}
+
+	assert.False(t, trl.checkLockout("client-a"))
+
+	// The entry should have been removed.
+	trl.mu.Lock()
+	_, exists := trl.lockouts["client-a"]
+	trl.mu.Unlock()
+	assert.False(t, exists, "expired lockout entry should be pruned")
+}
+
+func TestCheckLockout_PrunesStaleEntries(t *testing.T) {
+	// When the lockouts map exceeds tokenLimiterPruneThreshold, stale
+	// entries are pruned. This covers the branch at line 136.
+	trl := newTokenRateLimiter()
+
+	// Fill the map past the prune threshold with expired lockout entries.
+	for i := 0; i < tokenLimiterPruneThreshold+100; i++ {
+		id := "stale-" + RandomHex(8)
+		trl.lockouts[id] = &lockoutEntry{
+			failures: lockoutThreshold,
+			lockedAt: time.Now().Add(-lockoutDuration - time.Hour),
+		}
+	}
+
+	// Add one active lockout that should survive pruning.
+	trl.lockouts["active-client"] = &lockoutEntry{
+		failures: lockoutThreshold,
+		lockedAt: time.Now(),
+	}
+
+	// Add one sub-threshold entry (no lockout) that should be pruned.
+	trl.lockouts["sub-threshold"] = &lockoutEntry{failures: 2}
+
+	// Query for a client that does not exist to trigger pruning.
+	assert.False(t, trl.checkLockout("nonexistent"))
+
+	trl.mu.Lock()
+	_, activeExists := trl.lockouts["active-client"]
+	_, subExists := trl.lockouts["sub-threshold"]
+	remaining := len(trl.lockouts)
+	trl.mu.Unlock()
+
+	assert.True(t, activeExists, "active lockout should survive pruning")
+	assert.False(t, subExists, "sub-threshold entry should be pruned")
+	// Only the active entry should remain (all stale + sub-threshold pruned).
+	assert.Equal(t, 1, remaining)
+}
+
+func TestCheckLockout_PruneKeepsActiveLockouts(t *testing.T) {
+	trl := newTokenRateLimiter()
+
+	// Fill past threshold with a mix of active and expired lockouts.
+	for i := 0; i < tokenLimiterPruneThreshold+50; i++ {
+		id := "expired-" + RandomHex(8)
+		trl.lockouts[id] = &lockoutEntry{
+			failures: lockoutThreshold,
+			lockedAt: time.Now().Add(-lockoutDuration - time.Hour),
+		}
+	}
+
+	// Add several active lockouts.
+	for i := 0; i < 5; i++ {
+		id := "keep-" + RandomHex(4)
+		trl.lockouts[id] = &lockoutEntry{
+			failures: lockoutThreshold,
+			lockedAt: time.Now(),
+		}
+	}
+
+	// Trigger pruning by checking any client.
+	trl.checkLockout("trigger")
+
+	trl.mu.Lock()
+	remaining := len(trl.lockouts)
+	trl.mu.Unlock()
+
+	// Only the 5 active lockouts should remain.
+	assert.Equal(t, 5, remaining)
+}
+
+// --- Persistence (bbolt-backed store) ---
+
+func testStoreWithPersist(t *testing.T) *Store {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	persist, err := state.LoadAt(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { persist.Close() })
+
+	s := NewStore(persist, testLogger())
+	t.Cleanup(s.Stop)
+
+	return s
+}
+
+func TestLoadFromDisk_TokensClientsAPIKeys(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	// Phase 1: create a store, populate it, close it.
+	func() {
+		persist, err := state.LoadAt(dbPath)
+		require.NoError(t, err)
+
+		s := NewStore(persist, testLogger())
+
+		s.SaveToken(&models.OAuthToken{
+			Token:     "persist-tok",
+			Kind:      "access",
+			UserID:    "user1",
+			ExpiresAt: time.Now().Add(24 * time.Hour),
+		})
+
+		s.RegisterClient(&models.OAuthClient{
+			ClientID:     "persist-client",
+			ClientName:   "Persisted",
+			RedirectURIs: []string{"https://example.com/cb"},
+		})
+
+		rawKey := "vs_" + RandomHex(32)
+		s.RegisterAPIKey(rawKey, "persist-user")
+
+		s.Stop()
+		require.NoError(t, persist.Close())
+	}()
+
+	// Phase 2: reopen the DB and verify data was loaded from disk.
+	persist, err := state.LoadAt(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { persist.Close() })
+
+	s := NewStore(persist, testLogger())
+	t.Cleanup(s.Stop)
+
+	s.mu.RLock()
+	assert.Len(t, s.tokens, 1)
+	assert.Len(t, s.clients, 1)
+	assert.Len(t, s.apiKeys, 1)
+	s.mu.RUnlock()
+
+	ci := s.GetClient("persist-client")
+	require.NotNil(t, ci)
+	assert.Equal(t, "Persisted", ci.ClientName)
+}
+
+func TestLoadFromDisk_ExpiredTokensDeleted(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	// Phase 1: save an expired token to disk.
+	persist, err := state.LoadAt(dbPath)
+	require.NoError(t, err)
+
+	expiredHash := HashSecret("expired-disk-token")
+	require.NoError(t, persist.SaveOAuthToken(models.OAuthToken{
+		TokenHash: expiredHash,
+		Kind:      "access",
+		UserID:    "user1",
+		ExpiresAt: time.Now().Add(-1 * time.Hour),
+	}))
+	require.NoError(t, persist.Close())
+
+	// Phase 2: reopen. loadFromDisk should delete the expired token.
+	persist, err = state.LoadAt(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { persist.Close() })
+
+	s := NewStore(persist, testLogger())
+	t.Cleanup(s.Stop)
+
+	s.mu.RLock()
+	assert.Empty(t, s.tokens, "expired token should be pruned on load")
+	s.mu.RUnlock()
+
+	// Verify it was also deleted from disk.
+	allTokens, err := persist.AllOAuthTokens()
+	require.NoError(t, err)
+	assert.Empty(t, allTokens)
+}
+
+func TestLoadFromDisk_EmptyTokenHashSkipped(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	// Save two valid tokens with known hashes. Both should load.
+	persist, err := state.LoadAt(dbPath)
+	require.NoError(t, err)
+
+	hash1 := HashSecret("token-1")
+	hash2 := HashSecret("token-2")
+
+	require.NoError(t, persist.SaveOAuthToken(models.OAuthToken{
+		TokenHash: hash1,
+		Kind:      "access",
+		UserID:    "user1",
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+	}))
+	require.NoError(t, persist.SaveOAuthToken(models.OAuthToken{
+		TokenHash: hash2,
+		Kind:      "access",
+		UserID:    "user2",
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+	}))
+	require.NoError(t, persist.Close())
+
+	persist, err = state.LoadAt(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { persist.Close() })
+
+	s := NewStore(persist, testLogger())
+	t.Cleanup(s.Stop)
+
+	s.mu.RLock()
+	assert.Len(t, s.tokens, 2)
+	s.mu.RUnlock()
+}
+
+func TestLoadFromDisk_RefreshHashBackwardCompat(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	// Phase 1: save an access token with RefreshToken via SaveToken,
+	// which computes RefreshHash before persisting.
+	persist, err := state.LoadAt(dbPath)
+	require.NoError(t, err)
+
+	refreshRaw := "the-refresh-token"
+	s := NewStore(persist, testLogger())
+	s.SaveToken(&models.OAuthToken{
+		Token:        "access-with-refresh",
+		Kind:         "access",
+		UserID:       "user1",
+		ExpiresAt:    time.Now().Add(24 * time.Hour),
+		RefreshToken: refreshRaw,
+	})
+	s.Stop()
+	require.NoError(t, persist.Close())
+
+	// Phase 2: reopen and verify RefreshHash is present.
+	persist, err = state.LoadAt(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { persist.Close() })
+
+	s = NewStore(persist, testLogger())
+	t.Cleanup(s.Stop)
+
+	tokenHash := HashSecret("access-with-refresh")
+
+	s.mu.RLock()
+	tok, ok := s.tokens[tokenHash]
+	s.mu.RUnlock()
+
+	require.True(t, ok)
+	assert.Equal(t, HashSecret(refreshRaw), tok.RefreshHash)
+	// Raw secrets should be cleared.
+	assert.Empty(t, tok.Token)
+	assert.Empty(t, tok.RefreshToken)
+}
+
+func TestRegisterPreConfiguredClient_WithPersist(t *testing.T) {
+	s := testStoreWithPersist(t)
+
+	s.RegisterPreConfiguredClient(&models.OAuthClient{
+		ClientID:   "preconfig-1",
+		SecretHash: HashSecret("s3cret"),
+		GrantTypes: []string{"client_credentials"},
+	})
+
+	ci := s.GetClient("preconfig-1")
+	require.NotNil(t, ci)
+	assert.Equal(t, HashSecret("s3cret"), ci.SecretHash)
+
+	// Verify persisted to disk.
+	allClients, err := s.persist.AllOAuthClients()
+	require.NoError(t, err)
+
+	found := false
+
+	for _, c := range allClients {
+		if c.ClientID == "preconfig-1" {
+			found = true
+		}
+	}
+
+	assert.True(t, found, "pre-configured client should be persisted")
+}
+
+func TestRegisterClient_WithPersist(t *testing.T) {
+	s := testStoreWithPersist(t)
+
+	ok := s.RegisterClient(&models.OAuthClient{
+		ClientID:     "dyn-client",
+		ClientName:   "Dynamic",
+		RedirectURIs: []string{"https://example.com/cb"},
+	})
+	require.True(t, ok)
+
+	allClients, err := s.persist.AllOAuthClients()
+	require.NoError(t, err)
+
+	found := false
+
+	for _, c := range allClients {
+		if c.ClientID == "dyn-client" {
+			found = true
+		}
+	}
+
+	assert.True(t, found, "dynamically registered client should be persisted")
+}
+
+func TestRegisterAPIKey_WithPersist(t *testing.T) {
+	s := testStoreWithPersist(t)
+	rawKey := "vs_" + RandomHex(32)
+
+	s.RegisterAPIKey(rawKey, "persist-user")
+
+	ak := s.ValidateAPIKey(rawKey)
+	require.NotNil(t, ak)
+	assert.Equal(t, "persist-user", ak.UserID)
+
+	// Verify on disk.
+	allKeys, err := s.persist.AllAPIKeys()
+	require.NoError(t, err)
+
+	hash := HashSecret(rawKey)
+	_, ok := allKeys[hash]
+	assert.True(t, ok, "API key should be persisted to disk")
+}
+
+func TestRevokeAPIKey_WithPersist(t *testing.T) {
+	s := testStoreWithPersist(t)
+	rawKey := "vs_" + RandomHex(32)
+	hash := HashSecret(rawKey)
+
+	s.RegisterAPIKey(rawKey, "user1")
+	require.NotNil(t, s.ValidateAPIKey(rawKey))
+
+	s.RevokeAPIKey(hash)
+
+	assert.Nil(t, s.ValidateAPIKey(rawKey))
+
+	// Verify removed from disk.
+	allKeys, err := s.persist.AllAPIKeys()
+	require.NoError(t, err)
+
+	_, ok := allKeys[hash]
+	assert.False(t, ok, "revoked API key should be deleted from disk")
+}
+
+func TestReconcileAPIKeys_WithPersist(t *testing.T) {
+	s := testStoreWithPersist(t)
+
+	key1 := "vs_" + RandomHex(32)
+	key2 := "vs_" + RandomHex(32)
+	key3 := "vs_" + RandomHex(32)
+
+	s.RegisterAPIKey(key1, "user1")
+	s.RegisterAPIKey(key2, "user2")
+	s.RegisterAPIKey(key3, "user3")
+
+	// Keep only key1, remove key2 and key3.
+	current := map[string]struct{}{
+		HashSecret(key1): {},
+	}
+	removed := s.ReconcileAPIKeys(current)
+	assert.Equal(t, 2, removed)
+
+	// Verify stale keys removed from disk.
+	allKeys, err := s.persist.AllAPIKeys()
+	require.NoError(t, err)
+	assert.Len(t, allKeys, 1)
+	_, ok := allKeys[HashSecret(key1)]
+	assert.True(t, ok)
+}
+
+func TestSaveToken_ComputesRefreshHash(t *testing.T) {
+	s := testStore(t)
+
+	s.SaveToken(&models.OAuthToken{
+		Token:        "access-tok",
+		Kind:         "access",
+		UserID:       "user1",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		RefreshToken: "refresh-tok",
+	})
+
+	s.mu.RLock()
+	tok := s.tokens[HashSecret("access-tok")]
+	s.mu.RUnlock()
+
+	require.NotNil(t, tok)
+	assert.Equal(t, HashSecret("access-tok"), tok.TokenHash)
+	assert.Equal(t, HashSecret("refresh-tok"), tok.RefreshHash)
+}
+
+func TestSaveToken_NoRefreshHash_WhenNoRefreshToken(t *testing.T) {
+	s := testStore(t)
+
+	s.SaveToken(&models.OAuthToken{
+		Token:     "access-only",
+		Kind:      "access",
+		UserID:    "user1",
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+
+	s.mu.RLock()
+	tok := s.tokens[HashSecret("access-only")]
+	s.mu.RUnlock()
+
+	require.NotNil(t, tok)
+	assert.Empty(t, tok.RefreshHash)
+}
+
+func TestSaveToken_WithPersist(t *testing.T) {
+	s := testStoreWithPersist(t)
+
+	s.SaveToken(&models.OAuthToken{
+		Token:     "persist-access-tok",
+		Kind:      "access",
+		UserID:    "user1",
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+
+	allTokens, err := s.persist.AllOAuthTokens()
+	require.NoError(t, err)
+	assert.Len(t, allTokens, 1)
+	assert.Equal(t, HashSecret("persist-access-tok"), allTokens[0].TokenHash)
+}
+
+func TestRegistrationAllowed_PrunesOldEntries(t *testing.T) {
+	s := testStore(t)
+
+	// Inject old registration timestamps outside the 1-minute window.
+	s.mu.Lock()
+
+	past := time.Now().Add(-2 * time.Minute)
+	for i := 0; i < maxRegistrationsPerMinute; i++ {
+		s.registrationTimes = append(s.registrationTimes, past)
+	}
+	s.mu.Unlock()
+
+	// All old entries should be pruned, so registration should be allowed.
+	assert.True(t, s.RegistrationAllowed())
+
+	// Verify the old entries were pruned and only the new one remains.
+	s.mu.RLock()
+	assert.Len(t, s.registrationTimes, 1)
+	s.mu.RUnlock()
+}
+
+func TestRegistrationAllowed_SlidingWindow(t *testing.T) {
+	s := testStore(t)
+
+	// Fill to max within the window.
+	for i := 0; i < maxRegistrationsPerMinute; i++ {
+		assert.True(t, s.RegistrationAllowed())
+	}
+
+	// Next should be denied.
+	assert.False(t, s.RegistrationAllowed())
+
+	// Simulate time passing by backdating all entries.
+	s.mu.Lock()
+
+	past := time.Now().Add(-2 * time.Minute)
+	for i := range s.registrationTimes {
+		s.registrationTimes[i] = past
+	}
+	s.mu.Unlock()
+
+	// Should be allowed again after old entries are pruned.
+	assert.True(t, s.RegistrationAllowed())
+}
+
+func TestRandomHex_VariousLengths(t *testing.T) {
+	tests := []struct {
+		name    string
+		byteLen int
+		hexLen  int
+	}{
+		{"1 byte", 1, 2},
+		{"8 bytes", 8, 16},
+		{"16 bytes", 16, 32},
+		{"32 bytes", 32, 64},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := RandomHex(tt.byteLen)
+			assert.Len(t, h, tt.hexLen)
+		})
+	}
+}
+
+func TestCleanup_WithPersist_DeletesExpiredTokens(t *testing.T) {
+	s := testStoreWithPersist(t)
+
+	s.SaveToken(&models.OAuthToken{
+		Token:     "cleanup-expired",
+		Kind:      "access",
+		UserID:    "user1",
+		ExpiresAt: time.Now().Add(-1 * time.Hour),
+	})
+
+	s.SaveToken(&models.OAuthToken{
+		Token:     "cleanup-valid",
+		Kind:      "access",
+		UserID:    "user2",
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+	})
+
+	s.cleanup()
+
+	s.mu.RLock()
+	assert.Len(t, s.tokens, 1)
+	s.mu.RUnlock()
+
+	allTokens, err := s.persist.AllOAuthTokens()
+	require.NoError(t, err)
+	assert.Len(t, allTokens, 1)
+}
+
+func TestDeleteToken_WithPersist(t *testing.T) {
+	s := testStoreWithPersist(t)
+
+	s.SaveToken(&models.OAuthToken{
+		Token:     "delete-me",
+		Kind:      "access",
+		UserID:    "user1",
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+
+	s.DeleteToken("delete-me")
+
+	assert.Nil(t, s.ValidateToken("delete-me"))
+
+	allTokens, err := s.persist.AllOAuthTokens()
+	require.NoError(t, err)
+	assert.Empty(t, allTokens)
+}
+
+func TestConsumeRefreshToken_WithPersist(t *testing.T) {
+	s := testStoreWithPersist(t)
+
+	refreshToken := RandomHex(32)
+	s.SaveToken(&models.OAuthToken{
+		Token:     refreshToken,
+		Kind:      "refresh",
+		UserID:    "user1",
+		Resource:  testServerURL,
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+		ClientID:  "client1",
+	})
+
+	tok := s.ConsumeRefreshToken(refreshToken, "client1", testServerURL)
+	require.NotNil(t, tok)
+	assert.Equal(t, "user1", tok.UserID)
+
+	// Should be gone from disk.
+	allTokens, err := s.persist.AllOAuthTokens()
+	require.NoError(t, err)
+	assert.Empty(t, allTokens)
+}
+
+func TestDeleteAccessTokenByRefreshToken_WithPersist(t *testing.T) {
+	s := testStoreWithPersist(t)
+
+	refreshToken := RandomHex(32)
+	accessToken := RandomHex(32)
+
+	s.SaveToken(&models.OAuthToken{
+		Token:     refreshToken,
+		Kind:      "refresh",
+		UserID:    "user1",
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+		ClientID:  "client1",
+	})
+
+	s.SaveToken(&models.OAuthToken{
+		Token:        accessToken,
+		Kind:         "access",
+		UserID:       "user1",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		RefreshToken: refreshToken,
+		ClientID:     "client1",
+	})
+
+	s.DeleteAccessTokenByRefreshToken(refreshToken)
+
+	assert.Nil(t, s.ValidateToken(accessToken))
+
+	allTokens, err := s.persist.AllOAuthTokens()
+	require.NoError(t, err)
+	// Only the refresh token should remain.
+	assert.Len(t, allTokens, 1)
 }

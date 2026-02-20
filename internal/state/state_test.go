@@ -684,3 +684,61 @@ func TestOAuthClientCount_AfterInserts(t *testing.T) {
 	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c3"}))
 	assert.Equal(t, 3, s.OAuthClientCount())
 }
+
+// --- API Keys ---
+
+func TestSaveAPIKey_RoundTrip(t *testing.T) {
+	s := testDB(t)
+
+	ak := models.APIKey{UserID: "alice"}
+	require.NoError(t, s.SaveAPIKey("hash1", ak))
+
+	keys, err := s.AllAPIKeys()
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+	assert.Equal(t, "alice", keys["hash1"].UserID)
+}
+
+func TestDeleteAPIKey(t *testing.T) {
+	s := testDB(t)
+
+	require.NoError(t, s.SaveAPIKey("hash1", models.APIKey{UserID: "alice"}))
+	require.NoError(t, s.DeleteAPIKey("hash1"))
+
+	keys, err := s.AllAPIKeys()
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+}
+
+func TestAllAPIKeys_Empty(t *testing.T) {
+	s := testDB(t)
+
+	keys, err := s.AllAPIKeys()
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+}
+
+func TestSaveAPIKey_Overwrite(t *testing.T) {
+	s := testDB(t)
+
+	require.NoError(t, s.SaveAPIKey("hash1", models.APIKey{UserID: "alice"}))
+	require.NoError(t, s.SaveAPIKey("hash1", models.APIKey{UserID: "bob"}))
+
+	keys, err := s.AllAPIKeys()
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+	assert.Equal(t, "bob", keys["hash1"].UserID)
+}
+
+func TestAllAPIKeys_Multiple(t *testing.T) {
+	s := testDB(t)
+
+	require.NoError(t, s.SaveAPIKey("h1", models.APIKey{UserID: "alice"}))
+	require.NoError(t, s.SaveAPIKey("h2", models.APIKey{UserID: "bob"}))
+
+	keys, err := s.AllAPIKeys()
+	require.NoError(t, err)
+	require.Len(t, keys, 2)
+	assert.Equal(t, "alice", keys["h1"].UserID)
+	assert.Equal(t, "bob", keys["h2"].UserID)
+}

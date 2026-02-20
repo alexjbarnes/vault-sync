@@ -180,6 +180,55 @@ func TestWatch_TempFilesIgnored(t *testing.T) {
 	assert.Nil(t, v.index.Get("notes/.vault-edit-456"))
 }
 
+func TestWatch_NodeModulesIgnored(t *testing.T) {
+	v := watchedVault(t)
+
+	nmDir := filepath.Join(v.Root(), "node_modules")
+	require.NoError(t, os.MkdirAll(nmDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(nmDir, "package.json"), []byte(`{}`), 0o644))
+
+	time.Sleep(200 * time.Millisecond)
+	assert.Nil(t, v.index.Get("node_modules/package.json"))
+}
+
+func TestWatch_ObsidianDirIgnored(t *testing.T) {
+	v := watchedVault(t)
+
+	obsDir := filepath.Join(v.Root(), ".obsidian", "plugins")
+	require.NoError(t, os.MkdirAll(obsDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(obsDir, "test.json"), []byte(`{}`), 0o644))
+
+	time.Sleep(200 * time.Millisecond)
+	assert.Nil(t, v.index.Get(".obsidian/plugins/test.json"))
+}
+
+func TestShouldIgnore_Cases(t *testing.T) {
+	dir := t.TempDir()
+	v, err := New(dir)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name   string
+		path   string
+		ignore bool
+	}{
+		{"hidden file", filepath.Join(dir, ".hidden"), true},
+		{"editor backup", filepath.Join(dir, "file.md~"), true},
+		{"vim swap", filepath.Join(dir, "file.md.swp"), true},
+		{"vault write temp", filepath.Join(dir, ".vault-write-abc"), true},
+		{"vault edit temp", filepath.Join(dir, ".vault-edit-abc"), true},
+		{"node_modules", filepath.Join(dir, "node_modules"), true},
+		{"obsidian dir", filepath.Join(dir, ".obsidian", "app.json"), true},
+		{"normal file", filepath.Join(dir, "notes", "hello.md"), false},
+		{"normal nested", filepath.Join(dir, "a", "b", "c.md"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.ignore, v.shouldIgnore(tt.path), "shouldIgnore(%q)", tt.path)
+		})
+	}
+}
+
 func TestWatch_RenameUpdatesIndex(t *testing.T) {
 	v := watchedVault(t)
 
