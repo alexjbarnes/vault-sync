@@ -68,9 +68,21 @@ For the target deployment model (single user, private network or Tailscale), the
 
 ## Scope enforcement
 
-Scopes (`vault:read`, `vault:write`) are advertised in server metadata for forward compatibility. They are not currently enforced. All authenticated requests get full vault access.
+Scopes are not implemented. All authenticated requests get full vault access. The server metadata endpoints do not advertise any scopes.
 
-This is a single-purpose server with one resource (the vault). Per-scope enforcement adds complexity without meaningful access control benefit today.
+This is a single-purpose server with one resource (the vault). Per-scope enforcement adds complexity without meaningful access control benefit today. Scopes were previously advertised for forward compatibility but removed to avoid false promises.
+
+## API key authentication
+
+API keys use a `vs_` prefix followed by 64 hex characters (32 bytes of entropy). The prefix lets the middleware distinguish API keys from OAuth Bearer tokens without needing a separate header.
+
+Keys are stored as SHA-256 hashes in bbolt, using the same rationale as client secrets: high-entropy machine-generated credentials. On startup, keys from `MCP_API_KEYS` are registered and stale keys (removed from config) are purged via `ReconcileAPIKeys`.
+
+The API key user ID is an arbitrary non-empty string for audit logging. It does not need to exist in `MCP_AUTH_USERS`. This is consistent with how `client_credentials` tokens use `ClientID` as `UserID`.
+
+## Token storage
+
+Access and refresh tokens are stored in bbolt as SHA-256 hashes. Raw token values are never persisted. The in-memory map is keyed by hash for O(1) lookup during validation. Old bbolt entries that contain raw tokens are migrated on load (hashes are computed and raw values cleared).
 
 ## Client registration
 

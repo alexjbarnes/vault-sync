@@ -24,7 +24,7 @@ MCP_AUTH_USERS=alice:her-password,bob:his-password
 For headless MCP clients that cannot open a browser. The client authenticates directly with a pre-configured client ID and secret.
 
 1. The client sends `POST /oauth/token` with `grant_type=client_credentials`, `client_id`, and `client_secret`
-2. The server validates the credentials and returns an access token and refresh token
+2. The server validates the credentials and returns an access token (no refresh token)
 
 Configure client credentials in `.env`:
 
@@ -49,10 +49,11 @@ Response:
 {
   "access_token": "abc123...",
   "token_type": "Bearer",
-  "expires_in": 3600,
-  "refresh_token": "def456..."
+  "expires_in": 3600
 }
 ```
+
+No refresh token is issued for client_credentials (RFC 6749 Section 4.4.3). The client already holds credentials to re-authenticate when the access token expires.
 
 ### Using the token
 
@@ -62,23 +63,35 @@ Include the access token in requests to the MCP endpoint:
 Authorization: Bearer abc123...
 ```
 
-### Token refresh
+## API key authentication
 
-Access tokens expire after 1 hour. Use the refresh token to get a new one without re-authenticating:
+For the simplest setup, use a static API key. Generate a key with 32 bytes of entropy:
 
 ```bash
-curl -X POST https://your-server.example.com/oauth/token \
-  -d grant_type=refresh_token \
-  -d refresh_token=def456... \
-  -d client_id=my-client
+echo "vs_$(openssl rand -hex 32)"
 ```
+
+Configure in `.env`:
+
+```
+MCP_API_KEYS=myuser:vs_<64 hex chars>
+```
+
+Use the raw key as a Bearer token:
+
+```
+Authorization: Bearer vs_<64 hex chars>
+```
+
+The `vs_` prefix lets the middleware route to API key validation instead of OAuth token lookup. Keys are stored as SHA-256 hashes at rest.
 
 ## Security
 
-- Client secrets are hashed (SHA-256) at rest. The raw secret is never stored.
+- Client secrets and API keys are hashed (SHA-256) at rest. Raw values are never stored.
+- OAuth tokens are stored as SHA-256 hashes in bbolt. Raw tokens are never persisted.
 - Per-IP rate limiting on the token endpoint (5 failed attempts per minute).
 - Per-client lockout after 10 consecutive failures (15 minute cooldown).
 - Constant-time comparison for all credential validation.
 - Dynamically registered clients cannot use the `client_credentials` flow. Only pre-configured clients from `MCP_CLIENT_CREDENTIALS` can.
 - Pre-configured clients cannot use the interactive `authorization_code` flow.
-- Scopes (`vault:read`, `vault:write`) are advertised in server metadata for forward compatibility but are not currently enforced. All authenticated requests get full vault access.
+- Scopes are not implemented. All authenticated requests get full vault access.

@@ -20,10 +20,14 @@ The server listens on `:8090` by default. Point your MCP client at `MCP_SERVER_U
 |---|---|---|---|
 | `ENABLE_MCP` | Yes | `false` | Enable the MCP server |
 | `MCP_SERVER_URL` | Yes | - | Public HTTPS URL for this server (used as OAuth resource identifier) |
-| `MCP_AUTH_USERS` | Yes | - | Comma-separated `user:password` pairs for login |
+| `MCP_AUTH_USERS` | Conditional | - | Comma-separated `user:password` pairs for the OAuth login page. Required unless `MCP_CLIENT_CREDENTIALS` or `MCP_API_KEYS` is set. |
+| `MCP_CLIENT_CREDENTIALS` | No | - | Comma-separated `client_id:secret` pairs for headless OAuth (client_credentials flow) |
+| `MCP_API_KEYS` | No | - | Comma-separated `user:vs_<hex>` pairs for static API key authentication |
 | `MCP_LISTEN_ADDR` | No | `:8090` | HTTP listen address |
 | `MCP_LOG_LEVEL` | No | `info` | Log level |
 | `OBSIDIAN_SYNC_DIR` | When sync disabled | - | Path to vault directory (derived automatically when sync is enabled) |
+
+At least one of `MCP_AUTH_USERS`, `MCP_CLIENT_CREDENTIALS`, or `MCP_API_KEYS` must be set.
 
 ## Tools
 
@@ -119,8 +123,9 @@ Copy a file. Creates destination parent directories automatically. Uses atomic w
 
 - All paths are validated against traversal attacks (`..` and symlink escape)
 - `.obsidian/` is protected from read, write, edit, delete, move, and copy
-- OAuth 2.1 with PKCE protects all tool endpoints
-- Dynamic client registration supported
-- Access tokens expire; refresh token rotation enabled
+- Three authentication methods: OAuth 2.1 (authorization code + PKCE, client credentials), API key
+- Dynamic client registration supported for OAuth
+- Access tokens expire; refresh token rotation enabled for auth code flow
+- All secrets and tokens stored as SHA-256 hashes at rest
 
 

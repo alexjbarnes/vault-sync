@@ -87,7 +87,6 @@ When Claude (or any MCP client) connects, this is the full flow:
 {
   "resource": "https://vault.example.com",
   "authorization_servers": ["https://vault.example.com"],
-  "scopes_supported": ["vault:read", "vault:write"],
   "bearer_methods_supported": ["header"]
 }
 ```
@@ -104,11 +103,10 @@ Uses `oauthex.ProtectedResourceMetadata` from the official SDK for the struct.
   "authorization_endpoint": "https://vault.example.com/oauth/authorize",
   "token_endpoint": "https://vault.example.com/oauth/token",
   "registration_endpoint": "https://vault.example.com/oauth/register",
-  "scopes_supported": ["vault:read", "vault:write"],
   "response_types_supported": ["code"],
-  "grant_types_supported": ["authorization_code"],
+  "grant_types_supported": ["authorization_code", "client_credentials", "refresh_token"],
   "code_challenge_methods_supported": ["S256"],
-  "token_endpoint_auth_methods_supported": ["none"]
+  "token_endpoint_auth_methods_supported": ["none", "client_secret_post", "client_secret_basic"]
 }
 ```
 

@@ -37,8 +37,7 @@ vault-sync is a single binary with two features that can be enabled independentl
 |---|---|---|
 | OAuth 2.1 (authorization code + PKCE) | Supported | Interactive login from browser-based MCP clients |
 | OAuth 2.1 (client credentials) | Supported | Headless agents and CI/CD pipelines |
-| API key | Planned | Single static token for simple deployments |
-| No auth | Planned | Localhost or trusted network only |
+| API key | Supported | Single static token for simple deployments |
 
 See [OAuth documentation](docs/oauth.md) for setup and usage.
 
@@ -72,9 +71,12 @@ All configuration via environment variables or `.env` file.
 |---|---|---|
 | `ENABLE_MCP` | No | Enable MCP server (default: `false`) |
 | `MCP_SERVER_URL` | When MCP enabled | Public HTTPS URL (OAuth resource identifier) |
-| `MCP_AUTH_USERS` | When MCP enabled | Comma-separated `user:password` pairs for the OAuth login page |
+| `MCP_AUTH_USERS` | Conditional | Comma-separated `user:password` pairs for the OAuth login page |
 | `MCP_CLIENT_CREDENTIALS` | No | Comma-separated `client_id:secret` pairs for headless OAuth clients ([docs](docs/oauth.md)) |
+| `MCP_API_KEYS` | No | Comma-separated `user:vs_<hex>` pairs for API key authentication ([docs](docs/oauth.md)) |
 | `MCP_LISTEN_ADDR` | No | Listen address (default: `:8090`) |
+
+At least one of `MCP_AUTH_USERS`, `MCP_CLIENT_CREDENTIALS`, or `MCP_API_KEYS` is required when MCP is enabled.
 
 ### Config Sync Toggles
 
