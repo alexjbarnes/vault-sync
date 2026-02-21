@@ -71,13 +71,14 @@ type csrfEntry struct {
 // when a persistence layer is provided; auth codes and CSRF tokens are
 // always in-memory only.
 type Store struct {
-	mu      sync.RWMutex
-	codes   map[string]*Code               // code -> Code
-	tokens  map[string]*models.OAuthToken  // SHA-256(token) -> OAuthToken
-	clients map[string]*models.OAuthClient // client_id -> OAuthClient
-	apiKeys map[string]*models.APIKey      // SHA-256(raw key) -> APIKey
-	csrf    map[string]csrfEntry           // csrf token -> expiry
-	stopGC  chan struct{}
+	mu           sync.RWMutex
+	codes        map[string]*Code               // code -> Code
+	tokens       map[string]*models.OAuthToken  // SHA-256(token) -> OAuthToken
+	refreshIndex map[string]string              // refreshHash -> accessTokenHash
+	clients      map[string]*models.OAuthClient // client_id -> OAuthClient
+	apiKeys      map[string]*models.APIKey      // SHA-256(raw key) -> APIKey
+	csrf         map[string]csrfEntry           // csrf token -> expiry
+	stopGC       chan struct{}
 
 	// registrationTimes tracks recent registration timestamps for
 	// rate limiting unauthenticated /oauth/register requests.
@@ -94,14 +95,15 @@ type Store struct {
 // written through. Pass nil for in-memory-only operation (tests).
 func NewStore(persist *state.State, logger *slog.Logger) *Store {
 	s := &Store{
-		codes:   make(map[string]*Code),
-		tokens:  make(map[string]*models.OAuthToken),
-		clients: make(map[string]*models.OAuthClient),
-		apiKeys: make(map[string]*models.APIKey),
-		csrf:    make(map[string]csrfEntry),
-		stopGC:  make(chan struct{}),
-		persist: persist,
-		logger:  logger,
+		codes:        make(map[string]*Code),
+		tokens:       make(map[string]*models.OAuthToken),
+		refreshIndex: make(map[string]string),
+		clients:      make(map[string]*models.OAuthClient),
+		apiKeys:      make(map[string]*models.APIKey),
+		csrf:         make(map[string]csrfEntry),
+		stopGC:       make(chan struct{}),
+		persist:      persist,
+		logger:       logger,
 	}
 
 	if persist != nil {
@@ -150,6 +152,10 @@ func (s *Store) loadFromDisk() {
 		t.RefreshToken = ""
 
 		s.tokens[t.TokenHash] = &t
+
+		if t.Kind == "access" && t.RefreshHash != "" {
+			s.refreshIndex[t.RefreshHash] = t.TokenHash
+		}
 	}
 
 	clients, err := s.persist.AllOAuthClients()
@@ -216,6 +222,10 @@ func (s *Store) cleanup() {
 		if now.After(t.ExpiresAt) {
 			delete(s.tokens, hash)
 
+			if t.Kind == "access" && t.RefreshHash != "" {
+				delete(s.refreshIndex, t.RefreshHash)
+			}
+
 			if s.persist != nil {
 				_ = s.persist.DeleteOAuthToken(hash)
 			}
@@ -258,15 +268,25 @@ func (s *Store) ConsumeCode(code string) *Code {
 
 // SaveToken stores a token in memory and persists it to disk.
 // Computes TokenHash from Token and RefreshHash from RefreshToken
-// if not already set by the caller.
+// if not already set by the caller. For access tokens with a
+// RefreshHash, a reverse index entry is maintained for O(1)
+// lookup in DeleteAccessTokenByRefreshToken.
 func (s *Store) SaveToken(t *models.OAuthToken) {
-	t.TokenHash = HashSecret(t.Token)
+	if t.TokenHash == "" {
+		t.TokenHash = HashSecret(t.Token)
+	}
+
 	if t.RefreshHash == "" && t.RefreshToken != "" {
 		t.RefreshHash = HashSecret(t.RefreshToken)
 	}
 
 	s.mu.Lock()
 	s.tokens[t.TokenHash] = t
+
+	if t.Kind == "access" && t.RefreshHash != "" {
+		s.refreshIndex[t.RefreshHash] = t.TokenHash
+	}
+
 	s.mu.Unlock()
 
 	if s.persist != nil {
@@ -370,6 +390,11 @@ func (s *Store) DeleteToken(token string) {
 	hash := HashSecret(token)
 
 	s.mu.Lock()
+
+	if t := s.tokens[hash]; t != nil && t.Kind == "access" && t.RefreshHash != "" {
+		delete(s.refreshIndex, t.RefreshHash)
+	}
+
 	delete(s.tokens, hash)
 	s.mu.Unlock()
 
@@ -379,25 +404,17 @@ func (s *Store) DeleteToken(token string) {
 }
 
 // DeleteAccessTokenByRefreshToken removes the access token that was
-// paired with the given refresh token. This ensures old access tokens
-// are revoked when a refresh token is consumed.
+// paired with the given refresh token. Uses the refreshIndex for O(1)
+// lookup instead of scanning all tokens.
 func (s *Store) DeleteAccessTokenByRefreshToken(refreshToken string) {
 	refreshHash := HashSecret(refreshToken)
 
 	s.mu.Lock()
 
-	var found string
-
-	for k, t := range s.tokens {
-		if t.Kind == "access" && t.RefreshHash == refreshHash {
-			found = k
-
-			break
-		}
-	}
-
+	found := s.refreshIndex[refreshHash]
 	if found != "" {
 		delete(s.tokens, found)
+		delete(s.refreshIndex, refreshHash)
 	}
 
 	s.mu.Unlock()
@@ -566,32 +583,17 @@ func (s *Store) RegisterAPIKey(rawKey, userID string) {
 }
 
 // ValidateAPIKey checks if a raw API key is registered. Returns nil
-// if the key is not found.
-//
-// The stored hash is read under the lock, then the comparison happens
-// outside the lock. A dummy hash is used for missing keys so the code
-// path (hash + constant-time compare) is identical regardless of key
-// existence, matching the pattern in ValidateClientSecret.
+// if the key is not found. The lookup is by SHA-256 hash of the raw
+// key, which is the map key. No constant-time compare is needed here
+// because the map lookup itself is the authentication gate (unlike
+// ValidateClientSecret where the secret is compared against a stored
+// hash for a known client_id).
 func (s *Store) ValidateAPIKey(rawKey string) *models.APIKey {
 	hash := HashSecret(rawKey)
 
 	s.mu.RLock()
 	ak := s.apiKeys[hash]
-
-	storedHash := ""
-	if ak != nil {
-		storedHash = ak.KeyHash
-	}
-
 	s.mu.RUnlock()
-
-	if storedHash == "" {
-		storedHash = dummyHash
-	}
-
-	if subtle.ConstantTimeCompare([]byte(hash), []byte(storedHash)) != 1 {
-		return nil
-	}
 
 	return ak
 }

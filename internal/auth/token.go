@@ -216,16 +216,22 @@ func HandleToken(store *Store, logger *slog.Logger, serverURL string) http.Handl
 			return
 		}
 
-		// Support both JSON and form-encoded bodies.
+		// Support both JSON and form-encoded bodies. Reject
+		// unsupported content types for consistency with the DCR
+		// endpoint (registration.go).
 		var req tokenRequest
 
 		contentType := r.Header.Get("Content-Type")
-		if strings.HasPrefix(contentType, "application/json") {
+
+		switch {
+		case strings.HasPrefix(contentType, "application/json"):
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				writeJSONError(w, http.StatusBadRequest, "invalid_request", "invalid request body")
 				return
 			}
-		} else {
+
+		case strings.HasPrefix(contentType, "application/x-www-form-urlencoded"),
+			contentType == "":
 			if err := r.ParseForm(); err != nil {
 				writeJSONError(w, http.StatusBadRequest, "invalid_request", "invalid form data")
 				return
@@ -241,6 +247,10 @@ func HandleToken(store *Store, logger *slog.Logger, serverURL string) http.Handl
 				Resource:     r.FormValue("resource"),
 				RefreshToken: r.FormValue("refresh_token"),
 			}
+
+		default:
+			writeJSONError(w, http.StatusUnsupportedMediaType, "invalid_request", "Content-Type must be application/x-www-form-urlencoded or application/json")
+			return
 		}
 
 		// RFC 6749 Section 2.3.1: support client_secret_basic (HTTP
@@ -273,7 +283,10 @@ func HandleToken(store *Store, logger *slog.Logger, serverURL string) http.Handl
 		// refresh_token grant is always allowed since it continues
 		// an existing authorized session. client_credentials is
 		// checked inside handleClientCredentials after secret
-		// validation to avoid leaking client existence.
+		// validation to avoid leaking client existence: a rejected
+		// grant type would reveal that the client_id is registered,
+		// while a 401 from secret validation is indistinguishable
+		// from an unknown client.
 		if req.GrantType != "refresh_token" && req.GrantType != "client_credentials" && req.ClientID != "" && !store.ClientAllowsGrant(req.ClientID, req.GrantType) {
 			writeJSONError(w, http.StatusBadRequest, "unauthorized_client", "client is not authorized for this grant type")
 			return
