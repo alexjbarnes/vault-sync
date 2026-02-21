@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -33,8 +34,12 @@ const (
 	vaultDirPerm = fs.FileMode(0o755)
 	// mcpReadTimeout is the HTTP server read timeout.
 	mcpReadTimeout = 30 * time.Second
-	// mcpWriteTimeout is the HTTP server write timeout.
-	mcpWriteTimeout = 60 * time.Second
+	// mcpWriteTimeout is the HTTP server write timeout. Set to zero to
+	// disable it: the MCP Streamable HTTP transport uses SSE, which keeps
+	// the response writer open for the lifetime of the session, so a
+	// non-zero write timeout would close every connection after the
+	// timeout elapses regardless of activity.
+	mcpWriteTimeout = 0
 	// mcpIdleTimeout is the HTTP server idle connection timeout.
 	mcpIdleTimeout = 120 * time.Second
 	// mcpShutdownTimeout is the grace period for MCP server shutdown.
@@ -311,7 +316,11 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, setup
 
 	sg, sgctx := errgroup.WithContext(ctx)
 	sg.Go(func() error {
-		return syncClient.Listen(sgctx)
+		if err := syncClient.Listen(sgctx); err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+
+		return nil
 	})
 
 	if err := reconciler.Phase2And3(sgctx, scan); err != nil {
@@ -321,7 +330,11 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, setup
 	watcher := obsidian.NewWatcher(vaultFS, syncClient, logger, syncFilter)
 
 	sg.Go(func() error {
-		return watcher.Watch(sgctx)
+		if err := watcher.Watch(sgctx); err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+
+		return nil
 	})
 
 	return sg.Wait()
@@ -461,7 +474,11 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		return nil
 	})
 	mg.Go(func() error {
-		return v.Watch(mctx)
+		if err := v.Watch(mctx); err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+
+		return nil
 	})
 
 	return mg.Wait()

@@ -63,7 +63,7 @@ All configuration via environment variables or `.env` file.
 | `OBSIDIAN_VAULT_PASSWORD` | Yes | Vault encryption password |
 | `OBSIDIAN_VAULT_NAME` | No | Vault name (auto-detected if only one exists) |
 | `OBSIDIAN_SYNC_DIR` | No | Local directory for vault files (defaults to `~/.vault-sync/vaults/<id>/`) |
-| `DEVICE_NAME` | No | Device name reported to sync server (default: `vault-sync`) |
+| `DEVICE_NAME` | No | Device name reported to sync server (default: system hostname, falls back to `vault-sync`) |
 | `ENABLE_SYNC` | No | Enable sync (default: `true`) |
 
 ### MCP Server

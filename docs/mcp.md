@@ -49,7 +49,7 @@ List vault contents.
 Read file content with optional line-range pagination.
 
 - Lines are 1-indexed
-- Large files auto-truncate at 200 lines unless a limit is set
+- Large files auto-truncate at 200 lines when reading from the start with no limit set
 
 ```json
 {"path": "notes/hello.md", "offset": 1, "limit": 50}
