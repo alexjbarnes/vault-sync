@@ -56,7 +56,7 @@ func run() error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	logger := logging.NewLogger(cfg.Environment)
+	logger := logging.NewLogger(cfg.Environment, cfg.MCPLogLevel)
 	logger.Info("vault-sync starting",
 		slog.String("version", Version),
 		slog.String("device", cfg.DeviceName),

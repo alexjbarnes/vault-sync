@@ -35,7 +35,7 @@ func NewIndex(root string) *Index {
 }
 
 // Build walks the vault directory and populates the index.
-// It excludes hidden files/directories and the .obsidian directory.
+// It excludes hidden files/directories, symlinks, and the .obsidian directory.
 func (idx *Index) Build() error {
 	entries := make(map[string]*FileEntry)
 
@@ -75,6 +75,13 @@ func (idx *Index) Build() error {
 			return nil
 		}
 
+		// Skip symlinks to prevent indexing files outside the vault.
+		// filepath.Walk uses os.Lstat, so info.Mode() reflects the
+		// symlink itself rather than the target.
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+
 		entry := &FileEntry{
 			Path:     rel,
 			Size:     info.Size(),
@@ -83,7 +90,7 @@ func (idx *Index) Build() error {
 
 		// Parse frontmatter for markdown files.
 		if isMarkdown(rel) {
-			data, readErr := os.ReadFile(path) //nolint:gosec // G304: path from filepath.WalkDir within vault root
+			data, readErr := os.ReadFile(path) //nolint:gosec // G304: path from filepath.Walk within vault root
 			if readErr == nil {
 				if fm := parseFrontmatter(data); fm != nil {
 					entry.Tags = fm.Tags
@@ -136,11 +143,12 @@ func (idx *Index) Get(path string) *FileEntry {
 
 // Update refreshes the index entry for a single path by re-reading
 // its metadata from disk. If the file no longer exists, it is removed
-// from the index.
+// from the index. Symlinks are skipped to prevent indexing files
+// outside the vault root.
 func (idx *Index) Update(relPath string) {
 	absPath := filepath.Join(idx.root, filepath.FromSlash(relPath))
 
-	info, err := os.Stat(absPath)
+	info, err := os.Lstat(absPath)
 	if err != nil {
 		idx.mu.Lock()
 		delete(idx.entries, relPath)
@@ -153,6 +161,11 @@ func (idx *Index) Update(relPath string) {
 		return
 	}
 
+	// Skip symlinks to prevent indexing files outside the vault.
+	if info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+
 	entry := &FileEntry{
 		Path:     relPath,
 		Size:     info.Size(),
@@ -160,7 +173,7 @@ func (idx *Index) Update(relPath string) {
 	}
 
 	if isMarkdown(relPath) {
-		data, readErr := os.ReadFile(absPath) //nolint:gosec // G304: absPath validated by Vault.absPath
+		data, readErr := os.ReadFile(absPath) //nolint:gosec // G304: absPath built from index root + relative path
 		if readErr == nil {
 			if fm := parseFrontmatter(data); fm != nil {
 				entry.Tags = fm.Tags

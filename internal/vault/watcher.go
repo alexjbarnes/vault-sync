@@ -66,8 +66,10 @@ func (v *Vault) handleEvent(watcher *fsnotify.Watcher, event fsnotify.Event) {
 	if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) {
 		// New directory: start watching it so we catch files created
 		// inside it. No index update needed for directories themselves.
+		// Use Lstat to avoid following symlinks to directories outside
+		// the vault.
 		if event.Has(fsnotify.Create) {
-			if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+			if info, err := os.Lstat(event.Name); err == nil && info.IsDir() {
 				_ = watcher.Add(event.Name)
 				return
 			}
