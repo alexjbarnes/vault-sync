@@ -88,7 +88,7 @@ Access and refresh tokens are stored in bbolt as SHA-256 hashes. Raw token value
 
 ### Dynamic registration (RFC 7591)
 
-Allowed grant types: `authorization_code` only. Requests for `client_credentials` are rejected at registration time. Maximum 100 registered clients to prevent unbounded growth from unauthenticated registration requests. Client IDs are 16 random bytes, hex-encoded.
+Allowed grant types: `authorization_code` and `refresh_token`. Requests for `client_credentials` are rejected at registration time. Maximum 100 registered clients to prevent unbounded growth from unauthenticated registration requests. Client IDs are 16 random bytes, hex-encoded.
 
 ### Pre-configured clients
 

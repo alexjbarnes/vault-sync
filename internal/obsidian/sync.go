@@ -1299,14 +1299,28 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 		serverText = string(serverPlain)
 	}
 
-	// Trivial cases.
+	// Trivial cases: local disk content does not change, but we must
+	// update the hash cache so the watcher does not re-upload the file.
+	cacheLocalHash := func() {
+		h := sha256.Sum256(localContent)
+		contentHash := hex.EncodeToString(h[:])
+
+		s.hashCacheMu.Lock()
+		s.hashCache[path] = hashEntry{encHash: push.Hash, contentHash: contentHash}
+		s.hashCacheMu.Unlock()
+	}
+
 	if baseText == serverText || localText == serverText {
+		cacheLocalHash()
 		s.persistServerFile(path, push, false)
+
 		return nil
 	}
 
 	if serverText == "" {
+		cacheLocalHash()
 		s.persistServerFile(path, push, false)
+
 		return nil
 	}
 
