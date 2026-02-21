@@ -176,7 +176,12 @@ Authorization: Bearer vs_a1b2c3...your-generated-key
 
 ## 7. Connect an MCP client
 
-Point your MCP client at the server URL.
+There are two URLs to know:
+
+| URL | Used for |
+|---|---|
+| `https://your-server.example.com` | `MCP_SERVER_URL` env var. OAuth discovery, token endpoints, resource identifier. No `/mcp` suffix. |
+| `https://your-server.example.com/mcp` | MCP client connection URL. This is what you put in your client config. |
 
 ### Claude Desktop
 
@@ -186,17 +191,35 @@ Add to your Claude Desktop config (`claude_desktop_config.json`):
 {
   "mcpServers": {
     "vault-sync": {
-      "url": "https://vault.yourdomain.com/mcp"
+      "url": "https://your-server.example.com/mcp"
     }
   }
 }
 ```
 
-Claude will prompt you to authorize through the OAuth login page on first connection.
+Claude handles OAuth automatically. It will open a browser for you to log in on first connection.
+
+### API key clients (OpenCode, custom agents)
+
+For clients that use a static API key instead of OAuth, pass the key as a Bearer token in the headers. The URL still ends with `/mcp`:
+
+```json
+{
+  "mcpServers": {
+    "vault-sync": {
+      "type": "remote",
+      "url": "https://your-server.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer vs_<your-generated-key>"
+      }
+    }
+  }
+}
+```
 
 ### Other MCP clients
 
-Any MCP client that supports Streamable HTTP transport can connect. Point it at `https://your-server.example.com/mcp`. The client handles OAuth discovery and authentication automatically via the `/.well-known/oauth-authorization-server` endpoint.
+Any MCP client that supports Streamable HTTP transport can connect. Point it at `https://your-server.example.com/mcp`. Clients with OAuth support handle discovery and authentication automatically via `/.well-known/oauth-authorization-server`.
 
 ## 8. Verify
 
