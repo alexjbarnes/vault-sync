@@ -87,6 +87,28 @@ Authorization: Bearer vs_<64 hex chars>
 
 The `vs_` prefix lets the middleware route to API key validation instead of OAuth token lookup. Keys are stored as SHA-256 hashes at rest.
 
+## Client compatibility notes
+
+### Claude web (claude.ai)
+
+Claude's connector settings show optional "OAuth Client ID" and "OAuth Client Secret" fields under Advanced. It may look like these fields are for the `client_credentials` flow — they are not.
+
+When you populate those fields, Claude still initiates the interactive authorization code flow. It uses the provided `client_id` at `/oauth/authorize` instead of registering a new one via DCR, then expects a browser login page. Pre-configured clients in `MCP_CLIENT_CREDENTIALS` are locked to `client_credentials` only and will be rejected at the authorize endpoint.
+
+**Leave those fields empty.** Claude will register itself via DCR and walk you through the browser login flow using your `MCP_AUTH_USERS` credentials. That is the correct path for Claude web.
+
+The `client_credentials` grant exists as a [draft MCP extension](https://modelcontextprotocol.io/extensions/auth/oauth-client-credentials) but no major MCP client has shipped support for it yet.
+
+### API key header injection
+
+Some clients (e.g. OpenCode) allow you to configure arbitrary HTTP headers on the MCP connection. You can use this to inject an API key directly:
+
+```
+Authorization: Bearer vs_<your key>
+```
+
+This bypasses OAuth entirely and requires no browser interaction.
+
 ## Security
 
 - Client secrets and API keys are hashed (SHA-256) at rest. Raw values are never stored.
