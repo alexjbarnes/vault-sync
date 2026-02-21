@@ -741,9 +741,10 @@ func TestHandlePushWhileBusy_DeleteLocalFolder_NonEmpty(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, info.IsDir())
 
-	// Server state should be persisted as deleted (entry removed).
+	// Server state should be re-persisted (not deleted) so the
+	// reconciler does not re-process this delete on next reconnect.
 	sf, _ := appState.GetServerFile(testSyncVaultID, "busy-ne")
-	assert.Nil(t, sf)
+	assert.NotNil(t, sf, "non-empty folder should have server state restored")
 }
 
 func TestHandlePushWhileBusy_KeepLocal(t *testing.T) {

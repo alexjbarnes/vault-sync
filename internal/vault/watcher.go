@@ -66,8 +66,10 @@ func (v *Vault) handleEvent(watcher *fsnotify.Watcher, event fsnotify.Event) {
 	if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) {
 		// New directory: start watching it so we catch files created
 		// inside it. No index update needed for directories themselves.
+		// Use Lstat to avoid following symlinks to directories outside
+		// the vault.
 		if event.Has(fsnotify.Create) {
-			if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+			if info, err := os.Lstat(event.Name); err == nil && info.IsDir() {
 				_ = watcher.Add(event.Name)
 				return
 			}
@@ -125,11 +127,6 @@ func (v *Vault) shouldIgnore(absPath string) bool {
 
 	// Temp files from editors.
 	if strings.HasSuffix(name, "~") || strings.HasSuffix(name, ".swp") {
-		return true
-	}
-
-	// Vault write temp files (created by Vault.Write and Vault.Edit).
-	if strings.HasPrefix(name, ".vault-write-") || strings.HasPrefix(name, ".vault-edit-") {
 		return true
 	}
 

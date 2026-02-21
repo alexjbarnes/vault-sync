@@ -6,6 +6,8 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"log/slog"
 	"strings"
@@ -29,6 +31,14 @@ type Code struct {
 }
 
 const (
+	// APIKeyPrefix is the required prefix for all API key values.
+	// The middleware uses this to distinguish API keys from OAuth tokens.
+	APIKeyPrefix = "vs_"
+
+	// APIKeyMinLen is the minimum valid API key length:
+	// 3-char prefix + 64 hex chars (32 bytes of entropy).
+	APIKeyMinLen = 67
+
 	// maxClients caps the number of registered clients to prevent
 	// unbounded growth from unauthenticated registration requests.
 	maxClients = 100
@@ -42,6 +52,11 @@ const (
 	// maxRegistrationsPerMinute caps the number of dynamic client
 	// registrations allowed within a one-minute sliding window.
 	maxRegistrationsPerMinute = 10
+
+	// dummyHash is used for timing-safe comparisons when no stored hash
+	// exists. Ensures the code path (hash + constant-time compare) is
+	// identical regardless of whether the entry exists.
+	dummyHash = "0000000000000000000000000000000000000000000000000000000000000000"
 )
 
 // csrfEntry tracks a CSRF token with its expiry and the OAuth
@@ -56,12 +71,14 @@ type csrfEntry struct {
 // when a persistence layer is provided; auth codes and CSRF tokens are
 // always in-memory only.
 type Store struct {
-	mu      sync.RWMutex
-	codes   map[string]*Code               // code -> Code
-	tokens  map[string]*models.OAuthToken  // token -> OAuthToken
-	clients map[string]*models.OAuthClient // client_id -> OAuthClient
-	csrf    map[string]csrfEntry           // csrf token -> expiry
-	stopGC  chan struct{}
+	mu           sync.RWMutex
+	codes        map[string]*Code               // code -> Code
+	tokens       map[string]*models.OAuthToken  // SHA-256(token) -> OAuthToken
+	refreshIndex map[string]string              // refreshHash -> accessTokenHash
+	clients      map[string]*models.OAuthClient // client_id -> OAuthClient
+	apiKeys      map[string]*models.APIKey      // SHA-256(raw key) -> APIKey
+	csrf         map[string]csrfEntry           // csrf token -> expiry
+	stopGC       chan struct{}
 
 	// registrationTimes tracks recent registration timestamps for
 	// rate limiting unauthenticated /oauth/register requests.
@@ -78,13 +95,15 @@ type Store struct {
 // written through. Pass nil for in-memory-only operation (tests).
 func NewStore(persist *state.State, logger *slog.Logger) *Store {
 	s := &Store{
-		codes:   make(map[string]*Code),
-		tokens:  make(map[string]*models.OAuthToken),
-		clients: make(map[string]*models.OAuthClient),
-		csrf:    make(map[string]csrfEntry),
-		stopGC:  make(chan struct{}),
-		persist: persist,
-		logger:  logger,
+		codes:        make(map[string]*Code),
+		tokens:       make(map[string]*models.OAuthToken),
+		refreshIndex: make(map[string]string),
+		clients:      make(map[string]*models.OAuthClient),
+		apiKeys:      make(map[string]*models.APIKey),
+		csrf:         make(map[string]csrfEntry),
+		stopGC:       make(chan struct{}),
+		persist:      persist,
+		logger:       logger,
 	}
 
 	if persist != nil {
@@ -107,12 +126,50 @@ func (s *Store) loadFromDisk() {
 
 	for i := range tokens {
 		t := tokens[i]
-		if now.After(t.ExpiresAt) {
-			_ = s.persist.DeleteOAuthToken(t.Token)
+
+		// Backward compat: old entries have Token but no TokenHash.
+		// Compute hashes and re-persist to remove raw secrets from disk.
+		needsMigration := t.TokenHash == "" && t.Token != ""
+		if needsMigration {
+			t.TokenHash = HashSecret(t.Token)
+		}
+
+		if t.TokenHash == "" {
 			continue
 		}
 
-		s.tokens[t.Token] = &t
+		if now.After(t.ExpiresAt) {
+			_ = s.persist.DeleteOAuthToken(t.TokenHash)
+			continue
+		}
+
+		// Backward compat: old access tokens have RefreshToken but
+		// no RefreshHash. Compute the hash for the new lookup.
+		if t.Kind == "access" && t.RefreshHash == "" && t.RefreshToken != "" {
+			t.RefreshHash = HashSecret(t.RefreshToken)
+			needsMigration = true
+		}
+
+		// Re-persist migrated tokens to clear raw secrets from disk.
+		// SaveOAuthToken writes under the TokenHash key and clears
+		// Token/RefreshToken before marshaling.
+		if needsMigration {
+			if err := s.persist.SaveOAuthToken(t); err != nil {
+				s.logger.Warn("migrating legacy token",
+					slog.String("error", err.Error()),
+				)
+			}
+		}
+
+		// Clear raw secrets from memory after computing hashes.
+		t.Token = ""
+		t.RefreshToken = ""
+
+		s.tokens[t.TokenHash] = &t
+
+		if t.Kind == "access" && t.RefreshHash != "" {
+			s.refreshIndex[t.RefreshHash] = t.TokenHash
+		}
 	}
 
 	clients, err := s.persist.AllOAuthClients()
@@ -125,9 +182,20 @@ func (s *Store) loadFromDisk() {
 		s.clients[c.ClientID] = &c
 	}
 
-	s.logger.Info("loaded OAuth state from disk",
+	apiKeys, err := s.persist.AllAPIKeys()
+	if err != nil {
+		s.logger.Warn("loading persisted API keys", slog.String("error", err.Error()))
+	}
+
+	for hash, ak := range apiKeys {
+		akCopy := ak
+		s.apiKeys[hash] = &akCopy
+	}
+
+	s.logger.Info("loaded auth state from disk",
 		slog.Int("tokens", len(s.tokens)),
 		slog.Int("clients", len(s.clients)),
+		slog.Int("api_keys", len(s.apiKeys)),
 	)
 }
 
@@ -164,12 +232,16 @@ func (s *Store) cleanup() {
 		}
 	}
 
-	for k, t := range s.tokens {
+	for hash, t := range s.tokens {
 		if now.After(t.ExpiresAt) {
-			delete(s.tokens, k)
+			delete(s.tokens, hash)
+
+			if t.Kind == "access" && t.RefreshHash != "" {
+				delete(s.refreshIndex, t.RefreshHash)
+			}
 
 			if s.persist != nil {
-				_ = s.persist.DeleteOAuthToken(k)
+				_ = s.persist.DeleteOAuthToken(hash)
 			}
 		}
 	}
@@ -209,9 +281,26 @@ func (s *Store) ConsumeCode(code string) *Code {
 }
 
 // SaveToken stores a token in memory and persists it to disk.
+// Computes TokenHash from Token and RefreshHash from RefreshToken
+// if not already set by the caller. For access tokens with a
+// RefreshHash, a reverse index entry is maintained for O(1)
+// lookup in DeleteAccessTokenByRefreshToken.
 func (s *Store) SaveToken(t *models.OAuthToken) {
+	if t.TokenHash == "" {
+		t.TokenHash = HashSecret(t.Token)
+	}
+
+	if t.RefreshHash == "" && t.RefreshToken != "" {
+		t.RefreshHash = HashSecret(t.RefreshToken)
+	}
+
 	s.mu.Lock()
-	s.tokens[t.Token] = t
+	s.tokens[t.TokenHash] = t
+
+	if t.Kind == "access" && t.RefreshHash != "" {
+		s.refreshIndex[t.RefreshHash] = t.TokenHash
+	}
+
 	s.mu.Unlock()
 
 	if s.persist != nil {
@@ -224,10 +313,12 @@ func (s *Store) SaveToken(t *models.OAuthToken) {
 // ValidateToken checks if an access token is valid and not expired.
 // Returns nil if invalid. Refresh tokens are rejected.
 func (s *Store) ValidateToken(token string) *models.OAuthToken {
+	hash := HashSecret(token)
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	t, ok := s.tokens[token]
+	t, ok := s.tokens[hash]
 	if !ok {
 		return nil
 	}
@@ -246,16 +337,19 @@ func (s *Store) ValidateToken(token string) *models.OAuthToken {
 // ValidateRefreshToken checks if a refresh token is valid for the given
 // client_id and resource. Returns nil if invalid.
 func (s *Store) ValidateRefreshToken(token, clientID, resource string) *models.OAuthToken {
+	hash := HashSecret(token)
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.validateRefreshTokenLocked(token, clientID, resource)
+	return s.validateRefreshTokenLocked(hash, clientID, resource)
 }
 
 // validateRefreshTokenLocked performs refresh token validation without locking.
-// Caller must hold at least s.mu.RLock().
-func (s *Store) validateRefreshTokenLocked(token, clientID, resource string) *models.OAuthToken {
-	t, ok := s.tokens[token]
+// Caller must hold at least s.mu.RLock(). tokenHash is the SHA-256 hex
+// hash of the raw token.
+func (s *Store) validateRefreshTokenLocked(tokenHash, clientID, resource string) *models.OAuthToken {
+	t, ok := s.tokens[tokenHash]
 	if !ok {
 		return nil
 	}
@@ -286,18 +380,20 @@ func (s *Store) validateRefreshTokenLocked(token, clientID, resource string) *mo
 // Returns nil if the token is invalid. This prevents TOCTOU races where
 // two concurrent refresh requests could both succeed with the same token.
 func (s *Store) ConsumeRefreshToken(token, clientID, resource string) *models.OAuthToken {
+	hash := HashSecret(token)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	t := s.validateRefreshTokenLocked(token, clientID, resource)
+	t := s.validateRefreshTokenLocked(hash, clientID, resource)
 	if t == nil {
 		return nil
 	}
 
-	delete(s.tokens, token)
+	delete(s.tokens, hash)
 
 	if s.persist != nil {
-		_ = s.persist.DeleteOAuthToken(token)
+		_ = s.persist.DeleteOAuthToken(hash)
 	}
 
 	return t
@@ -305,33 +401,34 @@ func (s *Store) ConsumeRefreshToken(token, clientID, resource string) *models.OA
 
 // DeleteToken removes a token from the store and persistent storage.
 func (s *Store) DeleteToken(token string) {
+	hash := HashSecret(token)
+
 	s.mu.Lock()
-	delete(s.tokens, token)
+
+	if t := s.tokens[hash]; t != nil && t.Kind == "access" && t.RefreshHash != "" {
+		delete(s.refreshIndex, t.RefreshHash)
+	}
+
+	delete(s.tokens, hash)
 	s.mu.Unlock()
 
 	if s.persist != nil {
-		_ = s.persist.DeleteOAuthToken(token)
+		_ = s.persist.DeleteOAuthToken(hash)
 	}
 }
 
 // DeleteAccessTokenByRefreshToken removes the access token that was
-// paired with the given refresh token. This ensures old access tokens
-// are revoked when a refresh token is consumed.
+// paired with the given refresh token. Uses the refreshIndex for O(1)
+// lookup instead of scanning all tokens.
 func (s *Store) DeleteAccessTokenByRefreshToken(refreshToken string) {
+	refreshHash := HashSecret(refreshToken)
+
 	s.mu.Lock()
 
-	var found string
-
-	for k, t := range s.tokens {
-		if t.Kind == "access" && t.RefreshToken == refreshToken {
-			found = k
-
-			break
-		}
-	}
-
+	found := s.refreshIndex[refreshHash]
 	if found != "" {
 		delete(s.tokens, found)
+		delete(s.refreshIndex, refreshHash)
 	}
 
 	s.mu.Unlock()
@@ -433,6 +530,211 @@ func (s *Store) ConsumeCSRF(token, clientID, redirectURI string) bool {
 	}
 
 	return entry.clientID == clientID && entry.redirectURI == redirectURI
+}
+
+// ValidateClientSecret checks the provided secret against the stored
+// SHA-256 hash for the given client. Returns false if the client does
+// not exist or has no secret hash.
+//
+// The stored hash is read under the lock, then the comparison happens
+// outside the lock to avoid holding it during the hash computation.
+// A dummy hash is used for missing clients so the code path (hash +
+// constant-time compare) is identical regardless of client existence.
+func (s *Store) ValidateClientSecret(clientID, secret string) bool {
+	s.mu.RLock()
+
+	storedHash := ""
+	if client, ok := s.clients[clientID]; ok {
+		storedHash = client.SecretHash
+	}
+
+	s.mu.RUnlock()
+
+	if storedHash == "" {
+		storedHash = dummyHash
+	}
+
+	computed := HashSecret(secret)
+
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(storedHash)) == 1
+}
+
+// RegisterPreConfiguredClient stores a pre-configured client (from
+// MCP_CLIENT_CREDENTIALS) with its secret hash and grant types. Unlike
+// RegisterClient, this bypasses the maxClients cap since pre-configured
+// clients are operator-managed.
+func (s *Store) RegisterPreConfiguredClient(client *models.OAuthClient) {
+	s.mu.Lock()
+	s.clients[client.ClientID] = client
+	s.mu.Unlock()
+
+	if s.persist != nil {
+		if err := s.persist.SaveOAuthClient(*client); err != nil && s.logger != nil {
+			s.logger.Warn("persisting pre-configured client", slog.String("error", err.Error()))
+		}
+	}
+}
+
+// RegisterAPIKey stores an API key by hashing the raw key value.
+// The raw key is never stored; only the SHA-256 hash is persisted.
+func (s *Store) RegisterAPIKey(rawKey, userID string) {
+	hash := HashSecret(rawKey)
+	ak := &models.APIKey{
+		KeyHash:   hash,
+		UserID:    userID,
+		CreatedAt: time.Now(),
+	}
+
+	s.mu.Lock()
+	s.apiKeys[hash] = ak
+	s.mu.Unlock()
+
+	if s.persist != nil {
+		if err := s.persist.SaveAPIKey(hash, *ak); err != nil && s.logger != nil {
+			s.logger.Warn("persisting API key", slog.String("error", err.Error()))
+		}
+	}
+}
+
+// ValidateAPIKey checks if a raw API key is registered. Returns nil
+// if the key is not found. The lookup is by SHA-256 hash of the raw
+// key, which is the map key. No constant-time compare is needed here
+// because the map lookup itself is the authentication gate (unlike
+// ValidateClientSecret where the secret is compared against a stored
+// hash for a known client_id).
+func (s *Store) ValidateAPIKey(rawKey string) *models.APIKey {
+	hash := HashSecret(rawKey)
+
+	s.mu.RLock()
+	ak := s.apiKeys[hash]
+	s.mu.RUnlock()
+
+	return ak
+}
+
+// RevokeAPIKey removes an API key by its hash.
+func (s *Store) RevokeAPIKey(keyHash string) {
+	s.mu.Lock()
+	delete(s.apiKeys, keyHash)
+	s.mu.Unlock()
+
+	if s.persist != nil {
+		_ = s.persist.DeleteAPIKey(keyHash)
+	}
+}
+
+// ListAPIKeys returns all registered API keys.
+func (s *Store) ListAPIKeys() []*models.APIKey {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	keys := make([]*models.APIKey, 0, len(s.apiKeys))
+	for _, ak := range s.apiKeys {
+		keys = append(keys, ak)
+	}
+
+	return keys
+}
+
+// ReconcileClients removes any persisted pre-configured clients not present
+// in the provided set of current client IDs. Returns the number of clients
+// removed. Call after registering all config-based clients to purge stale
+// entries that were removed from MCP_CLIENT_CREDENTIALS between restarts.
+// Only clients with GrantTypes == ["client_credentials"] are considered
+// pre-configured; dynamically registered clients are left untouched.
+func (s *Store) ReconcileClients(currentClientIDs map[string]struct{}) int {
+	s.mu.Lock()
+
+	var stale []string
+
+	for id, client := range s.clients {
+		if _, ok := currentClientIDs[id]; ok {
+			continue
+		}
+
+		// Only remove pre-configured client_credentials clients.
+		// Dynamically registered clients (authorization_code) are
+		// managed through their own lifecycle.
+		if len(client.GrantTypes) == 1 && client.GrantTypes[0] == "client_credentials" {
+			stale = append(stale, id)
+		}
+	}
+
+	for _, id := range stale {
+		delete(s.clients, id)
+	}
+
+	s.mu.Unlock()
+
+	if s.persist != nil {
+		for _, id := range stale {
+			_ = s.persist.DeleteOAuthClient(id)
+		}
+	}
+
+	return len(stale)
+}
+
+// ReconcileAPIKeys removes any persisted API keys not present in the
+// provided set of current key hashes. Returns the number of keys removed.
+// Call after registering all config-based keys to purge stale entries
+// that were removed from MCP_API_KEYS between restarts.
+func (s *Store) ReconcileAPIKeys(currentHashes map[string]struct{}) int {
+	s.mu.Lock()
+
+	var stale []string
+
+	for hash := range s.apiKeys {
+		if _, ok := currentHashes[hash]; !ok {
+			stale = append(stale, hash)
+		}
+	}
+
+	for _, hash := range stale {
+		delete(s.apiKeys, hash)
+	}
+
+	s.mu.Unlock()
+
+	if s.persist != nil {
+		for _, hash := range stale {
+			_ = s.persist.DeleteAPIKey(hash)
+		}
+	}
+
+	return len(stale)
+}
+
+// HashSecret returns the hex-encoded SHA-256 hash of a secret string.
+func HashSecret(secret string) string {
+	h := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(h[:])
+}
+
+// ClientAllowsGrant checks whether the client is permitted to use the
+// given grant type. Clients without explicit GrantTypes default to
+// authorization_code for backward compatibility.
+func (s *Store) ClientAllowsGrant(clientID, grantType string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	client, ok := s.clients[clientID]
+	if !ok {
+		return false
+	}
+
+	grants := client.GrantTypes
+	if len(grants) == 0 {
+		grants = []string{"authorization_code"}
+	}
+
+	for _, g := range grants {
+		if g == grantType {
+			return true
+		}
+	}
+
+	return false
 }
 
 // RandomHex generates a cryptographically random hex string of the given byte length.

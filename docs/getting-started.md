@@ -14,7 +14,10 @@ Copy the example config and fill in your credentials:
 
 ```bash
 cp .env.example .env
+chmod 600 .env
 ```
+
+The `.env` file contains sensitive credentials. The `chmod 600` restricts it to your user only. vault-sync warns at startup if the file is group- or world-readable.
 
 Edit `.env` and set these values:
 
@@ -23,8 +26,23 @@ OBSIDIAN_EMAIL=your@email.com
 OBSIDIAN_PASSWORD=your-obsidian-password
 OBSIDIAN_VAULT_PASSWORD=your-vault-encryption-password
 MCP_SERVER_URL=https://your-server.example.com
-MCP_AUTH_USERS=alice:a-strong-password
 ```
+
+Then choose at least one authentication method:
+
+```
+# Option 1: Login credentials for browser-based OAuth (authorization code flow)
+MCP_AUTH_USERS=alice:a-strong-password
+
+# Option 2: Pre-configured client credentials for headless OAuth (client_credentials flow)
+MCP_CLIENT_CREDENTIALS=my-bot:a-strong-random-secret
+
+# Option 3: Static API key for the simplest setup
+# Generate a key with: echo "vs_$(openssl rand -hex 32)"
+MCP_API_KEYS=alice:vs_<your-generated-key>
+```
+
+You can combine multiple methods. At least one must be set when MCP is enabled.
 
 If you have multiple vaults, set `OBSIDIAN_VAULT_NAME` to the one you want to sync. Otherwise it auto-detects.
 
@@ -76,7 +94,9 @@ just build
 
 ## 5. Set MCP_SERVER_URL
 
-`MCP_SERVER_URL` tells the OAuth flow where the server lives. For local use, plain HTTP works fine:
+`MCP_SERVER_URL` is the base URL for your server, without `/mcp`. It is used as the OAuth resource identifier and to build discovery endpoints. MCP clients append `/mcp` to this URL when connecting.
+
+For local use, plain HTTP works fine:
 
 ```
 MCP_SERVER_URL=http://localhost:8090
@@ -109,9 +129,62 @@ vault.yourdomain.com {
 
 Set `MCP_SERVER_URL` to your public URL (e.g. `https://vault.yourdomain.com`).
 
-## 6. Connect an MCP client
+## 6. Authentication
 
-Point your MCP client at the server URL. vault-sync uses OAuth 2.1 with PKCE, so clients that support MCP authentication will handle the login flow automatically.
+vault-sync supports three authentication methods. Choose the one that fits your setup.
+
+### Browser-based login (authorization code + PKCE)
+
+Requires `MCP_AUTH_USERS`. MCP clients that support OAuth handle this automatically:
+
+1. Your MCP client discovers the OAuth endpoints from vault-sync's `/.well-known/oauth-authorization-server`
+2. The client registers itself via `/oauth/register` (one-time, automatic)
+3. The client opens a browser window pointing to vault-sync's login page
+4. You enter the username and password you configured in `MCP_AUTH_USERS`
+5. vault-sync redirects back to the client with an authorization code
+6. The client exchanges the code for an access token
+7. The client uses the access token for all subsequent requests to `/mcp`
+
+Access tokens expire after 1 hour. The client refreshes them automatically using a refresh token, so you only log in once.
+
+### Headless OAuth (client_credentials)
+
+For automated pipelines and headless MCP clients that cannot open a browser. Requires `MCP_CLIENT_CREDENTIALS`.
+
+The client authenticates by posting its `client_id` and `client_secret` directly to the token endpoint. No browser interaction is needed. See the [authentication documentation](auth.md) for request examples.
+
+### API key
+
+The simplest option. No OAuth flow needed. Generate a key, add it to your config, and use it as a Bearer token.
+
+Generate a key:
+
+```bash
+echo "vs_$(openssl rand -hex 32)"
+```
+
+Add it to `.env`:
+
+```
+MCP_API_KEYS=alice:vs_a1b2c3...your-generated-key
+```
+
+The user ID (`alice` above) is an arbitrary label used for audit logging. It does not need to match any `MCP_AUTH_USERS` entry.
+
+MCP clients that support Bearer token auth can use the key directly. For clients that need manual configuration, set the `Authorization` header:
+
+```
+Authorization: Bearer vs_a1b2c3...your-generated-key
+```
+
+## 7. Connect an MCP client
+
+There are two URLs to know:
+
+| URL | Used for |
+|---|---|
+| `https://your-server.example.com` | `MCP_SERVER_URL` env var. OAuth discovery, token endpoints, resource identifier. No `/mcp` suffix. |
+| `https://your-server.example.com/mcp` | MCP client connection URL. This is what you put in your client config. |
 
 ### Claude Desktop
 
@@ -121,19 +194,37 @@ Add to your Claude Desktop config (`claude_desktop_config.json`):
 {
   "mcpServers": {
     "vault-sync": {
-      "url": "https://vault.yourdomain.com/mcp"
+      "url": "https://your-server.example.com/mcp"
     }
   }
 }
 ```
 
-Claude will prompt you to authorize through the OAuth login page on first connection.
+Claude handles OAuth automatically. It will open a browser for you to log in on first connection.
+
+### API key clients (OpenCode, custom agents)
+
+For clients that use a static API key instead of OAuth, pass the key as a Bearer token in the headers. The URL still ends with `/mcp`:
+
+```json
+{
+  "mcpServers": {
+    "vault-sync": {
+      "type": "remote",
+      "url": "https://your-server.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer vs_<your-generated-key>"
+      }
+    }
+  }
+}
+```
 
 ### Other MCP clients
 
-Any MCP client that supports Streamable HTTP transport can connect. Point it at `https://your-server.example.com/mcp`. The client handles OAuth discovery and authentication automatically via the `/.well-known/oauth-authorization-server` endpoint.
+Any MCP client that supports Streamable HTTP transport can connect. Point it at `https://your-server.example.com/mcp`. Clients with OAuth support handle discovery and authentication automatically via `/.well-known/oauth-authorization-server`.
 
-## 7. Verify
+## 8. Verify
 
 Once connected, ask your assistant to list your vault:
 

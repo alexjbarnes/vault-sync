@@ -2,10 +2,12 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"html/template"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +16,17 @@ import (
 
 	"github.com/alexjbarnes/vault-sync/internal/models"
 )
+
+// remoteIP extracts the IP address from r.RemoteAddr, stripping the
+// port. Falls back to the raw value if parsing fails.
+func remoteIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+
+	return host
+}
 
 // resourceMatches compares a client-supplied resource URI against the
 // server's canonical URL. Trailing slashes are stripped before comparison
@@ -240,16 +253,36 @@ func (rl *loginRateLimiter) record(ip string) {
 	rl.mu.Unlock()
 }
 
-// HandleAuthorize returns the /oauth/authorize handler. The serverURL is
-// the canonical resource identifier (RFC 8707) used to validate the
-// resource parameter that clients include in authorization requests.
+// redirectWithError redirects the user-agent back to the client with an
+// error response per RFC 6749 Section 4.1.2.1. This must only be called
+// after the redirect_uri and client_id have been validated.
+func redirectWithError(w http.ResponseWriter, r *http.Request, redirectURI, state, errCode, description string) {
+	params := url.Values{}
+	params.Set("error", errCode)
+	params.Set("error_description", description)
+
+	if state != "" {
+		params.Set("state", state)
+	}
+
+	sep := "?"
+	if strings.Contains(redirectURI, "?") {
+		sep = "&"
+	}
+
+	http.Redirect(w, r, redirectURI+sep+params.Encode(), http.StatusFound)
+}
+
+// HandleAuthorize returns the /oauth/authorize handler. The serverURL
+// serves as both the canonical resource identifier (RFC 8707) and the
+// issuer identifier for mix-up attack prevention (RFC 9207).
 func HandleAuthorize(store *Store, users UserCredentials, logger *slog.Logger, serverURL string) http.HandlerFunc {
 	limiter := newLoginRateLimiter()
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			handleAuthorizeGET(w, r, store, serverURL)
+			handleAuthorizeGET(w, r, store, logger, serverURL)
 		case http.MethodPost:
 			handleAuthorizePOST(w, r, store, users, logger, limiter, serverURL)
 		default:
@@ -259,15 +292,73 @@ func HandleAuthorize(store *Store, users UserCredentials, logger *slog.Logger, s
 }
 
 // validateRedirectURI checks that redirectURI matches one of the client's
-// registered redirect_uris. Returns true if valid.
+// registered redirect_uris. Exact match is required for HTTPS URIs.
+// For localhost URIs (http://127.0.0.1 or http://localhost), prefix
+// matching is used so any port and path are accepted. This follows
+// RFC 8252 Section 7.3 which allows dynamic ports for loopback redirects.
+//
+// When a client has no registered redirect URIs, only loopback URIs
+// are accepted. This prevents open redirect attacks where an attacker
+// uses a known client_id to redirect authorization codes to an
+// external server they control.
 func validateRedirectURI(client *models.OAuthClient, redirectURI string) bool {
+	if len(client.RedirectURIs) == 0 {
+		u, err := url.Parse(redirectURI)
+		if err != nil {
+			return false
+		}
+
+		return u.Scheme == "http" && isLoopbackHost(u.Hostname())
+	}
+
 	for _, registered := range client.RedirectURIs {
 		if redirectURI == registered {
+			return true
+		}
+
+		// RFC 8252 Section 7.3: loopback redirect URIs may use any
+		// port. Parse both as URLs and compare hostnames to prevent
+		// DNS confusion (e.g. 127.0.0.1.evil.com).
+		if isLocalhostPrefix(registered) && isLoopbackRedirect(redirectURI, registered) {
 			return true
 		}
 	}
 
 	return false
+}
+
+// isLocalhostPrefix returns true if the URI is an HTTP loopback prefix
+// (http://127.0.0.1) without a port or path, making it suitable for
+// prefix matching per RFC 8252 Section 7.3. DNS names like "localhost"
+// are excluded to prevent DNS rebinding attacks.
+func isLocalhostPrefix(uri string) bool {
+	return uri == "http://127.0.0.1" || uri == "http://[::1]"
+}
+
+// isLoopbackHost returns true if the hostname is a literal loopback IP.
+// Per RFC 8252 Section 8.3, only literal IPs are accepted. DNS names
+// like "localhost" are excluded because they can resolve to non-loopback
+// addresses on misconfigured resolvers or via DNS rebinding attacks.
+func isLoopbackHost(host string) bool {
+	return host == "127.0.0.1" || host == "::1"
+}
+
+// isLoopbackRedirect checks if redirectURI is a valid loopback redirect
+// matching the registered prefix URI. It parses both as URLs and
+// compares scheme and hostname to prevent DNS confusion attacks
+// (e.g. 127.0.0.1.evil.com matching a 127.0.0.1 prefix).
+func isLoopbackRedirect(redirectURI, registeredPrefix string) bool {
+	ru, err := url.Parse(redirectURI)
+	if err != nil {
+		return false
+	}
+
+	pu, err := url.Parse(registeredPrefix)
+	if err != nil {
+		return false
+	}
+
+	return ru.Scheme == pu.Scheme && ru.Hostname() == pu.Hostname()
 }
 
 // generateCSRFToken creates a random CSRF token bound to specific
@@ -284,8 +375,9 @@ func generateCSRFToken(store *Store, clientID, redirectURI string) string {
 	return token
 }
 
-func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, serverURL string) {
+func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, logger *slog.Logger, serverURL string) {
 	q := r.URL.Query()
+	ip := remoteIP(r)
 
 	clientID := q.Get("client_id")
 	if clientID == "" {
@@ -295,7 +387,24 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, se
 
 	client := store.GetClient(clientID)
 	if client == nil {
+		logger.Debug("authorize: unknown client_id",
+			slog.String("client_id", clientID),
+			slog.String("ip", ip),
+		)
 		http.Error(w, "unknown client_id", http.StatusBadRequest)
+
+		return
+	}
+
+	// Reject clients that are only authorized for client_credentials.
+	// They should authenticate directly at the token endpoint.
+	if !store.ClientAllowsGrant(clientID, "authorization_code") {
+		logger.Debug("authorize: client not allowed for authorization_code grant",
+			slog.String("client_id", clientID),
+			slog.String("ip", ip),
+		)
+		http.Error(w, "client is not authorized for the authorization code flow", http.StatusBadRequest)
+
 		return
 	}
 
@@ -310,19 +419,48 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, se
 			return
 		}
 	} else if !validateRedirectURI(client, redirectURI) {
+		logger.Debug("authorize: redirect_uri rejected",
+			slog.String("client_id", clientID),
+			slog.String("redirect_uri", redirectURI),
+			slog.String("ip", ip),
+		)
 		http.Error(w, "redirect_uri not registered for this client", http.StatusBadRequest)
+
+		return
+	}
+
+	// RFC 6749 Section 4.1.1: response_type is REQUIRED and must be "code".
+	// Errors after redirect_uri validation are returned as query params on
+	// the redirect URI per RFC 6749 Section 4.1.2.1.
+	responseType := q.Get("response_type")
+	state := q.Get("state")
+
+	if responseType != "code" {
+		errCode := "unsupported_response_type"
+		if responseType == "" {
+			errCode = "invalid_request"
+		}
+
+		logger.Debug("authorize: invalid response_type",
+			slog.String("client_id", clientID),
+			slog.String("response_type", responseType),
+			slog.String("redirect_uri", redirectURI),
+			slog.String("ip", ip),
+		)
+		redirectWithError(w, r, redirectURI, state, errCode, "response_type must be \"code\"")
+
 		return
 	}
 
 	codeChallenge := q.Get("code_challenge")
 	if codeChallenge == "" {
-		http.Error(w, "code_challenge is required (PKCE)", http.StatusBadRequest)
+		redirectWithError(w, r, redirectURI, state, "invalid_request", "code_challenge is required (PKCE)")
 		return
 	}
 
 	codeChallengeMethod := q.Get("code_challenge_method")
 	if codeChallengeMethod != "" && codeChallengeMethod != "S256" {
-		http.Error(w, "only S256 code_challenge_method is supported", http.StatusBadRequest)
+		redirectWithError(w, r, redirectURI, state, "invalid_request", "only S256 code_challenge_method is supported")
 		return
 	}
 
@@ -330,7 +468,7 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, se
 	// but we tolerate its absence for backward compatibility.
 	resource := q.Get("resource")
 	if resource != "" && !resourceMatches(resource, serverURL) {
-		http.Error(w, "resource parameter does not match this server", http.StatusBadRequest)
+		redirectWithError(w, r, redirectURI, state, "invalid_request", "resource parameter does not match this server")
 		return
 	}
 
@@ -339,14 +477,23 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, se
 		ClientID:            clientID,
 		ClientName:          client.ClientName,
 		RedirectURI:         redirectURI,
-		State:               q.Get("state"),
+		State:               state,
 		CodeChallenge:       codeChallenge,
 		CodeChallengeMethod: codeChallengeMethod,
 		Scope:               q.Get("scope"),
 		Resource:            resource,
 	}
 
+	logger.Debug("authorize: login page served",
+		slog.String("client_id", clientID),
+		slog.String("redirect_uri", redirectURI),
+		slog.String("response_type", responseType),
+		slog.String("ip", ip),
+	)
+
 	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	_ = loginPage.Execute(w, data)
 }
 
@@ -358,6 +505,7 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		return
 	}
 
+	ip := remoteIP(r)
 	clientID := r.FormValue("client_id")
 	redirectURI := r.FormValue("redirect_uri")
 	state := r.FormValue("state")
@@ -369,7 +517,12 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 
 	client := store.GetClient(clientID)
 	if client == nil {
+		logger.Debug("authorize POST: unknown client_id",
+			slog.String("client_id", clientID),
+			slog.String("ip", ip),
+		)
 		http.Error(w, "unknown client_id", http.StatusBadRequest)
+
 		return
 	}
 
@@ -382,30 +535,31 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 			return
 		}
 	} else if !validateRedirectURI(client, redirectURI) {
+		logger.Debug("authorize POST: redirect_uri rejected",
+			slog.String("client_id", clientID),
+			slog.String("redirect_uri", redirectURI),
+			slog.String("ip", ip),
+		)
 		http.Error(w, "redirect_uri not registered for this client", http.StatusBadRequest)
+
 		return
 	}
 
-	// PKCE is mandatory.
+	// PKCE is mandatory. Return error as redirect since client_id and
+	// redirect_uri have been validated.
 	if codeChallenge == "" {
-		http.Error(w, "code_challenge is required (PKCE)", http.StatusBadRequest)
+		redirectWithError(w, r, redirectURI, state, "invalid_request", "code_challenge is required (PKCE)")
 		return
 	}
 
 	// RFC 8707: validate resource parameter matches this server.
 	if resource != "" && !resourceMatches(resource, serverURL) {
-		http.Error(w, "resource parameter does not match this server", http.StatusBadRequest)
+		redirectWithError(w, r, redirectURI, state, "invalid_request", "resource parameter does not match this server")
 		return
 	}
 
-	// CSRF validation.
-	if !store.ConsumeCSRF(csrfToken, clientID, redirectURI) {
-		http.Error(w, "invalid or expired CSRF token", http.StatusForbidden)
-		return
-	}
-
-	// Rate limiting by remote IP.
-	ip := r.RemoteAddr
+	// Rate limiting by remote IP. Check before consuming CSRF so a
+	// rate-limited request does not destroy the user's CSRF token.
 	if limiter.check(ip) {
 		logger.Warn("login rate limited", slog.String("ip", ip))
 		http.Error(w, "too many failed login attempts, try again later", http.StatusTooManyRequests)
@@ -413,10 +567,33 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		return
 	}
 
-	// Validate credentials using constant-time comparison to prevent
-	// timing side channels from leaking whether the username exists.
+	// CSRF validation. A failed CSRF check may indicate a cross-site
+	// attack, so return a plain error rather than redirecting to the
+	// client (which could be the attacker's URI in a forged form).
+	if !store.ConsumeCSRF(csrfToken, clientID, redirectURI) {
+		logger.Warn("authorize POST: CSRF validation failed",
+			slog.String("client_id", clientID),
+			slog.String("redirect_uri", redirectURI),
+			slog.String("ip", ip),
+		)
+		http.Error(w, "invalid or expired CSRF token", http.StatusForbidden)
+
+		return
+	}
+
+	// Validate credentials. Both sides are SHA-256 hashed before
+	// comparison to normalize length. subtle.ConstantTimeCompare
+	// returns 0 immediately when lengths differ, which would leak
+	// password length if raw values were compared.
 	expected, ok := users[username]
-	if !ok || subtle.ConstantTimeCompare([]byte(expected), []byte(password)) != 1 {
+	if !ok {
+		expected = "\x00invalid"
+	}
+
+	expectedH := sha256.Sum256([]byte(expected))
+	passwordH := sha256.Sum256([]byte(password))
+
+	if !ok || subtle.ConstantTimeCompare(expectedH[:], passwordH[:]) != 1 {
 		logger.Warn("login failed", slog.String("username", username))
 		limiter.record(ip)
 
@@ -434,15 +611,26 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		}
 
 		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = loginPage.Execute(w, data)
 
 		return
 	}
 
-	logger.Info("login successful", slog.String("username", username))
+	logger.Info("login successful",
+		slog.String("username", username),
+		slog.String("client_id", clientID),
+		slog.String("redirect_uri", redirectURI),
+		slog.String("ip", ip),
+	)
 
 	// Issue authorization code bound to the resource (RFC 8707).
+	// Scopes are not propagated because there is no defined set of
+	// scopes to validate against. Storing unvalidated client-supplied
+	// scopes on the token creates a privilege escalation risk if
+	// scope-based access control is added later.
 	code := RandomHex(authCodeBytes)
 	store.SaveCode(&Code{
 		Code:          code,
@@ -454,7 +642,9 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		ExpiresAt:     time.Now().Add(codeExpiry),
 	})
 
-	// Build redirect URL with proper encoding.
+	// Build redirect URL with proper encoding. Use "&" if the
+	// redirect URI already contains a query component (RFC 6749
+	// Section 4.1.2 requires retaining existing query parameters).
 	params := url.Values{}
 	params.Set("code", code)
 
@@ -462,6 +652,16 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		params.Set("state", state)
 	}
 
-	redirectURL := redirectURI + "?" + params.Encode()
+	// RFC 9207: include the issuer identifier to prevent mix-up attacks.
+	if serverURL != "" {
+		params.Set("iss", serverURL)
+	}
+
+	sep := "?"
+	if strings.Contains(redirectURI, "?") {
+		sep = "&"
+	}
+
+	redirectURL := redirectURI + sep + params.Encode()
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 }

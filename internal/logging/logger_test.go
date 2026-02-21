@@ -10,7 +10,7 @@ import (
 )
 
 func TestNewLogger_Production_JSONHandler(t *testing.T) {
-	logger := NewLogger("production")
+	logger := NewLogger("production", "")
 	require.NotNil(t, logger)
 
 	handler := logger.Handler()
@@ -19,7 +19,7 @@ func TestNewLogger_Production_JSONHandler(t *testing.T) {
 }
 
 func TestNewLogger_Development_TextHandler(t *testing.T) {
-	logger := NewLogger("development")
+	logger := NewLogger("development", "")
 	require.NotNil(t, logger)
 
 	handler := logger.Handler()
@@ -28,7 +28,7 @@ func TestNewLogger_Development_TextHandler(t *testing.T) {
 }
 
 func TestNewLogger_EmptyEnv_TextHandler(t *testing.T) {
-	logger := NewLogger("")
+	logger := NewLogger("", "")
 	require.NotNil(t, logger)
 
 	handler := logger.Handler()
@@ -37,7 +37,7 @@ func TestNewLogger_EmptyEnv_TextHandler(t *testing.T) {
 }
 
 func TestNewLogger_UnknownEnv_TextHandler(t *testing.T) {
-	logger := NewLogger("staging")
+	logger := NewLogger("staging", "")
 	require.NotNil(t, logger)
 
 	handler := logger.Handler()
@@ -46,15 +46,48 @@ func TestNewLogger_UnknownEnv_TextHandler(t *testing.T) {
 }
 
 func TestNewLogger_Production_InfoLevel(t *testing.T) {
-	logger := NewLogger("production")
+	logger := NewLogger("production", "")
 	// Production should log at Info but not Debug.
 	assert.True(t, logger.Handler().Enabled(context.TODO(), slog.LevelInfo))
 	assert.False(t, logger.Handler().Enabled(context.TODO(), slog.LevelDebug))
 }
 
 func TestNewLogger_Development_DebugLevel(t *testing.T) {
-	logger := NewLogger("development")
+	logger := NewLogger("development", "")
 	// Development should log at Debug level.
 	assert.True(t, logger.Handler().Enabled(context.TODO(), slog.LevelDebug))
 	assert.True(t, logger.Handler().Enabled(context.TODO(), slog.LevelInfo))
+}
+
+func TestNewLogger_LevelOverride_Warn(t *testing.T) {
+	logger := NewLogger("development", "warn")
+	// Explicit warn level should suppress info and debug.
+	assert.True(t, logger.Handler().Enabled(context.TODO(), slog.LevelWarn))
+	assert.False(t, logger.Handler().Enabled(context.TODO(), slog.LevelInfo))
+	assert.False(t, logger.Handler().Enabled(context.TODO(), slog.LevelDebug))
+}
+
+func TestNewLogger_LevelOverride_Error(t *testing.T) {
+	logger := NewLogger("development", "error")
+	assert.True(t, logger.Handler().Enabled(context.TODO(), slog.LevelError))
+	assert.False(t, logger.Handler().Enabled(context.TODO(), slog.LevelWarn))
+}
+
+func TestNewLogger_LevelOverride_Debug_Production(t *testing.T) {
+	logger := NewLogger("production", "debug")
+	// Explicit debug level overrides the production default.
+	assert.True(t, logger.Handler().Enabled(context.TODO(), slog.LevelDebug))
+}
+
+func TestNewLogger_LevelOverride_CaseInsensitive(t *testing.T) {
+	logger := NewLogger("production", "WARN")
+	assert.True(t, logger.Handler().Enabled(context.TODO(), slog.LevelWarn))
+	assert.False(t, logger.Handler().Enabled(context.TODO(), slog.LevelInfo))
+}
+
+func TestNewLogger_LevelOverride_Unknown(t *testing.T) {
+	// Unknown level string falls back to environment default.
+	logger := NewLogger("production", "bogus")
+	assert.True(t, logger.Handler().Enabled(context.TODO(), slog.LevelInfo))
+	assert.False(t, logger.Handler().Enabled(context.TODO(), slog.LevelDebug))
 }

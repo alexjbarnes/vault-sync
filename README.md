@@ -27,9 +27,19 @@ vault-sync is a single binary with two features that can be enabled independentl
 - Three-way merge for `.md` files, shallow JSON merge for `.obsidian/` config
 - Real-time file watching with debounce and offline queue
 - MCP server with 8 tools: list, read, search, write, edit, delete, move, copy ([docs](docs/mcp.md))
-- OAuth 2.1 with PKCE, dynamic client registration, and refresh token rotation
+- OAuth 2.1 authentication (authorization code with PKCE, client credentials for headless clients, dynamic client registration, refresh token rotation)
 - Full-text search using ripgrep (with Go fallback)
 - Cross-platform: Linux, macOS, Windows
+
+## Authentication
+
+| Method | Status | Use case |
+|---|---|---|
+| OAuth 2.1 (authorization code + PKCE) | Supported | Interactive login from browser-based MCP clients |
+| OAuth 2.1 (client credentials) | Supported | Headless agents and CI/CD pipelines |
+| API key | Supported | Single static token for simple deployments |
+
+See [authentication documentation](docs/auth.md) for setup and usage.
 
 ## Quick Start
 
@@ -53,6 +63,7 @@ All configuration via environment variables or `.env` file.
 | `OBSIDIAN_VAULT_PASSWORD` | Yes | Vault encryption password |
 | `OBSIDIAN_VAULT_NAME` | No | Vault name (auto-detected if only one exists) |
 | `OBSIDIAN_SYNC_DIR` | No | Local directory for vault files (defaults to `~/.vault-sync/vaults/<id>/`) |
+| `DEVICE_NAME` | No | Device name reported to sync server (default: system hostname, falls back to `vault-sync`) |
 | `ENABLE_SYNC` | No | Enable sync (default: `true`) |
 
 ### MCP Server
@@ -60,9 +71,15 @@ All configuration via environment variables or `.env` file.
 | Variable | Required | Description |
 |---|---|---|
 | `ENABLE_MCP` | No | Enable MCP server (default: `false`) |
-| `MCP_SERVER_URL` | When MCP enabled | Public HTTPS URL (OAuth resource identifier) |
-| `MCP_AUTH_USERS` | When MCP enabled | Comma-separated `user:password` pairs |
+| `MCP_SERVER_URL` | When MCP enabled | Base URL without `/mcp` (e.g. `https://vault.example.com`). MCP clients connect to `MCP_SERVER_URL/mcp`. |
+| `MCP_AUTH_USERS` | Conditional | Comma-separated `user:password` pairs for the OAuth login page |
+| `MCP_CLIENT_CREDENTIALS` | No | Comma-separated `client_id:secret` pairs for headless OAuth clients ([docs](docs/auth.md)) |
+| `MCP_API_KEYS` | No | Comma-separated `user:key` pairs for API key auth. Generate keys with `echo "vs_$(openssl rand -hex 32)"` ([docs](docs/auth.md)) |
 | `MCP_LISTEN_ADDR` | No | Listen address (default: `:8090`) |
+| `MCP_LOG_LEVEL` | No | Log level: `debug`, `info`, `warn`, `error` (default: `info`) |
+| `ENVIRONMENT` | No | `production` for JSON logs, any other value for text logs (default: `development`) |
+
+At least one of `MCP_AUTH_USERS`, `MCP_CLIENT_CREDENTIALS`, or `MCP_API_KEYS` is required when MCP is enabled.
 
 ### Config Sync Toggles
 
@@ -97,8 +114,9 @@ internal/
   mcpserver/            MCP tool registration
   models/               Shared types
   obsidian/             Sync protocol implementation
+  server/               HTTP mux construction
   state/                bbolt persistence
-  vault/                Read-only vault access for MCP
+  vault/                Filesystem operations for MCP
 docker/                 Dockerfile and docker-compose.yml
 docs/                   MCP tool documentation
 ```

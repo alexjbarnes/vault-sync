@@ -829,6 +829,75 @@ func TestCopy_UpdatesIndex(t *testing.T) {
 	assert.NotNil(t, v.index.Get("copied.md"))
 }
 
+func TestCopy_SameSourceAndDest(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Copy("notes/hello.md", "notes/hello.md")
+	require.Error(t, err)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
+	assert.Contains(t, vErr.Message, "already exists")
+}
+
+func TestCopy_PreservesContent(t *testing.T) {
+	v := testVault(t)
+
+	// Copy binary content and verify byte-for-byte equality.
+	result, err := v.Copy("images/photo.png", "images/photo-copy.png")
+	require.NoError(t, err)
+	assert.True(t, result.Copied)
+	assert.Equal(t, int64(len("fake-png-data")), result.Size)
+
+	srcData, err := os.ReadFile(filepath.Join(v.Root(), "images/photo.png"))
+	require.NoError(t, err)
+	dstData, err := os.ReadFile(filepath.Join(v.Root(), "images/photo-copy.png"))
+	require.NoError(t, err)
+	assert.Equal(t, srcData, dstData)
+}
+
+func TestCopy_ProtectedDest_Subdirectory(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Copy("notes/hello.md", ".obsidian/plugins/hello.md")
+	require.Error(t, err)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
+	assert.Contains(t, vErr.Message, "copying to .obsidian/")
+}
+
+func TestCopy_SourceIsNestedDirectory(t *testing.T) {
+	v := testVault(t)
+	_, err := v.Copy("projects/archive", "backup/archive")
+	require.Error(t, err)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodeIsDirectory, vErr.Code)
+	assert.Contains(t, vErr.Message, "cannot copy directory")
+}
+
+func TestCopy_ProtectedSource_Subdirectory(t *testing.T) {
+	v := testVault(t)
+	// Create a nested file inside .obsidian.
+	abs := filepath.Join(v.Root(), ".obsidian", "plugins", "test.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(abs), 0o755))
+	require.NoError(t, os.WriteFile(abs, []byte(`{}`), 0o644))
+
+	_, err := v.Copy(".obsidian/plugins/test.json", "test.json")
+	require.Error(t, err)
+
+	vErr := &Error{}
+	ok := errors.As(err, &vErr)
+	require.True(t, ok)
+	assert.Equal(t, ErrCodePathNotAllowed, vErr.Code)
+	assert.Contains(t, vErr.Message, "copying from .obsidian/")
+}
+
 // --- buildSnippet ---
 
 func TestBuildSnippet_ShortLine(t *testing.T) {

@@ -492,21 +492,33 @@ func TestLoadAt_InvalidPath(t *testing.T) {
 func TestSaveGetOAuthToken_RoundTrip(t *testing.T) {
 	s := testDB(t)
 	tok := models.OAuthToken{
-		Token:        "tok_abc",
-		Kind:         "access",
-		UserID:       "user1",
-		Resource:     "https://example.com",
-		Scopes:       []string{"read", "write"},
-		ExpiresAt:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		RefreshToken: "ref_xyz",
-		ClientID:     "client1",
+		Token:       "tok_abc",
+		TokenHash:   "abc123hash",
+		Kind:        "access",
+		UserID:      "user1",
+		Resource:    "https://example.com",
+		Scopes:      []string{"read", "write"},
+		ExpiresAt:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		RefreshHash: "ref_xyz_hash",
+		ClientID:    "client1",
 	}
 	require.NoError(t, s.SaveOAuthToken(tok))
 
-	got, err := s.GetOAuthToken("tok_abc")
+	all, err := s.AllOAuthTokens()
 	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Equal(t, tok, *got)
+	require.Len(t, all, 1)
+
+	got := all[0]
+	// Raw secrets are cleared before persistence.
+	assert.Empty(t, got.Token)
+	assert.Empty(t, got.RefreshToken)
+	assert.Equal(t, "abc123hash", got.TokenHash)
+	assert.Equal(t, "access", got.Kind)
+	assert.Equal(t, "user1", got.UserID)
+	assert.Equal(t, "https://example.com", got.Resource)
+	assert.Equal(t, []string{"read", "write"}, got.Scopes)
+	assert.Equal(t, "ref_xyz_hash", got.RefreshHash)
+	assert.Equal(t, "client1", got.ClientID)
 }
 
 func TestGetOAuthToken_NotFound(t *testing.T) {
@@ -519,27 +531,28 @@ func TestGetOAuthToken_NotFound(t *testing.T) {
 
 func TestSaveOAuthToken_Overwrite(t *testing.T) {
 	s := testDB(t)
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "tok1", UserID: "old"}))
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "tok1", UserID: "new"}))
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "hash1", UserID: "old"}))
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "hash1", UserID: "new"}))
 
-	got, err := s.GetOAuthToken("tok1")
+	all, err := s.AllOAuthTokens()
 	require.NoError(t, err)
-	assert.Equal(t, "new", got.UserID)
+	require.Len(t, all, 1)
+	assert.Equal(t, "new", all[0].UserID)
 }
 
 func TestDeleteOAuthToken(t *testing.T) {
 	s := testDB(t)
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "tok_del"}))
-	require.NoError(t, s.DeleteOAuthToken("tok_del"))
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "hash_del", UserID: "u1"}))
+	require.NoError(t, s.DeleteOAuthToken("hash_del"))
 
-	got, err := s.GetOAuthToken("tok_del")
+	all, err := s.AllOAuthTokens()
 	require.NoError(t, err)
-	assert.Nil(t, got)
+	assert.Empty(t, all)
 }
 
 func TestDeleteOAuthToken_NonexistentIsNoOp(t *testing.T) {
 	s := testDB(t)
-	require.NoError(t, s.DeleteOAuthToken("never-existed"))
+	require.NoError(t, s.DeleteOAuthToken("nonexistent-hash"))
 }
 
 func TestAllOAuthTokens_Empty(t *testing.T) {
@@ -552,9 +565,9 @@ func TestAllOAuthTokens_Empty(t *testing.T) {
 
 func TestAllOAuthTokens_ReturnsAll(t *testing.T) {
 	s := testDB(t)
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "t1", UserID: "u1"}))
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "t2", UserID: "u2"}))
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "t3", UserID: "u3"}))
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "h1", UserID: "u1"}))
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "h2", UserID: "u2"}))
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "h3", UserID: "u3"}))
 
 	tokens, err := s.AllOAuthTokens()
 	require.NoError(t, err)
@@ -563,14 +576,14 @@ func TestAllOAuthTokens_ReturnsAll(t *testing.T) {
 
 func TestAllOAuthTokens_ExcludesDeleted(t *testing.T) {
 	s := testDB(t)
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "keep", UserID: "u1"}))
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{Token: "remove", UserID: "u2"}))
-	require.NoError(t, s.DeleteOAuthToken("remove"))
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "keep_hash", UserID: "u1"}))
+	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "remove_hash", UserID: "u2"}))
+	require.NoError(t, s.DeleteOAuthToken("remove_hash"))
 
 	tokens, err := s.AllOAuthTokens()
 	require.NoError(t, err)
 	require.Len(t, tokens, 1)
-	assert.Equal(t, "keep", tokens[0].Token)
+	assert.Equal(t, "keep_hash", tokens[0].TokenHash)
 }
 
 func TestAllOAuthTokens_CorruptJSON(t *testing.T) {
@@ -670,4 +683,62 @@ func TestOAuthClientCount_AfterInserts(t *testing.T) {
 	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c2"}))
 	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c3"}))
 	assert.Equal(t, 3, s.OAuthClientCount())
+}
+
+// --- API Keys ---
+
+func TestSaveAPIKey_RoundTrip(t *testing.T) {
+	s := testDB(t)
+
+	ak := models.APIKey{UserID: "alice"}
+	require.NoError(t, s.SaveAPIKey("hash1", ak))
+
+	keys, err := s.AllAPIKeys()
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+	assert.Equal(t, "alice", keys["hash1"].UserID)
+}
+
+func TestDeleteAPIKey(t *testing.T) {
+	s := testDB(t)
+
+	require.NoError(t, s.SaveAPIKey("hash1", models.APIKey{UserID: "alice"}))
+	require.NoError(t, s.DeleteAPIKey("hash1"))
+
+	keys, err := s.AllAPIKeys()
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+}
+
+func TestAllAPIKeys_Empty(t *testing.T) {
+	s := testDB(t)
+
+	keys, err := s.AllAPIKeys()
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+}
+
+func TestSaveAPIKey_Overwrite(t *testing.T) {
+	s := testDB(t)
+
+	require.NoError(t, s.SaveAPIKey("hash1", models.APIKey{UserID: "alice"}))
+	require.NoError(t, s.SaveAPIKey("hash1", models.APIKey{UserID: "bob"}))
+
+	keys, err := s.AllAPIKeys()
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+	assert.Equal(t, "bob", keys["hash1"].UserID)
+}
+
+func TestAllAPIKeys_Multiple(t *testing.T) {
+	s := testDB(t)
+
+	require.NoError(t, s.SaveAPIKey("h1", models.APIKey{UserID: "alice"}))
+	require.NoError(t, s.SaveAPIKey("h2", models.APIKey{UserID: "bob"}))
+
+	keys, err := s.AllAPIKeys()
+	require.NoError(t, err)
+	require.Len(t, keys, 2)
+	assert.Equal(t, "alice", keys["h1"].UserID)
+	assert.Equal(t, "bob", keys["h2"].UserID)
 }

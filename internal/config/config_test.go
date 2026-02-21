@@ -25,7 +25,10 @@ func clearConfigEnv(t *testing.T) {
 		"MCP_LISTEN_ADDR",
 		"MCP_SERVER_URL",
 		"MCP_AUTH_USERS",
+		"MCP_CLIENT_CREDENTIALS",
+		"MCP_API_KEYS",
 		"MCP_LOG_LEVEL",
+		"DEVICE_NAME",
 	} {
 		t.Setenv(key, "")
 		os.Unsetenv(key)
@@ -127,7 +130,7 @@ func TestLoad_MCPMode_MissingServerURL(t *testing.T) {
 	assert.Contains(t, err.Error(), "MCP_SERVER_URL")
 }
 
-func TestLoad_MCPMode_MissingAuthUsers(t *testing.T) {
+func TestLoad_MCPMode_MissingAllAuth(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("ENABLE_SYNC", "false")
 	t.Setenv("ENABLE_MCP", "true")
@@ -136,7 +139,7 @@ func TestLoad_MCPMode_MissingAuthUsers(t *testing.T) {
 
 	_, err := Load()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "MCP_AUTH_USERS")
+	assert.Contains(t, err.Error(), "at least one auth method")
 }
 
 // --- Load: MCP mode does not require sync fields ---
@@ -238,6 +241,17 @@ func TestLoad_DefaultDeviceName(t *testing.T) {
 	}
 
 	assert.Equal(t, hostname, cfg.DeviceName)
+}
+
+func TestLoad_ExplicitDeviceName(t *testing.T) {
+	clearConfigEnv(t)
+	setSyncEnv(t, t.TempDir())
+	t.Setenv("DEVICE_NAME", "alexs-docker")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, "alexs-docker", cfg.DeviceName)
 }
 
 func TestLoad_DefaultEnvironment(t *testing.T) {
@@ -401,4 +415,178 @@ func TestValidate_MCPAllPresent(t *testing.T) {
 		MCPAuthUsers: "user:hash",
 	}
 	assert.NoError(t, cfg.validate())
+}
+
+// --- ParseMCPClientCredentials ---
+
+func TestParseMCPClientCredentials_Valid(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "bot1:secret1234567890,bot2:secret0987654321"}
+	creds, err := cfg.ParseMCPClientCredentials()
+	require.NoError(t, err)
+	require.Len(t, creds, 2)
+	assert.Equal(t, "bot1", creds[0].ClientID)
+	assert.Equal(t, "secret1234567890", creds[0].Secret)
+	assert.Equal(t, "bot2", creds[1].ClientID)
+	assert.Equal(t, "secret0987654321", creds[1].Secret)
+}
+
+func TestParseMCPClientCredentials_Single(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "bot:s3cret-long-enough"}
+	creds, err := cfg.ParseMCPClientCredentials()
+	require.NoError(t, err)
+	require.Len(t, creds, 1)
+	assert.Equal(t, "bot", creds[0].ClientID)
+	assert.Equal(t, "s3cret-long-enough", creds[0].Secret)
+}
+
+func TestParseMCPClientCredentials_Empty(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: ""}
+	creds, err := cfg.ParseMCPClientCredentials()
+	require.NoError(t, err)
+	assert.Nil(t, creds)
+}
+
+func TestParseMCPClientCredentials_MissingColon(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "invalid"}
+	_, err := cfg.ParseMCPClientCredentials()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing ':'")
+}
+
+func TestParseMCPClientCredentials_EmptyClientID(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: ":secret"}
+	_, err := cfg.ParseMCPClientCredentials()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty client_id or secret")
+}
+
+func TestParseMCPClientCredentials_EmptySecret(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "bot:"}
+	_, err := cfg.ParseMCPClientCredentials()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty client_id or secret")
+}
+
+func TestParseMCPClientCredentials_ColonInSecret(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "bot:secret:with:colons"}
+	creds, err := cfg.ParseMCPClientCredentials()
+	require.NoError(t, err)
+	require.Len(t, creds, 1)
+	assert.Equal(t, "bot", creds[0].ClientID)
+	assert.Equal(t, "secret:with:colons", creds[0].Secret)
+}
+
+// --- ParseMCPAPIKeys ---
+
+func TestParseMCPAPIKeys_Valid(t *testing.T) {
+	key := "vs_" + hexString(32)
+	cfg := &Config{MCPAPIKeys: "bot:" + key}
+	entries, err := cfg.ParseMCPAPIKeys()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "bot", entries[0].UserID)
+	assert.Equal(t, key, entries[0].Key)
+}
+
+func TestParseMCPAPIKeys_Empty(t *testing.T) {
+	cfg := &Config{MCPAPIKeys: ""}
+	entries, err := cfg.ParseMCPAPIKeys()
+	require.NoError(t, err)
+	assert.Nil(t, entries)
+}
+
+func TestParseMCPAPIKeys_MissingPrefix(t *testing.T) {
+	cfg := &Config{MCPAPIKeys: "bot:" + hexString(32)}
+	_, err := cfg.ParseMCPAPIKeys()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vs_")
+}
+
+func TestParseMCPAPIKeys_TooShort(t *testing.T) {
+	cfg := &Config{MCPAPIKeys: "bot:vs_abcd"}
+	_, err := cfg.ParseMCPAPIKeys()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "too short")
+}
+
+func TestParseMCPAPIKeys_NonHexChars(t *testing.T) {
+	// 64 chars but with non-hex characters (Z, G, etc.)
+	badKey := "vs_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+	cfg := &Config{MCPAPIKeys: "bot:" + badKey}
+	_, err := cfg.ParseMCPAPIKeys()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "non-hex")
+}
+
+func TestParseMCPAPIKeys_OddHexLength(t *testing.T) {
+	// 65 hex chars after prefix = odd length, hex.DecodeString rejects this.
+	oddKey := "vs_" + hexString(32) + "a"
+	cfg := &Config{MCPAPIKeys: "bot:" + oddKey}
+	_, err := cfg.ParseMCPAPIKeys()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "non-hex")
+}
+
+// --- ParseMCPClientCredentials: minimum secret length ---
+
+func TestParseMCPClientCredentials_SecretTooShort(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "bot:short"}
+	_, err := cfg.ParseMCPClientCredentials()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "too short")
+	assert.Contains(t, err.Error(), "16")
+}
+
+func TestParseMCPClientCredentials_SecretMinLength(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "bot:1234567890123456"}
+	creds, err := cfg.ParseMCPClientCredentials()
+	require.NoError(t, err)
+	require.Len(t, creds, 1)
+	assert.Equal(t, "1234567890123456", creds[0].Secret)
+}
+
+// --- Duplicate detection ---
+
+func TestParseMCPClientCredentials_DuplicateClientID(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "bot:1234567890123456,bot:abcdefghijklmnop"}
+	_, err := cfg.ParseMCPClientCredentials()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate client_id")
+	assert.Contains(t, err.Error(), "bot")
+}
+
+func TestParseMCPAPIKeys_DuplicateUserID(t *testing.T) {
+	key1 := "vs_" + hexString(32)
+	key2 := "vs_" + hexString(32)
+	cfg := &Config{MCPAPIKeys: "alice:" + key1 + ",alice:" + key2}
+	_, err := cfg.ParseMCPAPIKeys()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate user_id")
+	assert.Contains(t, err.Error(), "alice")
+}
+
+func TestParseMCPUsers_DuplicateUsername(t *testing.T) {
+	cfg := &Config{MCPAuthUsers: "alex:pass1,alex:pass2"}
+	_, err := cfg.ParseMCPUsers()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate username")
+	assert.Contains(t, err.Error(), "alex")
+}
+
+// hexString returns a string of n*2 hex characters (n bytes of data).
+func hexString(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(i % 256)
+	}
+
+	const hextable = "0123456789abcdef"
+
+	out := make([]byte, n*2)
+	for i, v := range b {
+		out[i*2] = hextable[v>>4]
+		out[i*2+1] = hextable[v&0x0f]
+	}
+
+	return string(out)
 }

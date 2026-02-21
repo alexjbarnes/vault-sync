@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -17,7 +18,9 @@ import (
 	"github.com/alexjbarnes/vault-sync/internal/config"
 	"github.com/alexjbarnes/vault-sync/internal/logging"
 	"github.com/alexjbarnes/vault-sync/internal/mcpserver"
+	"github.com/alexjbarnes/vault-sync/internal/models"
 	"github.com/alexjbarnes/vault-sync/internal/obsidian"
+	"github.com/alexjbarnes/vault-sync/internal/server"
 	"github.com/alexjbarnes/vault-sync/internal/state"
 	"github.com/alexjbarnes/vault-sync/internal/vault"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -31,8 +34,12 @@ const (
 	vaultDirPerm = fs.FileMode(0o755)
 	// mcpReadTimeout is the HTTP server read timeout.
 	mcpReadTimeout = 30 * time.Second
-	// mcpWriteTimeout is the HTTP server write timeout.
-	mcpWriteTimeout = 60 * time.Second
+	// mcpWriteTimeout is the HTTP server write timeout. Set to zero to
+	// disable it: the MCP Streamable HTTP transport uses SSE, which keeps
+	// the response writer open for the lifetime of the session, so a
+	// non-zero write timeout would close every connection after the
+	// timeout elapses regardless of activity.
+	mcpWriteTimeout = 0
 	// mcpIdleTimeout is the HTTP server idle connection timeout.
 	mcpIdleTimeout = 120 * time.Second
 	// mcpShutdownTimeout is the grace period for MCP server shutdown.
@@ -54,9 +61,10 @@ func run() error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	logger := logging.NewLogger(cfg.Environment)
+	logger := logging.NewLogger(cfg.Environment, cfg.MCPLogLevel)
 	logger.Info("vault-sync starting",
 		slog.String("version", Version),
+		slog.String("device", cfg.DeviceName),
 		slog.Bool("sync", cfg.EnableSync),
 		slog.Bool("mcp", cfg.EnableMCP),
 	)
@@ -308,7 +316,11 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, setup
 
 	sg, sgctx := errgroup.WithContext(ctx)
 	sg.Go(func() error {
-		return syncClient.Listen(sgctx)
+		if err := syncClient.Listen(sgctx); err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+
+		return nil
 	})
 
 	if err := reconciler.Phase2And3(sgctx, scan); err != nil {
@@ -318,7 +330,11 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, setup
 	watcher := obsidian.NewWatcher(vaultFS, syncClient, logger, syncFilter)
 
 	sg.Go(func() error {
-		return watcher.Watch(sgctx)
+		if err := watcher.Watch(sgctx); err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+
+		return nil
 	})
 
 	return sg.Wait()
@@ -330,6 +346,16 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 	users, err := cfg.ParseMCPUsers()
 	if err != nil {
 		return fmt.Errorf("parsing MCP auth users: %w", err)
+	}
+
+	clientCreds, err := cfg.ParseMCPClientCredentials()
+	if err != nil {
+		return fmt.Errorf("parsing MCP client credentials: %w", err)
+	}
+
+	apiKeys, err := cfg.ParseMCPAPIKeys()
+	if err != nil {
+		return fmt.Errorf("parsing MCP API keys: %w", err)
 	}
 
 	mcpLogger := logger.With(slog.String("service", "mcp"))
@@ -360,15 +386,54 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 	store := auth.NewStore(appState, mcpLogger)
 	defer store.Stop()
 
-	authMiddleware := auth.Middleware(store, cfg.MCPServerURL)
+	for _, cred := range clientCreds {
+		store.RegisterPreConfiguredClient(&models.OAuthClient{
+			ClientID:   cred.ClientID,
+			SecretHash: auth.HashSecret(cred.Secret),
+			GrantTypes: []string{"client_credentials"},
+		})
+		mcpLogger.Info("registered pre-configured client", slog.String("client_id", cred.ClientID))
+	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/.well-known/oauth-protected-resource", auth.HandleProtectedResourceMetadata(cfg.MCPServerURL))
-	mux.HandleFunc("/.well-known/oauth-authorization-server", auth.HandleServerMetadata(cfg.MCPServerURL))
-	mux.HandleFunc("/oauth/register", auth.HandleRegistration(store))
-	mux.HandleFunc("/oauth/authorize", auth.HandleAuthorize(store, users, mcpLogger, cfg.MCPServerURL))
-	mux.HandleFunc("/oauth/token", auth.HandleToken(store, cfg.MCPServerURL))
-	mux.Handle("/mcp", authMiddleware(mcpHandler))
+	for _, ak := range apiKeys {
+		store.RegisterAPIKey(ak.Key, ak.UserID)
+		mcpLogger.Info("registered API key", slog.String("user", ak.UserID))
+	}
+
+	// Reconcile persisted API keys against current config to remove
+	// keys deleted from MCP_API_KEYS between restarts.
+	currentKeyHashes := make(map[string]struct{}, len(apiKeys))
+	for _, ak := range apiKeys {
+		currentKeyHashes[auth.HashSecret(ak.Key)] = struct{}{}
+	}
+
+	if removed := store.ReconcileAPIKeys(currentKeyHashes); removed > 0 {
+		mcpLogger.Info("removed stale API keys", slog.Int("count", removed))
+	}
+
+	// Reconcile persisted pre-configured clients against current config
+	// to remove clients deleted from MCP_CLIENT_CREDENTIALS between restarts.
+	currentClientIDs := make(map[string]struct{}, len(clientCreds))
+	for _, cred := range clientCreds {
+		currentClientIDs[cred.ClientID] = struct{}{}
+	}
+
+	if removed := store.ReconcileClients(currentClientIDs); removed > 0 {
+		mcpLogger.Info("removed stale pre-configured clients", slog.Int("count", removed))
+	}
+
+	// Clear secrets from config after hashing.
+	cfg.MCPClientCredentials = ""
+	cfg.MCPAPIKeys = ""
+	cfg.MCPAuthUsers = ""
+
+	mux := server.NewMux(server.MuxConfig{
+		Store:      store,
+		Users:      users,
+		MCPHandler: mcpHandler,
+		Logger:     mcpLogger,
+		ServerURL:  cfg.MCPServerURL,
+	})
 
 	server := &http.Server{
 		Addr:         cfg.MCPListenAddr,
@@ -382,6 +447,8 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		slog.String("listen", cfg.MCPListenAddr),
 		slog.String("server_url", cfg.MCPServerURL),
 		slog.Int("users", len(users)),
+		slog.Int("client_credentials", len(clientCreds)),
+		slog.Int("api_keys", len(apiKeys)),
 	)
 
 	// Shutdown HTTP server when context is cancelled.
@@ -407,7 +474,11 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		return nil
 	})
 	mg.Go(func() error {
-		return v.Watch(mctx)
+		if err := v.Watch(mctx); err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+
+		return nil
 	})
 
 	return mg.Wait()

@@ -743,7 +743,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 			s.persistPushedFolder(op.path)
 		}
 
-		s.logger.Info("pushed",
+		s.logger.Info("local change pushed to server",
 			slog.String("path", op.path),
 			slog.Bool("folder", op.isFolder),
 			slog.Bool("deleted", op.isDeleted),
@@ -873,7 +873,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 
 	s.persistPushedFile(op.path, op.content, encHash, op.mtime, op.ctime)
 
-	s.logger.Info("pushed",
+	s.logger.Info("local change pushed to server",
 		slog.String("path", op.path),
 		slog.Int("bytes", len(op.content)),
 	)
@@ -986,27 +986,37 @@ func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 		s.persistServerFile(path, push, push.Deleted)
 
 	case DecisionDeleteLocal:
-		s.logger.Info("delete (while busy)", slog.String("path", path))
+		s.logger.Info("server deleted file, removing local copy (while busy)",
+			slog.String("path", path),
+			slog.String("device", push.Device),
+			slog.Int64("uid", push.UID),
+		)
+
+		// Clear state before disk delete to prevent watcher feedback loop.
+		// See executeLiveDecision for detailed explanation.
+		s.removeHashCache(path)
+		s.persistServerFile(path, push, true)
+		s.deleteLocalState(path)
 
 		if push.Folder {
 			if err := s.vault.DeleteEmptyDir(path); err != nil {
 				s.logger.Info("folder not empty, skipping delete (while busy)", slog.String("path", path))
-				s.persistServerFile(path, push, true)
+				s.persistServerFile(path, push, false)
 
 				return
 			}
 		} else {
 			if err := s.vault.DeleteFile(path); err != nil {
-				s.logger.Warn("delete failed (while busy)", slog.String("path", path), slog.String("error", err.Error()))
+				s.logger.Warn("delete failed, restoring state (while busy)", slog.String("path", path), slog.String("error", err.Error()))
+				s.persistServerFile(path, push, false)
 			}
 		}
 
-		s.removeHashCache(path)
-		s.persistServerFile(path, push, true)
-		s.deleteLocalState(path)
-
 	case DecisionKeepLocal:
-		s.logger.Info("keeping local (while busy)", slog.String("path", path))
+		s.logger.Info("keeping local file, server deleted but local has changes (while busy)",
+			slog.String("path", path),
+			slog.String("device", push.Device),
+		)
 		s.persistServerFile(path, push, true)
 
 	default:
@@ -1087,29 +1097,45 @@ func (s *SyncClient) executeLiveDecision(ctx context.Context, decision Reconcile
 		return s.liveDownload(ctx, path, push, pull)
 
 	case DecisionDeleteLocal:
-		s.logger.Info("delete", slog.String("path", path))
+		s.logger.Info("server deleted file, removing local copy",
+			slog.String("path", path),
+			slog.String("device", push.Device),
+			slog.Int64("uid", push.UID),
+		)
+
+		// Remove server and local state BEFORE deleting the file from
+		// disk. The file watcher runs in a separate goroutine and races
+		// with this code: if fsnotify fires after DeleteFile but before
+		// the state is cleared, handleDelete finds a non-nil
+		// ServerFileState and echoes the delete back to the server.
+		// Clearing state first ensures the watcher sees nil and skips.
+		s.removeHashCache(path)
+		s.persistServerFile(path, push, true)
+		s.deleteLocalState(path)
 
 		if push.Folder {
 			if err := s.vault.DeleteEmptyDir(path); err != nil {
 				s.logger.Info("folder not empty, skipping delete", slog.String("path", path))
-				s.persistServerFile(path, push, true)
+				// Restore server state so the reconciler does not
+				// re-process this delete on next reconnect.
+				s.persistServerFile(path, push, false)
 
 				return nil //nolint:nilerr // intentional: non-empty folder is not an error, skip delete
 			}
 		} else {
 			if err := s.vault.DeleteFile(path); err != nil {
-				s.logger.Warn("delete failed", slog.String("path", path), slog.String("error", err.Error()))
+				s.logger.Warn("delete failed, restoring state", slog.String("path", path), slog.String("error", err.Error()))
+				s.persistServerFile(path, push, false)
 			}
 		}
-
-		s.removeHashCache(path)
-		s.persistServerFile(path, push, true)
-		s.deleteLocalState(path)
 
 		return nil
 
 	case DecisionKeepLocal:
-		s.logger.Info("keeping local, server deleted", slog.String("path", path))
+		s.logger.Info("keeping local file, server deleted but local has changes",
+			slog.String("path", path),
+			slog.String("device", push.Device),
+		)
 		s.persistServerFile(path, push, true)
 
 		return nil
@@ -1191,8 +1217,9 @@ func (s *SyncClient) liveDownload(ctx context.Context, path string, push PushMes
 	s.persistServerFile(path, push, false)
 	s.persistLocalFileAfterWrite(path, contentHash)
 
-	s.logger.Info("wrote",
+	s.logger.Info("server change written locally",
 		slog.String("path", path),
+		slog.String("device", push.Device),
 		slog.Int("bytes", len(plaintext)),
 	)
 
@@ -1272,14 +1299,28 @@ func (s *SyncClient) liveMergeMD(ctx context.Context, path string, push PushMess
 		serverText = string(serverPlain)
 	}
 
-	// Trivial cases.
+	// Trivial cases: local disk content does not change, but we must
+	// update the hash cache so the watcher does not re-upload the file.
+	cacheLocalHash := func() {
+		h := sha256.Sum256(localContent)
+		contentHash := hex.EncodeToString(h[:])
+
+		s.hashCacheMu.Lock()
+		s.hashCache[path] = hashEntry{encHash: push.Hash, contentHash: contentHash}
+		s.hashCacheMu.Unlock()
+	}
+
 	if baseText == serverText || localText == serverText {
+		cacheLocalHash()
 		s.persistServerFile(path, push, false)
+
 		return nil
 	}
 
 	if serverText == "" {
+		cacheLocalHash()
 		s.persistServerFile(path, push, false)
+
 		return nil
 	}
 
@@ -1504,8 +1545,9 @@ func (s *SyncClient) liveWriteContent(path string, push PushMessage, plaintext [
 	s.persistServerFile(path, push, false)
 	s.persistLocalFileAfterWrite(path, contentHash)
 
-	s.logger.Info("wrote",
+	s.logger.Info("server change written locally",
 		slog.String("path", path),
+		slog.String("device", push.Device),
 		slog.Int("bytes", len(plaintext)),
 	)
 

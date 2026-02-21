@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -36,7 +37,7 @@ type Config struct {
 	SyncDir string `env:"OBSIDIAN_SYNC_DIR"`
 
 	// Device name this client identifies as. Defaults to system hostname.
-	DeviceName string
+	DeviceName string `env:"DEVICE_NAME"`
 
 	// Config sync toggles for .obsidian/ files.
 	// All default to false (no .obsidian/ config synced unless opted in).
@@ -53,10 +54,12 @@ type Config struct {
 	Environment string `env:"ENVIRONMENT" envDefault:"development"`
 
 	// MCP server settings (required when MCP is enabled)
-	MCPListenAddr string `env:"MCP_LISTEN_ADDR" envDefault:":8090"`
-	MCPServerURL  string `env:"MCP_SERVER_URL"`
-	MCPAuthUsers  string `env:"MCP_AUTH_USERS"`
-	MCPLogLevel   string `env:"MCP_LOG_LEVEL" envDefault:"info"`
+	MCPListenAddr        string `env:"MCP_LISTEN_ADDR" envDefault:":8090"`
+	MCPServerURL         string `env:"MCP_SERVER_URL"`
+	MCPAuthUsers         string `env:"MCP_AUTH_USERS"`
+	MCPClientCredentials string `env:"MCP_CLIENT_CREDENTIALS"`
+	MCPAPIKeys           string `env:"MCP_API_KEYS"`
+	MCPLogLevel          string `env:"MCP_LOG_LEVEL" envDefault:"info"`
 }
 
 // warnInsecureEnvFile checks whether the .env file (if present) has
@@ -153,8 +156,8 @@ func (c *Config) validate() error {
 			return fmt.Errorf("MCP_SERVER_URL is required when MCP is enabled")
 		}
 
-		if c.MCPAuthUsers == "" {
-			return fmt.Errorf("MCP_AUTH_USERS is required when MCP is enabled")
+		if c.MCPAuthUsers == "" && c.MCPAPIKeys == "" && c.MCPClientCredentials == "" {
+			return fmt.Errorf("at least one auth method required when MCP is enabled: MCP_AUTH_USERS, MCP_API_KEYS, or MCP_CLIENT_CREDENTIALS")
 		}
 	}
 
@@ -191,6 +194,126 @@ func (c *Config) IsProduction() bool {
 	return c.Environment == "production"
 }
 
+// ClientCredential holds a pre-configured client ID and plain-text secret
+// parsed from MCP_CLIENT_CREDENTIALS. The secret is hashed before storage.
+type ClientCredential struct {
+	ClientID string
+	Secret   string
+}
+
+const (
+	// clientSecretMinLen is the minimum length for client credential secrets.
+	// Shorter secrets do not provide enough entropy for SHA-256 hash-based
+	// authentication. 16 characters is a conservative floor that allows
+	// a range of secret formats (hex, base64, passphrase).
+	clientSecretMinLen = 16
+)
+
+// ParseMCPClientCredentials parses the MCP_CLIENT_CREDENTIALS string.
+// Format: "client1:secret1,client2:secret2"
+// Secrets must be at least 16 characters long.
+func (c *Config) ParseMCPClientCredentials() ([]ClientCredential, error) {
+	if c.MCPClientCredentials == "" {
+		return nil, nil
+	}
+
+	seen := make(map[string]struct{})
+
+	var creds []ClientCredential
+
+	for _, pair := range strings.Split(c.MCPClientCredentials, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		idx := strings.Index(pair, ":")
+		if idx < 0 {
+			return nil, fmt.Errorf("invalid client credential entry (missing ':')")
+		}
+
+		clientID := pair[:idx]
+
+		secret := pair[idx+1:]
+		if clientID == "" || secret == "" {
+			return nil, fmt.Errorf("empty client_id or secret in entry %d", len(creds)+1)
+		}
+
+		if len(secret) < clientSecretMinLen {
+			return nil, fmt.Errorf("client secret too short in entry %d (minimum %d characters)", len(creds)+1, clientSecretMinLen)
+		}
+
+		if _, dup := seen[clientID]; dup {
+			return nil, fmt.Errorf("duplicate client_id %q in MCP_CLIENT_CREDENTIALS", clientID)
+		}
+
+		seen[clientID] = struct{}{}
+		creds = append(creds, ClientCredential{ClientID: clientID, Secret: secret})
+	}
+
+	return creds, nil
+}
+
+// APIKeyEntry holds a pre-configured API key and its associated user
+// identity parsed from MCP_API_KEYS.
+type APIKeyEntry struct {
+	UserID string
+	Key    string
+}
+
+// ParseMCPAPIKeys parses the MCP_API_KEYS string.
+// Format: "user1:vs_key1,user2:vs_key2"
+func (c *Config) ParseMCPAPIKeys() ([]APIKeyEntry, error) {
+	if c.MCPAPIKeys == "" {
+		return nil, nil
+	}
+
+	seenUsers := make(map[string]struct{})
+
+	var entries []APIKeyEntry
+
+	for _, pair := range strings.Split(c.MCPAPIKeys, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		idx := strings.Index(pair, ":")
+		if idx < 0 {
+			return nil, fmt.Errorf("invalid API key entry (missing ':')")
+		}
+
+		userID := pair[:idx]
+
+		key := pair[idx+1:]
+		if userID == "" || key == "" {
+			return nil, fmt.Errorf("empty user or key in entry %d", len(entries)+1)
+		}
+
+		if !strings.HasPrefix(key, auth.APIKeyPrefix) {
+			return nil, fmt.Errorf("API key must start with %q prefix in entry %d", auth.APIKeyPrefix, len(entries)+1)
+		}
+
+		if len(key) < auth.APIKeyMinLen {
+			return nil, fmt.Errorf("API key too short in entry %d (minimum %d characters)", len(entries)+1, auth.APIKeyMinLen)
+		}
+
+		suffix := key[len(auth.APIKeyPrefix):]
+		if _, err := hex.DecodeString(suffix); err != nil {
+			return nil, fmt.Errorf("API key contains non-hex characters after %q prefix in entry %d", auth.APIKeyPrefix, len(entries)+1)
+		}
+
+		if _, dup := seenUsers[userID]; dup {
+			return nil, fmt.Errorf("duplicate user_id %q in MCP_API_KEYS", userID)
+		}
+
+		seenUsers[userID] = struct{}{}
+		entries = append(entries, APIKeyEntry{UserID: userID, Key: key})
+	}
+
+	return entries, nil
+}
+
 // ParseMCPUsers parses the MCP_AUTH_USERS string into a UserCredentials map.
 // Format: "user1:password1,user2:password2"
 func (c *Config) ParseMCPUsers() (auth.UserCredentials, error) {
@@ -215,6 +338,10 @@ func (c *Config) ParseMCPUsers() (auth.UserCredentials, error) {
 		password := pair[idx+1:]
 		if username == "" || password == "" {
 			return nil, fmt.Errorf("empty username or password in entry %d", len(users)+1)
+		}
+
+		if _, dup := users[username]; dup {
+			return nil, fmt.Errorf("duplicate username %q in MCP_AUTH_USERS", username)
 		}
 
 		users[username] = password
