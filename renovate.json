@@ -1,17 +1,22 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended"],
-  "dependencyDashboard": false,
-  "labels": ["dependencies"],
+  "extends": [
+    "config:recommended"
+  ],
+  "labels": [
+    "dependencies"
+  ],
   "automerge": false,
   "prHourlyLimit": 0,
   "separateMajorMinor": false,
   "packageRules": [
     {
       "description": "Group all updates into a single PR",
-      "matchPackagePatterns": ["*"],
       "groupName": "all dependencies",
-      "groupSlug": "all"
+      "groupSlug": "all",
+      "matchPackageNames": [
+        "*"
+      ]
     }
   ]
 }
