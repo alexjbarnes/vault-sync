@@ -1018,6 +1018,23 @@ func TestClientCredentials_DynamicClientCannotUse(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "invalid_client")
 }
 
+func TestPreConfigured_AuthorizeEndpointRejected(t *testing.T) {
+	store := testStore(t)
+	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
+
+	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
+
+	req := httptest.NewRequest("GET", "/oauth/authorize?client_id=bot-client&redirect_uri=http://127.0.0.1:9999/callback&response_type=code&code_challenge=test&code_challenge_method=S256", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	// Pre-configured client_credentials-only clients should be
+	// rejected at the authorize endpoint before rendering the
+	// login page.
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "not authorized for the authorization code flow")
+}
+
 func TestPreConfigured_AuthCodeFlowRejected(t *testing.T) {
 	store := testStore(t)
 	registerPreConfiguredClient(t, store, "bot-client", "s3cret")
@@ -3013,21 +3030,23 @@ func TestAuthorize_GET_PreConfiguredNoRedirectURIs_RejectsHTTPS(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestAuthorize_GET_PreConfiguredNoRedirectURIs_AcceptsLoopback(t *testing.T) {
+func TestAuthorize_GET_PreConfiguredNoRedirectURIs_RejectsAuthCodeFlow(t *testing.T) {
 	store := testStore(t)
 	registerPreConfiguredClient(t, store, "preconfig-client", "s3cret")
 
 	handler := HandleAuthorize(store, testUsers(t), testLogger(), testServerURL)
 	challenge := pkceChallenge("v")
 
+	// Pre-configured clients are client_credentials-only and should be
+	// rejected at the authorize endpoint even with valid loopback URIs.
 	req := httptest.NewRequest("GET", "/oauth/authorize?response_type=code&client_id=preconfig-client"+
 		"&redirect_uri="+url.QueryEscape("http://127.0.0.1:19876/callback")+
 		"&code_challenge="+challenge, nil)
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), "Sign in")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "not authorized for the authorization code flow")
 }
 
 func TestAuthorize_GET_PreConfiguredNoRedirectURIs_RejectsHTTP(t *testing.T) {

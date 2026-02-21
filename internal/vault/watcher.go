@@ -130,11 +130,6 @@ func (v *Vault) shouldIgnore(absPath string) bool {
 		return true
 	}
 
-	// Vault write temp files (created by Vault.Write and Vault.Edit).
-	if strings.HasPrefix(name, ".vault-write-") || strings.HasPrefix(name, ".vault-edit-") {
-		return true
-	}
-
 	if name == "node_modules" {
 		return true
 	}

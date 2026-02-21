@@ -11,7 +11,7 @@
 - `iss` parameter in authorization responses (RFC 9207)
 - `client_id_issued_at` in DCR responses
 - `Pragma: no-cache` on token responses
-- `scope` field in token responses
+- `scope` field in token responses (echoed from request, not enforced)
 - Enriched MCP tool call logs with user, client_id, and remote IP
 - `DEVICE_NAME` environment variable
 - Dev image CI workflow and scheduled cleanup for old dev images
@@ -48,6 +48,10 @@
 - API keys cleared from config struct after registration
 - Stale API keys purged from bbolt on startup reconciliation
 - Rate limiting and client lockout on token endpoint
+- Symlink bypass in vault index and search (symlinks to files outside vault no longer indexed)
+- Authorize endpoint rejects clients not authorized for authorization code flow
+- `MCP_LOG_LEVEL` environment variable now wired to logger (was parsed but ignored)
+- `localhost` rejected as loopback (literal IPs only per RFC 8252 Section 8.3)
 
 ## v1.0.0
 

@@ -113,7 +113,7 @@ internal/
   models/               Shared types
   obsidian/             Sync protocol implementation
   state/                bbolt persistence
-  vault/                Read-only vault access for MCP
+  vault/                Filesystem operations for MCP
 docker/                 Dockerfile and docker-compose.yml
 docs/                   MCP tool documentation
 ```

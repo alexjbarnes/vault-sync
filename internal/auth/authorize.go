@@ -390,6 +390,13 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, se
 		return
 	}
 
+	// Reject clients that are only authorized for client_credentials.
+	// They should authenticate directly at the token endpoint.
+	if !store.ClientAllowsGrant(clientID, "authorization_code") {
+		http.Error(w, "client is not authorized for the authorization code flow", http.StatusBadRequest)
+		return
+	}
+
 	redirectURI := q.Get("redirect_uri")
 	if redirectURI == "" {
 		// RFC 6749 Section 3.1.2.3: when only one redirect URI is
