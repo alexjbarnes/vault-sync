@@ -1,6 +1,6 @@
-# OAuth Authentication
+# Authentication
 
-vault-sync supports two authentication flows: interactive (browser-based) and non-interactive (machine-to-machine).
+vault-sync supports three authentication methods: interactive OAuth (browser-based), headless OAuth (machine-to-machine), and static API keys.
 
 ## Interactive flow (authorization_code)
 

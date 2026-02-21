@@ -39,7 +39,7 @@ vault-sync is a single binary with two features that can be enabled independentl
 | OAuth 2.1 (client credentials) | Supported | Headless agents and CI/CD pipelines |
 | API key | Supported | Single static token for simple deployments |
 
-See [OAuth documentation](docs/oauth.md) for setup and usage.
+See [authentication documentation](docs/auth.md) for setup and usage.
 
 ## Quick Start
 
@@ -72,8 +72,8 @@ All configuration via environment variables or `.env` file.
 | `ENABLE_MCP` | No | Enable MCP server (default: `false`) |
 | `MCP_SERVER_URL` | When MCP enabled | Base URL without `/mcp` (e.g. `https://vault.example.com`). MCP clients connect to `MCP_SERVER_URL/mcp`. |
 | `MCP_AUTH_USERS` | Conditional | Comma-separated `user:password` pairs for the OAuth login page |
-| `MCP_CLIENT_CREDENTIALS` | No | Comma-separated `client_id:secret` pairs for headless OAuth clients ([docs](docs/oauth.md)) |
-| `MCP_API_KEYS` | No | Comma-separated `user:key` pairs for API key auth. Generate keys with `echo "vs_$(openssl rand -hex 32)"` ([docs](docs/oauth.md)) |
+| `MCP_CLIENT_CREDENTIALS` | No | Comma-separated `client_id:secret` pairs for headless OAuth clients ([docs](docs/auth.md)) |
+| `MCP_API_KEYS` | No | Comma-separated `user:key` pairs for API key auth. Generate keys with `echo "vs_$(openssl rand -hex 32)"` ([docs](docs/auth.md)) |
 | `MCP_LISTEN_ADDR` | No | Listen address (default: `:8090`) |
 | `MCP_LOG_LEVEL` | No | Log level: `debug`, `info`, `warn`, `error` (default: `info` in production, `debug` otherwise) |
 

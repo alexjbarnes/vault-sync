@@ -148,7 +148,7 @@ Access tokens expire after 1 hour. The client refreshes them automatically using
 
 For automated pipelines and headless MCP clients that cannot open a browser. Requires `MCP_CLIENT_CREDENTIALS`.
 
-The client authenticates by posting its `client_id` and `client_secret` directly to the token endpoint. No browser interaction is needed. See the [OAuth documentation](oauth.md) for request examples.
+The client authenticates by posting its `client_id` and `client_secret` directly to the token endpoint. No browser interaction is needed. See the [authentication documentation](auth.md) for request examples.
 
 ### API key
 
