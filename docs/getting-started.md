@@ -91,7 +91,9 @@ just build
 
 ## 5. Set MCP_SERVER_URL
 
-`MCP_SERVER_URL` tells the OAuth flow where the server lives. For local use, plain HTTP works fine:
+`MCP_SERVER_URL` is the base URL for your server, without `/mcp`. It is used as the OAuth resource identifier and to build discovery endpoints. MCP clients append `/mcp` to this URL when connecting.
+
+For local use, plain HTTP works fine:
 
 ```
 MCP_SERVER_URL=http://localhost:8090

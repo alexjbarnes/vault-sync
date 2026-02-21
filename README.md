@@ -70,7 +70,7 @@ All configuration via environment variables or `.env` file.
 | Variable | Required | Description |
 |---|---|---|
 | `ENABLE_MCP` | No | Enable MCP server (default: `false`) |
-| `MCP_SERVER_URL` | When MCP enabled | Public HTTPS URL (OAuth resource identifier) |
+| `MCP_SERVER_URL` | When MCP enabled | Base URL without `/mcp` (e.g. `https://vault.example.com`). MCP clients connect to `MCP_SERVER_URL/mcp`. |
 | `MCP_AUTH_USERS` | Conditional | Comma-separated `user:password` pairs for the OAuth login page |
 | `MCP_CLIENT_CREDENTIALS` | No | Comma-separated `client_id:secret` pairs for headless OAuth clients ([docs](docs/oauth.md)) |
 | `MCP_API_KEYS` | No | Comma-separated `user:key` pairs for API key auth. Generate keys with `echo "vs_$(openssl rand -hex 32)"` ([docs](docs/oauth.md)) |

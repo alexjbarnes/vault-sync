@@ -57,9 +57,10 @@ No refresh token is issued for client_credentials (RFC 6749 Section 4.4.3). The 
 
 ### Using the token
 
-Include the access token in requests to the MCP endpoint:
+Include the access token in requests to the `/mcp` endpoint:
 
 ```
+POST https://your-server.example.com/mcp
 Authorization: Bearer abc123...
 ```
 
@@ -77,9 +78,10 @@ Configure in `.env`:
 MCP_API_KEYS=myuser:vs_<64 hex chars>
 ```
 
-Use the raw key as a Bearer token:
+Use the raw key as a Bearer token in requests to the `/mcp` endpoint:
 
 ```
+POST https://your-server.example.com/mcp
 Authorization: Bearer vs_<64 hex chars>
 ```
 

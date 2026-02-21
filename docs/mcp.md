@@ -12,14 +12,14 @@ OBSIDIAN_SYNC_DIR=/path/to/vault \
 vault-sync
 ```
 
-The server listens on `:8090` by default. Point your MCP client at `MCP_SERVER_URL`.
+The server listens on `:8090` by default. Point your MCP client at `MCP_SERVER_URL` with `/mcp` appended (e.g. `https://vault.example.com/mcp`).
 
 ## Configuration
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `ENABLE_MCP` | Yes | `false` | Enable the MCP server |
-| `MCP_SERVER_URL` | Yes | - | Public HTTPS URL for this server (used as OAuth resource identifier) |
+| `MCP_SERVER_URL` | Yes | - | Base URL for this server, without `/mcp` (e.g. `https://vault.example.com`). Used as the OAuth resource identifier. MCP clients connect to `MCP_SERVER_URL/mcp`. |
 | `MCP_AUTH_USERS` | Conditional | - | Comma-separated `user:password` pairs for the OAuth login page. Required unless `MCP_CLIENT_CREDENTIALS` or `MCP_API_KEYS` is set. |
 | `MCP_CLIENT_CREDENTIALS` | No | - | Comma-separated `client_id:secret` pairs for headless OAuth (client_credentials flow) |
 | `MCP_API_KEYS` | No | - | Comma-separated `user:vs_<hex>` pairs for static API key authentication |
