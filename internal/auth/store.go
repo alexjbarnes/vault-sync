@@ -128,7 +128,9 @@ func (s *Store) loadFromDisk() {
 		t := tokens[i]
 
 		// Backward compat: old entries have Token but no TokenHash.
-		if t.TokenHash == "" && t.Token != "" {
+		// Compute hashes and re-persist to remove raw secrets from disk.
+		needsMigration := t.TokenHash == "" && t.Token != ""
+		if needsMigration {
 			t.TokenHash = HashSecret(t.Token)
 		}
 
@@ -145,6 +147,18 @@ func (s *Store) loadFromDisk() {
 		// no RefreshHash. Compute the hash for the new lookup.
 		if t.Kind == "access" && t.RefreshHash == "" && t.RefreshToken != "" {
 			t.RefreshHash = HashSecret(t.RefreshToken)
+			needsMigration = true
+		}
+
+		// Re-persist migrated tokens to clear raw secrets from disk.
+		// SaveOAuthToken writes under the TokenHash key and clears
+		// Token/RefreshToken before marshaling.
+		if needsMigration {
+			if err := s.persist.SaveOAuthToken(t); err != nil {
+				s.logger.Warn("migrating legacy token",
+					slog.String("error", err.Error()),
+				)
+			}
 		}
 
 		// Clear raw secrets from memory after computing hashes.
@@ -620,6 +634,45 @@ func (s *Store) ListAPIKeys() []*models.APIKey {
 	}
 
 	return keys
+}
+
+// ReconcileClients removes any persisted pre-configured clients not present
+// in the provided set of current client IDs. Returns the number of clients
+// removed. Call after registering all config-based clients to purge stale
+// entries that were removed from MCP_CLIENT_CREDENTIALS between restarts.
+// Only clients with GrantTypes == ["client_credentials"] are considered
+// pre-configured; dynamically registered clients are left untouched.
+func (s *Store) ReconcileClients(currentClientIDs map[string]struct{}) int {
+	s.mu.Lock()
+
+	var stale []string
+
+	for id, client := range s.clients {
+		if _, ok := currentClientIDs[id]; ok {
+			continue
+		}
+
+		// Only remove pre-configured client_credentials clients.
+		// Dynamically registered clients (authorization_code) are
+		// managed through their own lifecycle.
+		if len(client.GrantTypes) == 1 && client.GrantTypes[0] == "client_credentials" {
+			stale = append(stale, id)
+		}
+	}
+
+	for _, id := range stale {
+		delete(s.clients, id)
+	}
+
+	s.mu.Unlock()
+
+	if s.persist != nil {
+		for _, id := range stale {
+			_ = s.persist.DeleteOAuthClient(id)
+		}
+	}
+
+	return len(stale)
 }
 
 // ReconcileAPIKeys removes any persisted API keys not present in the

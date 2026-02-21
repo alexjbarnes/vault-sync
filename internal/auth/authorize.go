@@ -328,15 +328,19 @@ func validateRedirectURI(client *models.OAuthClient, redirectURI string) bool {
 }
 
 // isLocalhostPrefix returns true if the URI is an HTTP loopback prefix
-// (http://127.0.0.1 or http://localhost) without a port or path, making
-// it suitable for prefix matching per RFC 8252 Section 7.3.
+// (http://127.0.0.1) without a port or path, making it suitable for
+// prefix matching per RFC 8252 Section 7.3. DNS names like "localhost"
+// are excluded to prevent DNS rebinding attacks.
 func isLocalhostPrefix(uri string) bool {
-	return uri == "http://127.0.0.1" || uri == "http://localhost"
+	return uri == "http://127.0.0.1" || uri == "http://[::1]"
 }
 
-// isLoopbackHost returns true if the hostname is a loopback address.
+// isLoopbackHost returns true if the hostname is a literal loopback IP.
+// Per RFC 8252 Section 8.3, only literal IPs are accepted. DNS names
+// like "localhost" are excluded because they can resolve to non-loopback
+// addresses on misconfigured resolvers or via DNS rebinding attacks.
 func isLoopbackHost(host string) bool {
-	return host == "127.0.0.1" || host == "localhost" || host == "::1"
+	return host == "127.0.0.1" || host == "::1"
 }
 
 // isLoopbackRedirect checks if redirectURI is a valid loopback redirect
@@ -564,14 +568,10 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 	logger.Info("login successful", slog.String("username", username))
 
 	// Issue authorization code bound to the resource (RFC 8707).
-	// Parse the scope parameter into individual scope values. The
-	// authorize endpoint carries scope through the form; store them
-	// on the code so they propagate to the issued token.
-	var scopes []string
-	if scopeParam := r.FormValue("scope"); scopeParam != "" {
-		scopes = strings.Fields(scopeParam)
-	}
-
+	// Scopes are not propagated because there is no defined set of
+	// scopes to validate against. Storing unvalidated client-supplied
+	// scopes on the token creates a privilege escalation risk if
+	// scope-based access control is added later.
 	code := RandomHex(authCodeBytes)
 	store.SaveCode(&Code{
 		Code:          code,
@@ -580,7 +580,6 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		CodeChallenge: codeChallenge,
 		Resource:      resource,
 		UserID:        username,
-		Scopes:        scopes,
 		ExpiresAt:     time.Now().Add(codeExpiry),
 	})
 

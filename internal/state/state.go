@@ -482,6 +482,13 @@ func (s *State) GetOAuthClient(clientID string) (*models.OAuthClient, error) {
 	return c, err
 }
 
+// DeleteOAuthClient removes a registered OAuth client by ID.
+func (s *State) DeleteOAuthClient(clientID string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(oauthClientBucket).Delete([]byte(clientID))
+	})
+}
+
 // AllOAuthClients returns all registered OAuth clients.
 func (s *State) AllOAuthClients() ([]models.OAuthClient, error) {
 	var clients []models.OAuthClient

@@ -398,9 +398,21 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		mcpLogger.Info("removed stale API keys", slog.Int("count", removed))
 	}
 
+	// Reconcile persisted pre-configured clients against current config
+	// to remove clients deleted from MCP_CLIENT_CREDENTIALS between restarts.
+	currentClientIDs := make(map[string]struct{}, len(clientCreds))
+	for _, cred := range clientCreds {
+		currentClientIDs[cred.ClientID] = struct{}{}
+	}
+
+	if removed := store.ReconcileClients(currentClientIDs); removed > 0 {
+		mcpLogger.Info("removed stale pre-configured clients", slog.Int("count", removed))
+	}
+
 	// Clear secrets from config after hashing.
 	cfg.MCPClientCredentials = ""
 	cfg.MCPAPIKeys = ""
+	cfg.MCPAuthUsers = ""
 
 	mux := server.NewMux(server.MuxConfig{
 		Store:      store,
@@ -422,6 +434,8 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		slog.String("listen", cfg.MCPListenAddr),
 		slog.String("server_url", cfg.MCPServerURL),
 		slog.Int("users", len(users)),
+		slog.Int("client_credentials", len(clientCreds)),
+		slog.Int("api_keys", len(apiKeys)),
 	)
 
 	// Shutdown HTTP server when context is cancelled.

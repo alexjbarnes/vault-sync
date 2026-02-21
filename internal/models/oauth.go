@@ -12,9 +12,9 @@ import "time"
 // fields are populated with omitempty so old bbolt entries that
 // contain them can still be deserialized for migration.
 type OAuthToken struct {
-	Token        string    `json:"token,omitempty"`      // Transient; cleared before persistence
-	TokenHash    string    `json:"token_hash,omitempty"` // SHA-256 hex; primary lookup key
-	Kind         string    `json:"kind,omitempty"`       // "access" or "refresh"
+	Token        string    `json:"token,omitempty"` // Transient; cleared before persistence
+	TokenHash    string    `json:"token_hash"`      // SHA-256 hex; primary lookup key
+	Kind         string    `json:"kind,omitempty"`  // "access" or "refresh"
 	UserID       string    `json:"user_id"`
 	Resource     string    `json:"resource"`
 	Scopes       []string  `json:"scopes,omitempty"`

@@ -243,10 +243,11 @@ func TestExecuteLiveDecision_DeleteLocalFolder_NonEmpty(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, info.IsDir())
 
-	// Server state still persisted (as deleted).
+	// Server state should be re-persisted (not deleted) so the
+	// reconciler does not re-process this delete on next reconnect.
 	sf, err := appState.GetServerFile(testSyncVaultID, "non-empty")
 	require.NoError(t, err)
-	assert.Nil(t, sf, "deleted server entry should be removed from bbolt")
+	assert.NotNil(t, sf, "non-empty folder should have server state restored")
 }
 
 func TestExecuteLiveDecision_KeepLocal(t *testing.T) {

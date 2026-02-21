@@ -420,23 +420,23 @@ func TestValidate_MCPAllPresent(t *testing.T) {
 // --- ParseMCPClientCredentials ---
 
 func TestParseMCPClientCredentials_Valid(t *testing.T) {
-	cfg := &Config{MCPClientCredentials: "bot1:secret1,bot2:secret2"}
+	cfg := &Config{MCPClientCredentials: "bot1:secret1234567890,bot2:secret0987654321"}
 	creds, err := cfg.ParseMCPClientCredentials()
 	require.NoError(t, err)
 	require.Len(t, creds, 2)
 	assert.Equal(t, "bot1", creds[0].ClientID)
-	assert.Equal(t, "secret1", creds[0].Secret)
+	assert.Equal(t, "secret1234567890", creds[0].Secret)
 	assert.Equal(t, "bot2", creds[1].ClientID)
-	assert.Equal(t, "secret2", creds[1].Secret)
+	assert.Equal(t, "secret0987654321", creds[1].Secret)
 }
 
 func TestParseMCPClientCredentials_Single(t *testing.T) {
-	cfg := &Config{MCPClientCredentials: "bot:s3cret"}
+	cfg := &Config{MCPClientCredentials: "bot:s3cret-long-enough"}
 	creds, err := cfg.ParseMCPClientCredentials()
 	require.NoError(t, err)
 	require.Len(t, creds, 1)
 	assert.Equal(t, "bot", creds[0].ClientID)
-	assert.Equal(t, "s3cret", creds[0].Secret)
+	assert.Equal(t, "s3cret-long-enough", creds[0].Secret)
 }
 
 func TestParseMCPClientCredentials_Empty(t *testing.T) {
@@ -525,6 +525,52 @@ func TestParseMCPAPIKeys_OddHexLength(t *testing.T) {
 	_, err := cfg.ParseMCPAPIKeys()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "non-hex")
+}
+
+// --- ParseMCPClientCredentials: minimum secret length ---
+
+func TestParseMCPClientCredentials_SecretTooShort(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "bot:short"}
+	_, err := cfg.ParseMCPClientCredentials()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "too short")
+	assert.Contains(t, err.Error(), "16")
+}
+
+func TestParseMCPClientCredentials_SecretMinLength(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "bot:1234567890123456"}
+	creds, err := cfg.ParseMCPClientCredentials()
+	require.NoError(t, err)
+	require.Len(t, creds, 1)
+	assert.Equal(t, "1234567890123456", creds[0].Secret)
+}
+
+// --- Duplicate detection ---
+
+func TestParseMCPClientCredentials_DuplicateClientID(t *testing.T) {
+	cfg := &Config{MCPClientCredentials: "bot:1234567890123456,bot:abcdefghijklmnop"}
+	_, err := cfg.ParseMCPClientCredentials()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate client_id")
+	assert.Contains(t, err.Error(), "bot")
+}
+
+func TestParseMCPAPIKeys_DuplicateUserID(t *testing.T) {
+	key1 := "vs_" + hexString(32)
+	key2 := "vs_" + hexString(32)
+	cfg := &Config{MCPAPIKeys: "alice:" + key1 + ",alice:" + key2}
+	_, err := cfg.ParseMCPAPIKeys()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate user_id")
+	assert.Contains(t, err.Error(), "alice")
+}
+
+func TestParseMCPUsers_DuplicateUsername(t *testing.T) {
+	cfg := &Config{MCPAuthUsers: "alex:pass1,alex:pass2"}
+	_, err := cfg.ParseMCPUsers()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate username")
+	assert.Contains(t, err.Error(), "alex")
 }
 
 // hexString returns a string of n*2 hex characters (n bytes of data).

@@ -201,12 +201,23 @@ type ClientCredential struct {
 	Secret   string
 }
 
+const (
+	// clientSecretMinLen is the minimum length for client credential secrets.
+	// Shorter secrets do not provide enough entropy for SHA-256 hash-based
+	// authentication. 16 characters is a conservative floor that allows
+	// a range of secret formats (hex, base64, passphrase).
+	clientSecretMinLen = 16
+)
+
 // ParseMCPClientCredentials parses the MCP_CLIENT_CREDENTIALS string.
 // Format: "client1:secret1,client2:secret2"
+// Secrets must be at least 16 characters long.
 func (c *Config) ParseMCPClientCredentials() ([]ClientCredential, error) {
 	if c.MCPClientCredentials == "" {
 		return nil, nil
 	}
+
+	seen := make(map[string]struct{})
 
 	var creds []ClientCredential
 
@@ -228,6 +239,15 @@ func (c *Config) ParseMCPClientCredentials() ([]ClientCredential, error) {
 			return nil, fmt.Errorf("empty client_id or secret in entry %d", len(creds)+1)
 		}
 
+		if len(secret) < clientSecretMinLen {
+			return nil, fmt.Errorf("client secret too short in entry %d (minimum %d characters)", len(creds)+1, clientSecretMinLen)
+		}
+
+		if _, dup := seen[clientID]; dup {
+			return nil, fmt.Errorf("duplicate client_id %q in MCP_CLIENT_CREDENTIALS", clientID)
+		}
+
+		seen[clientID] = struct{}{}
 		creds = append(creds, ClientCredential{ClientID: clientID, Secret: secret})
 	}
 
@@ -247,6 +267,8 @@ func (c *Config) ParseMCPAPIKeys() ([]APIKeyEntry, error) {
 	if c.MCPAPIKeys == "" {
 		return nil, nil
 	}
+
+	seenUsers := make(map[string]struct{})
 
 	var entries []APIKeyEntry
 
@@ -281,6 +303,11 @@ func (c *Config) ParseMCPAPIKeys() ([]APIKeyEntry, error) {
 			return nil, fmt.Errorf("API key contains non-hex characters after %q prefix in entry %d", auth.APIKeyPrefix, len(entries)+1)
 		}
 
+		if _, dup := seenUsers[userID]; dup {
+			return nil, fmt.Errorf("duplicate user_id %q in MCP_API_KEYS", userID)
+		}
+
+		seenUsers[userID] = struct{}{}
 		entries = append(entries, APIKeyEntry{UserID: userID, Key: key})
 	}
 
@@ -311,6 +338,10 @@ func (c *Config) ParseMCPUsers() (auth.UserCredentials, error) {
 		password := pair[idx+1:]
 		if username == "" || password == "" {
 			return nil, fmt.Errorf("empty username or password in entry %d", len(users)+1)
+		}
+
+		if _, dup := users[username]; dup {
+			return nil, fmt.Errorf("duplicate username %q in MCP_AUTH_USERS", username)
 		}
 
 		users[username] = password

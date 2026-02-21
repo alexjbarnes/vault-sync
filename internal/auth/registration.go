@@ -27,6 +27,7 @@ type registrationResponse struct {
 	ClientID                string   `json:"client_id"`
 	ClientName              string   `json:"client_name,omitempty"`
 	ClientSecret            string   `json:"client_secret,omitempty"`
+	ClientSecretExpiresAt   *int64   `json:"client_secret_expires_at,omitempty"` // RFC 7591 Section 3.2.1; 0 = never
 	RedirectURIs            []string `json:"redirect_uris"`
 	GrantTypes              []string `json:"grant_types"`
 	ResponseTypes           []string `json:"response_types"`
@@ -173,6 +174,13 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 			ClientIDIssuedAt:        issuedAt,
 		}
 
+		// RFC 7591 Section 3.2.1: client_secret_expires_at is REQUIRED
+		// when client_secret is issued. 0 means the secret does not expire.
+		if clientSecret != "" {
+			zero := int64(0)
+			resp.ClientSecretExpiresAt = &zero
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusCreated)
@@ -192,15 +200,17 @@ func validateRedirectScheme(rawURI string) error {
 	if u.Scheme == "https" {
 		return nil
 	}
-	// Allow http://localhost and http://127.0.0.1 for native app flows.
+	// Allow http://127.0.0.1 and http://[::1] for native app flows.
+	// DNS names like "localhost" are excluded per RFC 8252 Section 8.3
+	// to prevent DNS rebinding attacks.
 	if u.Scheme == "http" {
 		host := u.Hostname()
-		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		if host == "127.0.0.1" || host == "::1" {
 			return nil
 		}
 	}
 
-	return fmt.Errorf("redirect_uri must use HTTPS (or http://localhost): %s", rawURI)
+	return fmt.Errorf("redirect_uri must use HTTPS (or http://127.0.0.1): %s", rawURI)
 }
 
 func writeJSONError(w http.ResponseWriter, status int, errCode, description string) {

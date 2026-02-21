@@ -1001,12 +1001,14 @@ func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 		if push.Folder {
 			if err := s.vault.DeleteEmptyDir(path); err != nil {
 				s.logger.Info("folder not empty, skipping delete (while busy)", slog.String("path", path))
+				s.persistServerFile(path, push, false)
 
 				return
 			}
 		} else {
 			if err := s.vault.DeleteFile(path); err != nil {
-				s.logger.Warn("delete failed (while busy)", slog.String("path", path), slog.String("error", err.Error()))
+				s.logger.Warn("delete failed, restoring state (while busy)", slog.String("path", path), slog.String("error", err.Error()))
+				s.persistServerFile(path, push, false)
 			}
 		}
 
@@ -1114,12 +1116,16 @@ func (s *SyncClient) executeLiveDecision(ctx context.Context, decision Reconcile
 		if push.Folder {
 			if err := s.vault.DeleteEmptyDir(path); err != nil {
 				s.logger.Info("folder not empty, skipping delete", slog.String("path", path))
+				// Restore server state so the reconciler does not
+				// re-process this delete on next reconnect.
+				s.persistServerFile(path, push, false)
 
 				return nil //nolint:nilerr // intentional: non-empty folder is not an error, skip delete
 			}
 		} else {
 			if err := s.vault.DeleteFile(path); err != nil {
-				s.logger.Warn("delete failed", slog.String("path", path), slog.String("error", err.Error()))
+				s.logger.Warn("delete failed, restoring state", slog.String("path", path), slog.String("error", err.Error()))
+				s.persistServerFile(path, push, false)
 			}
 		}
 
