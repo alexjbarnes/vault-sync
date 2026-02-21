@@ -32,7 +32,7 @@ Configure client credentials in `.env`:
 MCP_CLIENT_CREDENTIALS=my-client:my-secret,another-client:another-secret
 ```
 
-Use strong, random secrets. These are hashed at rest and never logged.
+Secrets must be at least 16 characters. Use strong, random values. Secrets are hashed at rest and never logged.
 
 ### Example token request
 

@@ -63,6 +63,7 @@ All configuration via environment variables or `.env` file.
 | `OBSIDIAN_VAULT_PASSWORD` | Yes | Vault encryption password |
 | `OBSIDIAN_VAULT_NAME` | No | Vault name (auto-detected if only one exists) |
 | `OBSIDIAN_SYNC_DIR` | No | Local directory for vault files (defaults to `~/.vault-sync/vaults/<id>/`) |
+| `DEVICE_NAME` | No | Device name reported to sync server (default: `vault-sync`) |
 | `ENABLE_SYNC` | No | Enable sync (default: `true`) |
 
 ### MCP Server
@@ -75,7 +76,8 @@ All configuration via environment variables or `.env` file.
 | `MCP_CLIENT_CREDENTIALS` | No | Comma-separated `client_id:secret` pairs for headless OAuth clients ([docs](docs/auth.md)) |
 | `MCP_API_KEYS` | No | Comma-separated `user:key` pairs for API key auth. Generate keys with `echo "vs_$(openssl rand -hex 32)"` ([docs](docs/auth.md)) |
 | `MCP_LISTEN_ADDR` | No | Listen address (default: `:8090`) |
-| `MCP_LOG_LEVEL` | No | Log level: `debug`, `info`, `warn`, `error` (default: `info` in production, `debug` otherwise) |
+| `MCP_LOG_LEVEL` | No | Log level: `debug`, `info`, `warn`, `error` (default: `info`) |
+| `ENVIRONMENT` | No | `production` for JSON logs, any other value for text logs (default: `development`) |
 
 At least one of `MCP_AUTH_USERS`, `MCP_CLIENT_CREDENTIALS`, or `MCP_API_KEYS` is required when MCP is enabled.
 
@@ -112,6 +114,7 @@ internal/
   mcpserver/            MCP tool registration
   models/               Shared types
   obsidian/             Sync protocol implementation
+  server/               HTTP mux construction
   state/                bbolt persistence
   vault/                Filesystem operations for MCP
 docker/                 Dockerfile and docker-compose.yml

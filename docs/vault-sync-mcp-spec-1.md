@@ -1,5 +1,7 @@
 # vault-sync MCP Server Specification
 
+> **Note:** This is the original design specification written before implementation. For current documentation, see the [README](../README.md), [authentication docs](auth.md), and [MCP tool docs](mcp.md). Some details (env var names, password storage, token expiry, persistence layer, project structure) differ from the final implementation.
+
 ## Overview
 
 An MCP server that exposes an Obsidian vault as a set of tools for reading, searching, and editing markdown notes. The server reads from a local directory that is kept in sync by the vault-sync daemon. It serves over Streamable HTTP transport using the official Go MCP SDK, with OAuth 2.1 authentication for use with Claude on the web, Claude Code, and other MCP clients.

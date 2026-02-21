@@ -14,7 +14,10 @@ Copy the example config and fill in your credentials:
 
 ```bash
 cp .env.example .env
+chmod 600 .env
 ```
+
+The `.env` file contains sensitive credentials. The `chmod 600` restricts it to your user only. vault-sync warns at startup if the file is group- or world-readable.
 
 Edit `.env` and set these values:
 

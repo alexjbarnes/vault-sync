@@ -7,7 +7,7 @@ vault-sync includes an MCP (Model Context Protocol) server that exposes your vau
 ```bash
 ENABLE_MCP=true \
 MCP_SERVER_URL=https://vault.example.com \
-MCP_AUTH_USERS=alice:secret123 \
+MCP_AUTH_USERS=alice:change-me-use-a-strong-password \
 OBSIDIAN_SYNC_DIR=/path/to/vault \
 vault-sync
 ```
