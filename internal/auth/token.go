@@ -260,13 +260,23 @@ func HandleToken(store *Store, logger *slog.Logger, serverURL string) http.Handl
 		if basicUser, basicPass, ok := r.BasicAuth(); ok {
 			req.ClientID = basicUser
 			req.ClientSecret = basicPass
+			logger.Debug("token request: client_secret_basic auth",
+				slog.String("client_id", req.ClientID),
+				slog.String("ip", ip),
+			)
 		}
 
 		switch req.GrantType {
 		case "authorization_code", "refresh_token", "client_credentials":
 			// supported
 		default:
+			logger.Debug("token request: unsupported grant_type",
+				slog.String("grant_type", req.GrantType),
+				slog.String("client_id", req.ClientID),
+				slog.String("ip", ip),
+			)
 			writeJSONError(w, http.StatusBadRequest, "unsupported_grant_type", "unsupported grant_type")
+
 			return
 		}
 
@@ -288,22 +298,35 @@ func HandleToken(store *Store, logger *slog.Logger, serverURL string) http.Handl
 		// while a 401 from secret validation is indistinguishable
 		// from an unknown client.
 		if req.GrantType != "refresh_token" && req.GrantType != "client_credentials" && req.ClientID != "" && !store.ClientAllowsGrant(req.ClientID, req.GrantType) {
+			logger.Debug("token request: client not authorized for grant_type",
+				slog.String("grant_type", req.GrantType),
+				slog.String("client_id", req.ClientID),
+				slog.String("ip", ip),
+			)
 			writeJSONError(w, http.StatusBadRequest, "unauthorized_client", "client is not authorized for this grant type")
+
 			return
 		}
 
+		logger.Debug("token request",
+			slog.String("grant_type", req.GrantType),
+			slog.String("client_id", req.ClientID),
+			slog.String("ip", ip),
+			slog.String("content_type", contentType),
+		)
+
 		switch req.GrantType {
 		case "refresh_token":
-			handleRefreshToken(w, store, limiter, ip, req, serverURL)
+			handleRefreshToken(w, store, limiter, logger, ip, req, serverURL)
 		case "client_credentials":
 			handleClientCredentials(w, store, limiter, logger, ip, req, serverURL)
 		default:
-			handleAuthorizationCode(w, store, limiter, ip, req, serverURL)
+			handleAuthorizationCode(w, store, limiter, logger, ip, req, serverURL)
 		}
 	}
 }
 
-func handleRefreshToken(w http.ResponseWriter, store *Store, limiter *tokenRateLimiter, ip string, req tokenRequest, serverURL string) {
+func handleRefreshToken(w http.ResponseWriter, store *Store, limiter *tokenRateLimiter, logger *slog.Logger, ip string, req tokenRequest, serverURL string) {
 	if req.RefreshToken == "" {
 		writeJSONError(w, http.StatusBadRequest, "invalid_request", "refresh_token is required")
 		return
@@ -312,6 +335,10 @@ func handleRefreshToken(w http.ResponseWriter, store *Store, limiter *tokenRateL
 	rt := store.ConsumeRefreshToken(req.RefreshToken, req.ClientID, req.Resource)
 	if rt == nil {
 		limiter.recordFailure(ip, req.ClientID)
+		logger.Debug("refresh token validation failed",
+			slog.String("client_id", req.ClientID),
+			slog.String("ip", ip),
+		)
 		writeJSONError(w, http.StatusBadRequest, "invalid_grant", "invalid or expired refresh token")
 
 		return
@@ -330,6 +357,11 @@ func handleRefreshToken(w http.ResponseWriter, store *Store, limiter *tokenRateL
 	}
 
 	issueTokenPair(w, store, rt.UserID, resource, rt.Scopes, rt.ClientID)
+
+	logger.Info("refresh token exchanged",
+		slog.String("client_id", rt.ClientID),
+		slog.String("user_id", rt.UserID),
+	)
 }
 
 func handleClientCredentials(w http.ResponseWriter, store *Store, limiter *tokenRateLimiter, logger *slog.Logger, ip string, req tokenRequest, serverURL string) {
@@ -352,7 +384,12 @@ func handleClientCredentials(w http.ResponseWriter, store *Store, limiter *token
 	// clients, dynamic clients (no secret), and wrong-secret attempts
 	// all produce the same 401 response above.
 	if !store.ClientAllowsGrant(req.ClientID, "client_credentials") {
+		logger.Debug("client_credentials grant not allowed for client",
+			slog.String("client_id", req.ClientID),
+			slog.String("ip", ip),
+		)
 		writeJSONError(w, http.StatusBadRequest, "unauthorized_client", "client is not authorized for this grant type")
+
 		return
 	}
 
@@ -364,7 +401,14 @@ func handleClientCredentials(w http.ResponseWriter, store *Store, limiter *token
 	}
 
 	if resource != "" && strings.TrimRight(resource, "/") != strings.TrimRight(serverURL, "/") {
+		logger.Debug("client_credentials resource mismatch",
+			slog.String("client_id", req.ClientID),
+			slog.String("resource", req.Resource),
+			slog.String("server_url", serverURL),
+			slog.String("ip", ip),
+		)
 		writeJSONError(w, http.StatusBadRequest, "invalid_target", "resource parameter does not match this server")
+
 		return
 	}
 
@@ -373,9 +417,13 @@ func handleClientCredentials(w http.ResponseWriter, store *Store, limiter *token
 	// Section 4.4.3, no refresh token is issued because the client
 	// already holds credentials to re-authenticate.
 	issueAccessToken(w, store, req.ClientID, resource, nil, req.ClientID)
+
+	logger.Info("client_credentials token issued",
+		slog.String("client_id", req.ClientID),
+	)
 }
 
-func handleAuthorizationCode(w http.ResponseWriter, store *Store, limiter *tokenRateLimiter, ip string, req tokenRequest, serverURL string) {
+func handleAuthorizationCode(w http.ResponseWriter, store *Store, limiter *tokenRateLimiter, logger *slog.Logger, ip string, req tokenRequest, serverURL string) {
 	if req.Code == "" {
 		writeJSONError(w, http.StatusBadRequest, "invalid_request", "code is required")
 		return
@@ -384,6 +432,10 @@ func handleAuthorizationCode(w http.ResponseWriter, store *Store, limiter *token
 	ac := store.ConsumeCode(req.Code)
 	if ac == nil {
 		limiter.recordFailure(ip, req.ClientID)
+		logger.Debug("authorization code not found or expired",
+			slog.String("client_id", req.ClientID),
+			slog.String("ip", ip),
+		)
 		writeJSONError(w, http.StatusBadRequest, "invalid_grant", "invalid or expired authorization code")
 
 		return
@@ -391,13 +443,26 @@ func handleAuthorizationCode(w http.ResponseWriter, store *Store, limiter *token
 
 	// RFC 6749 Section 4.1.3: verify client_id matches the auth code.
 	if ac.ClientID != "" && req.ClientID != ac.ClientID {
+		logger.Debug("authorization code client_id mismatch",
+			slog.String("request_client_id", req.ClientID),
+			slog.String("code_client_id", ac.ClientID),
+			slog.String("ip", ip),
+		)
 		writeJSONError(w, http.StatusBadRequest, "invalid_grant", "client_id mismatch")
+
 		return
 	}
 
 	// Validate redirect_uri matches the one stored on the auth code.
 	if ac.RedirectURI != "" && req.RedirectURI != ac.RedirectURI {
+		logger.Debug("authorization code redirect_uri mismatch",
+			slog.String("client_id", req.ClientID),
+			slog.String("request_redirect_uri", req.RedirectURI),
+			slog.String("code_redirect_uri", ac.RedirectURI),
+			slog.String("ip", ip),
+		)
 		writeJSONError(w, http.StatusBadRequest, "invalid_grant", "redirect_uri mismatch")
+
 		return
 	}
 
@@ -428,6 +493,10 @@ func handleAuthorizationCode(w http.ResponseWriter, store *Store, limiter *token
 
 	if !verifyPKCE(req.CodeVerifier, ac.CodeChallenge) {
 		limiter.recordFailure(ip, req.ClientID)
+		logger.Debug("PKCE verification failed",
+			slog.String("client_id", req.ClientID),
+			slog.String("ip", ip),
+		)
 		writeJSONError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
 
 		return
@@ -447,6 +516,11 @@ func handleAuthorizationCode(w http.ResponseWriter, store *Store, limiter *token
 	}
 
 	issueTokenPair(w, store, ac.UserID, resource, ac.Scopes, clientID)
+
+	logger.Info("authorization code exchanged",
+		slog.String("client_id", clientID),
+		slog.String("user_id", ac.UserID),
+	)
 }
 
 // issueTokenPair generates and saves an access/refresh token pair, then

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -50,12 +51,14 @@ const (
 )
 
 // HandleRegistration returns the /oauth/register handler.
-func HandleRegistration(store *Store) http.HandlerFunc {
+func HandleRegistration(store *Store, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
+		ip := remoteIP(r)
 
 		// RFC 7591: the request body MUST be application/json.
 		ct := r.Header.Get("Content-Type")
@@ -65,7 +68,9 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 		}
 
 		if !store.RegistrationAllowed() {
+			logger.Debug("DCR: registration rate limited", slog.String("ip", ip))
 			writeJSONError(w, http.StatusTooManyRequests, "rate_limit", "too many registration requests, try again later")
+
 			return
 		}
 
@@ -95,7 +100,12 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 		// pre-configuration via MCP_CLIENT_CREDENTIALS.
 		for _, gt := range req.GrantTypes {
 			if gt != "authorization_code" && gt != "refresh_token" {
+				logger.Debug("DCR: rejected disallowed grant_type",
+					slog.String("grant_type", gt),
+					slog.String("ip", ip),
+				)
 				writeJSONError(w, http.StatusBadRequest, "invalid_client_metadata", fmt.Sprintf("grant type %q is not available through dynamic registration", gt))
+
 				return
 			}
 		}
@@ -105,6 +115,10 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 			req.TokenEndpointAuthMethod != "none" &&
 			req.TokenEndpointAuthMethod != "client_secret_post" &&
 			req.TokenEndpointAuthMethod != "client_secret_basic" {
+			logger.Debug("DCR: rejected unsupported token_endpoint_auth_method",
+				slog.String("auth_method", req.TokenEndpointAuthMethod),
+				slog.String("ip", ip),
+			)
 			writeJSONError(w, http.StatusBadRequest, "invalid_client_metadata",
 				fmt.Sprintf("unsupported token_endpoint_auth_method %q", req.TokenEndpointAuthMethod))
 
@@ -162,6 +176,14 @@ func HandleRegistration(store *Store) http.HandlerFunc {
 			writeJSONError(w, http.StatusServiceUnavailable, "server_error", "maximum number of registered clients reached")
 			return
 		}
+
+		logger.Info("DCR: client registered",
+			slog.String("client_id", clientID),
+			slog.String("client_name", req.ClientName),
+			slog.String("grant_types", strings.Join(grantTypes, ",")),
+			slog.String("auth_method", authMethod),
+			slog.String("ip", ip),
+		)
 
 		resp := registrationResponse{
 			ClientID:                clientID,

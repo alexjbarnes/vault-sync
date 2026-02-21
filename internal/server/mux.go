@@ -24,11 +24,11 @@ func NewMux(cfg MuxConfig) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/oauth-protected-resource", auth.HandleProtectedResourceMetadata(cfg.ServerURL))
 	mux.HandleFunc("/.well-known/oauth-authorization-server", auth.HandleServerMetadata(cfg.ServerURL))
-	mux.HandleFunc("/oauth/register", auth.HandleRegistration(cfg.Store))
+	mux.HandleFunc("/oauth/register", auth.HandleRegistration(cfg.Store, cfg.Logger))
 	mux.HandleFunc("/oauth/authorize", auth.HandleAuthorize(cfg.Store, cfg.Users, cfg.Logger, cfg.ServerURL))
 	mux.HandleFunc("/oauth/token", auth.HandleToken(cfg.Store, cfg.Logger, cfg.ServerURL))
 
-	authMiddleware := auth.Middleware(cfg.Store, cfg.ServerURL)
+	authMiddleware := auth.Middleware(cfg.Store, cfg.Logger, cfg.ServerURL)
 	mux.Handle("/mcp", authMiddleware(cfg.MCPHandler))
 
 	return mux

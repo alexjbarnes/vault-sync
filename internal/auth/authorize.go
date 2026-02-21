@@ -282,7 +282,7 @@ func HandleAuthorize(store *Store, users UserCredentials, logger *slog.Logger, s
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			handleAuthorizeGET(w, r, store, serverURL)
+			handleAuthorizeGET(w, r, store, logger, serverURL)
 		case http.MethodPost:
 			handleAuthorizePOST(w, r, store, users, logger, limiter, serverURL)
 		default:
@@ -375,8 +375,9 @@ func generateCSRFToken(store *Store, clientID, redirectURI string) string {
 	return token
 }
 
-func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, serverURL string) {
+func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, logger *slog.Logger, serverURL string) {
 	q := r.URL.Query()
+	ip := remoteIP(r)
 
 	clientID := q.Get("client_id")
 	if clientID == "" {
@@ -386,14 +387,24 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, se
 
 	client := store.GetClient(clientID)
 	if client == nil {
+		logger.Debug("authorize: unknown client_id",
+			slog.String("client_id", clientID),
+			slog.String("ip", ip),
+		)
 		http.Error(w, "unknown client_id", http.StatusBadRequest)
+
 		return
 	}
 
 	// Reject clients that are only authorized for client_credentials.
 	// They should authenticate directly at the token endpoint.
 	if !store.ClientAllowsGrant(clientID, "authorization_code") {
+		logger.Debug("authorize: client not allowed for authorization_code grant",
+			slog.String("client_id", clientID),
+			slog.String("ip", ip),
+		)
 		http.Error(w, "client is not authorized for the authorization code flow", http.StatusBadRequest)
+
 		return
 	}
 
@@ -408,7 +419,13 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, se
 			return
 		}
 	} else if !validateRedirectURI(client, redirectURI) {
+		logger.Debug("authorize: redirect_uri rejected",
+			slog.String("client_id", clientID),
+			slog.String("redirect_uri", redirectURI),
+			slog.String("ip", ip),
+		)
 		http.Error(w, "redirect_uri not registered for this client", http.StatusBadRequest)
+
 		return
 	}
 
@@ -424,6 +441,12 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, se
 			errCode = "invalid_request"
 		}
 
+		logger.Debug("authorize: invalid response_type",
+			slog.String("client_id", clientID),
+			slog.String("response_type", responseType),
+			slog.String("redirect_uri", redirectURI),
+			slog.String("ip", ip),
+		)
 		redirectWithError(w, r, redirectURI, state, errCode, "response_type must be \"code\"")
 
 		return
@@ -461,6 +484,13 @@ func handleAuthorizeGET(w http.ResponseWriter, r *http.Request, store *Store, se
 		Resource:            resource,
 	}
 
+	logger.Debug("authorize: login page served",
+		slog.String("client_id", clientID),
+		slog.String("redirect_uri", redirectURI),
+		slog.String("response_type", responseType),
+		slog.String("ip", ip),
+	)
+
 	w.Header().Set("Content-Type", "text/html")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
@@ -475,6 +505,7 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		return
 	}
 
+	ip := remoteIP(r)
 	clientID := r.FormValue("client_id")
 	redirectURI := r.FormValue("redirect_uri")
 	state := r.FormValue("state")
@@ -486,7 +517,12 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 
 	client := store.GetClient(clientID)
 	if client == nil {
+		logger.Debug("authorize POST: unknown client_id",
+			slog.String("client_id", clientID),
+			slog.String("ip", ip),
+		)
 		http.Error(w, "unknown client_id", http.StatusBadRequest)
+
 		return
 	}
 
@@ -499,7 +535,13 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 			return
 		}
 	} else if !validateRedirectURI(client, redirectURI) {
+		logger.Debug("authorize POST: redirect_uri rejected",
+			slog.String("client_id", clientID),
+			slog.String("redirect_uri", redirectURI),
+			slog.String("ip", ip),
+		)
 		http.Error(w, "redirect_uri not registered for this client", http.StatusBadRequest)
+
 		return
 	}
 
@@ -518,7 +560,6 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 
 	// Rate limiting by remote IP. Check before consuming CSRF so a
 	// rate-limited request does not destroy the user's CSRF token.
-	ip := remoteIP(r)
 	if limiter.check(ip) {
 		logger.Warn("login rate limited", slog.String("ip", ip))
 		http.Error(w, "too many failed login attempts, try again later", http.StatusTooManyRequests)
@@ -530,7 +571,13 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 	// attack, so return a plain error rather than redirecting to the
 	// client (which could be the attacker's URI in a forged form).
 	if !store.ConsumeCSRF(csrfToken, clientID, redirectURI) {
+		logger.Warn("authorize POST: CSRF validation failed",
+			slog.String("client_id", clientID),
+			slog.String("redirect_uri", redirectURI),
+			slog.String("ip", ip),
+		)
 		http.Error(w, "invalid or expired CSRF token", http.StatusForbidden)
+
 		return
 	}
 
@@ -572,7 +619,12 @@ func handleAuthorizePOST(w http.ResponseWriter, r *http.Request, store *Store, u
 		return
 	}
 
-	logger.Info("login successful", slog.String("username", username))
+	logger.Info("login successful",
+		slog.String("username", username),
+		slog.String("client_id", clientID),
+		slog.String("redirect_uri", redirectURI),
+		slog.String("ip", ip),
+	)
 
 	// Issue authorization code bound to the resource (RFC 8707).
 	// Scopes are not propagated because there is no defined set of

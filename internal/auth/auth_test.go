@@ -282,7 +282,7 @@ func TestServerMetadata(t *testing.T) {
 
 func TestRegistration_Success(t *testing.T) {
 	store := testStore(t)
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"client_name":"Claude","redirect_uris":["https://claude.ai/callback"]}`
 	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
@@ -307,7 +307,7 @@ func TestRegistration_Success(t *testing.T) {
 
 func TestRegistration_MissingRedirectURIs(t *testing.T) {
 	store := testStore(t)
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"client_name":"Claude"}`
 	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
@@ -321,7 +321,7 @@ func TestRegistration_MissingRedirectURIs(t *testing.T) {
 
 func TestRegistration_WrongMethod(t *testing.T) {
 	store := testStore(t)
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	req := httptest.NewRequest("GET", "/oauth/register", nil)
 	rec := httptest.NewRecorder()
@@ -339,7 +339,7 @@ func TestRegistration_ClientLimitReached(t *testing.T) {
 		})
 	}
 
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 	body := `{"redirect_uris":["https://example.com/cb"]}`
 	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -352,7 +352,7 @@ func TestRegistration_ClientLimitReached(t *testing.T) {
 
 func TestRegistration_RejectsHTTPRedirectURI(t *testing.T) {
 	store := testStore(t)
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"redirect_uris":["http://attacker.com/steal"]}`
 	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
@@ -367,7 +367,7 @@ func TestRegistration_RejectsHTTPRedirectURI(t *testing.T) {
 
 func TestRegistration_AllowsHTTPLoopback(t *testing.T) {
 	store := testStore(t)
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"redirect_uris":["http://127.0.0.1:8080/callback"]}`
 	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
@@ -381,7 +381,7 @@ func TestRegistration_AllowsHTTPLoopback(t *testing.T) {
 
 func TestRegistration_RejectsHTTPLocalhost(t *testing.T) {
 	store := testStore(t)
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"redirect_uris":["http://localhost:8080/callback"]}`
 	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
@@ -833,7 +833,7 @@ func TestAuthorize_GET_ClickjackHeaders(t *testing.T) {
 func TestRegistration_RejectsImplicitGrant(t *testing.T) {
 	store := testStore(t)
 
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"],"grant_types":["implicit"]}`
 
@@ -850,7 +850,7 @@ func TestRegistration_RejectsImplicitGrant(t *testing.T) {
 func TestRegistration_RejectsPasswordGrant(t *testing.T) {
 	store := testStore(t)
 
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"],"grant_types":["password"]}`
 
@@ -1230,7 +1230,7 @@ func TestClientCredentials_NoRefreshToken(t *testing.T) {
 func TestRegistration_BlocksClientCredentials(t *testing.T) {
 	store := testStore(t)
 
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"client_name":"Bot","redirect_uris":["https://example.com/cb"],"grant_types":["client_credentials"]}`
 
@@ -1247,7 +1247,7 @@ func TestRegistration_BlocksClientCredentials(t *testing.T) {
 func TestRegistration_BlocksClientCredentialsMixed(t *testing.T) {
 	store := testStore(t)
 
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"client_name":"Bot","redirect_uris":["https://example.com/cb"],"grant_types":["authorization_code","client_credentials"]}`
 
@@ -1499,7 +1499,7 @@ func TestToken_RefreshAlwaysAllowed(t *testing.T) {
 func TestRegistration_StoresGrantTypes(t *testing.T) {
 	store := testStore(t)
 
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"],"grant_types":["authorization_code"]}`
 
@@ -1523,7 +1523,7 @@ func TestRegistration_StoresGrantTypes(t *testing.T) {
 func TestRegistration_AllowsRefreshTokenGrant(t *testing.T) {
 	store := testStore(t)
 
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"],"grant_types":["authorization_code","refresh_token"]}`
 
@@ -1709,7 +1709,7 @@ func TestMiddleware_WrongResourceOnToken(t *testing.T) {
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	})
 
-	mw := Middleware(store, testServerURL)
+	mw := Middleware(store, slog.Default(), testServerURL)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
@@ -1987,7 +1987,7 @@ func TestMiddleware_InjectsRequestContext(t *testing.T) {
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	})
 
-	mw := Middleware(store, "https://vault.example.com")
+	mw := Middleware(store, slog.Default(), "https://vault.example.com")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "ctx-user", RequestUserID(r.Context()))
 		assert.Equal(t, "ctx-client", RequestClientID(r.Context()))
@@ -2012,7 +2012,7 @@ func TestMiddleware_ValidToken(t *testing.T) {
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	})
 
-	mw := Middleware(store, "https://vault.example.com")
+	mw := Middleware(store, slog.Default(), "https://vault.example.com")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -2030,7 +2030,7 @@ func TestMiddleware_ValidToken(t *testing.T) {
 
 func TestMiddleware_MissingToken(t *testing.T) {
 	store := testStore(t)
-	mw := Middleware(store, "https://vault.example.com")
+	mw := Middleware(store, slog.Default(), "https://vault.example.com")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
@@ -2049,7 +2049,7 @@ func TestMiddleware_MissingToken(t *testing.T) {
 
 func TestMiddleware_InvalidToken(t *testing.T) {
 	store := testStore(t)
-	mw := Middleware(store, "https://vault.example.com")
+	mw := Middleware(store, slog.Default(), "https://vault.example.com")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
@@ -2072,7 +2072,7 @@ func TestMiddleware_ExpiredToken(t *testing.T) {
 		ExpiresAt: time.Now().Add(-1 * time.Minute),
 	})
 
-	mw := Middleware(store, "https://vault.example.com")
+	mw := Middleware(store, slog.Default(), "https://vault.example.com")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
@@ -2088,7 +2088,7 @@ func TestMiddleware_ExpiredToken(t *testing.T) {
 
 func TestMiddleware_NonBearerAuth(t *testing.T) {
 	store := testStore(t)
-	mw := Middleware(store, "https://vault.example.com")
+	mw := Middleware(store, slog.Default(), "https://vault.example.com")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
@@ -2383,7 +2383,7 @@ func TestMiddleware_ExpiredTokenHeader(t *testing.T) {
 		ExpiresAt: time.Now().Add(-1 * time.Minute),
 	})
 
-	mw := Middleware(store, "https://vault.example.com")
+	mw := Middleware(store, slog.Default(), "https://vault.example.com")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
@@ -2780,7 +2780,7 @@ func TestToken_PragmaNoCache(t *testing.T) {
 
 func TestRegistration_ConfidentialClientGetsSecret(t *testing.T) {
 	store := testStore(t)
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"client_name":"Confidential","redirect_uris":["https://example.com/cb"],"token_endpoint_auth_method":"client_secret_post"}`
 	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
@@ -2802,7 +2802,7 @@ func TestRegistration_ConfidentialClientGetsSecret(t *testing.T) {
 
 func TestRegistration_PublicClientNoSecret(t *testing.T) {
 	store := testStore(t)
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"client_name":"Public","redirect_uris":["https://example.com/cb"]}`
 	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
@@ -2821,7 +2821,7 @@ func TestRegistration_PublicClientNoSecret(t *testing.T) {
 
 func TestRegistration_ClientIDIssuedAt(t *testing.T) {
 	store := testStore(t)
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"]}`
 	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
@@ -2839,7 +2839,7 @@ func TestRegistration_ClientIDIssuedAt(t *testing.T) {
 
 func TestRegistration_PersistsResponseTypesAndAuthMethod(t *testing.T) {
 	store := testStore(t)
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"],"response_types":["code"],"token_endpoint_auth_method":"none"}`
 	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
@@ -2861,7 +2861,7 @@ func TestRegistration_PersistsResponseTypesAndAuthMethod(t *testing.T) {
 
 func TestRegistration_RejectsWrongContentType(t *testing.T) {
 	store := testStore(t)
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"client_name":"Test","redirect_uris":["https://example.com/cb"]}`
 	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
@@ -2875,7 +2875,7 @@ func TestRegistration_RejectsWrongContentType(t *testing.T) {
 
 func TestRegistration_AcceptsNoContentType(t *testing.T) {
 	store := testStore(t)
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	// Some clients may omit Content-Type entirely. We accept it
 	// rather than being overly strict, since json.Decoder handles it.
@@ -3093,7 +3093,7 @@ func TestMiddleware_RefreshTokenAsBearer(t *testing.T) {
 		ClientID:  "client1",
 	})
 
-	mw := Middleware(store, "https://vault.example.com")
+	mw := Middleware(store, slog.Default(), "https://vault.example.com")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
@@ -3191,7 +3191,7 @@ func TestMiddleware_APIKey_Valid(t *testing.T) {
 	rawKey := "vs_" + RandomHex(32)
 	store.RegisterAPIKey(rawKey, "apikey-user")
 
-	mw := Middleware(store, testServerURL)
+	mw := Middleware(store, slog.Default(), testServerURL)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "apikey-user", RequestUserID(r.Context()))
 		assert.Equal(t, "apikey-user", RequestClientID(r.Context()))
@@ -3211,7 +3211,7 @@ func TestMiddleware_APIKey_Valid(t *testing.T) {
 func TestMiddleware_APIKey_Invalid(t *testing.T) {
 	store := testStore(t)
 
-	mw := Middleware(store, testServerURL)
+	mw := Middleware(store, slog.Default(), testServerURL)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
@@ -3232,7 +3232,7 @@ func TestMiddleware_APIKey_RevokedReturns401(t *testing.T) {
 	store.RegisterAPIKey(rawKey, "user1")
 
 	// Verify it works first.
-	mw := Middleware(store, testServerURL)
+	mw := Middleware(store, slog.Default(), testServerURL)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -3270,7 +3270,7 @@ func TestMiddleware_APIKey_DoesNotAffectOAuthTokens(t *testing.T) {
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
 
-	mw := Middleware(store, testServerURL)
+	mw := Middleware(store, slog.Default(), testServerURL)
 
 	// API key path.
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3358,7 +3358,7 @@ func TestMiddleware_APIKey_ClientIDMatchesUserID(t *testing.T) {
 	rawKey := "vs_" + RandomHex(32)
 	store.RegisterAPIKey(rawKey, "deploy-bot")
 
-	mw := Middleware(store, testServerURL)
+	mw := Middleware(store, slog.Default(), testServerURL)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "deploy-bot", RequestUserID(r.Context()))
 		assert.Equal(t, "deploy-bot", RequestClientID(r.Context()))
@@ -4240,7 +4240,7 @@ func TestValidateRedirectURI_NoRegisteredURIs_RejectsLocalhost(t *testing.T) {
 
 func TestRegistration_ClientSecretExpiresAt(t *testing.T) {
 	store := testStore(t)
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"redirect_uris":["http://127.0.0.1:8080/callback"],"token_endpoint_auth_method":"client_secret_post"}`
 	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
@@ -4260,7 +4260,7 @@ func TestRegistration_ClientSecretExpiresAt(t *testing.T) {
 
 func TestRegistration_NoSecretExpiresAt_WhenAuthMethodNone(t *testing.T) {
 	store := testStore(t)
-	handler := HandleRegistration(store)
+	handler := HandleRegistration(store, slog.Default())
 
 	body := `{"redirect_uris":["http://127.0.0.1:8080/callback"]}`
 	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
