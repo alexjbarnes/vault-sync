@@ -58,17 +58,24 @@
 
 ## v1.0.0
 
-Tagged release with security audit, `internal/` package structure, CI/CD, goreleaser.
-
-## v0.0.5
-
 Initial public release.
+
+### Added
 
 - Two-way encrypted sync via WebSocket (AES-256-GCM, scrypt key derivation)
 - Three-way merge for markdown files, shallow JSON merge for config files
 - Real-time file watching with debounce and offline queue
-- MCP server with 8 tools: list, read, search, write, edit, delete, move, copy
-- OAuth 2.1 with PKCE, dynamic client registration, refresh token rotation
-- Full-text search using ripgrep (with Go fallback)
-- Cross-platform: Linux, macOS, Windows
-- Docker support
+- MCP server with 8 tools: `vault_list`, `vault_read`, `vault_search`, `vault_write`, `vault_edit`, `vault_delete`, `vault_move`, `vault_copy`
+- OAuth 2.1 with PKCE, dynamic client registration (RFC 7591), refresh token rotation
+- Interactive login page for browser-based OAuth flows
+- Full-text search using ripgrep with pure-Go fallback
+- Vault file index with incremental updates via fsnotify
+- bbolt persistence for OAuth clients, tokens, and sync state
+- Per-IP rate limiting and per-client lockout on auth endpoints
+- CSRF protection on the authorization endpoint
+- `ENABLE_SYNC` and `ENABLE_MCP` feature flags for running sync-only or MCP-only
+- Cross-platform builds: Linux, macOS, Windows (amd64 and arm64)
+- Docker support with `docker-compose.yml`
+- CI/CD with GitHub Actions: lint, test (80% coverage gate), build, cross-compile, secret scanning
+- goreleaser for automated release builds and GitHub release creation
+- `.env` file support with insecure permissions warning at startup
