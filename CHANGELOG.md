@@ -39,6 +39,9 @@
 - Authorization code scopes now stored and carried through to token response
 - Refresh token grant type allowed alongside authorization_code in DCR
 - Content-Type validation on DCR requests (requires `application/json`)
+- MCP SSE connections dropped after 60 seconds due to HTTP server write timeout (now disabled)
+- Clean shutdown logged as error and exited with code 1 due to `context.Canceled` propagating through errgroup
+- `liveMergeMD` trivial cases did not update hash cache, causing spurious re-uploads on every subsequent sync write
 
 ### Security
 
