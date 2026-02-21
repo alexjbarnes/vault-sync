@@ -35,7 +35,8 @@ MCP_AUTH_USERS=alice:a-strong-password
 MCP_CLIENT_CREDENTIALS=my-bot:a-strong-random-secret
 
 # Option 3: Static API key for the simplest setup
-MCP_API_KEYS=alice:vs_<64 hex chars from: openssl rand -hex 32>
+# Generate a key with: echo "vs_$(openssl rand -hex 32)"
+MCP_API_KEYS=alice:vs_<your-generated-key>
 ```
 
 You can combine multiple methods. At least one must be set when MCP is enabled.
@@ -149,7 +150,27 @@ The client authenticates by posting its `client_id` and `client_secret` directly
 
 ### API key
 
-The simplest option. Requires `MCP_API_KEYS`. Generate a key and use it as a Bearer token. No OAuth flow needed. See the [OAuth documentation](oauth.md) for setup details.
+The simplest option. No OAuth flow needed. Generate a key, add it to your config, and use it as a Bearer token.
+
+Generate a key:
+
+```bash
+echo "vs_$(openssl rand -hex 32)"
+```
+
+Add it to `.env`:
+
+```
+MCP_API_KEYS=alice:vs_a1b2c3...your-generated-key
+```
+
+The user ID (`alice` above) is an arbitrary label used for audit logging. It does not need to match any `MCP_AUTH_USERS` entry.
+
+MCP clients that support Bearer token auth can use the key directly. For clients that need manual configuration, set the `Authorization` header:
+
+```
+Authorization: Bearer vs_a1b2c3...your-generated-key
+```
 
 ## 7. Connect an MCP client
 

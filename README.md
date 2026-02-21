@@ -73,8 +73,9 @@ All configuration via environment variables or `.env` file.
 | `MCP_SERVER_URL` | When MCP enabled | Public HTTPS URL (OAuth resource identifier) |
 | `MCP_AUTH_USERS` | Conditional | Comma-separated `user:password` pairs for the OAuth login page |
 | `MCP_CLIENT_CREDENTIALS` | No | Comma-separated `client_id:secret` pairs for headless OAuth clients ([docs](docs/oauth.md)) |
-| `MCP_API_KEYS` | No | Comma-separated `user:vs_<hex>` pairs for API key authentication ([docs](docs/oauth.md)) |
+| `MCP_API_KEYS` | No | Comma-separated `user:key` pairs for API key auth. Generate keys with `echo "vs_$(openssl rand -hex 32)"` ([docs](docs/oauth.md)) |
 | `MCP_LISTEN_ADDR` | No | Listen address (default: `:8090`) |
+| `MCP_LOG_LEVEL` | No | Log level: `debug`, `info`, `warn`, `error` (default: `info` in production, `debug` otherwise) |
 
 At least one of `MCP_AUTH_USERS`, `MCP_CLIENT_CREDENTIALS`, or `MCP_API_KEYS` is required when MCP is enabled.
 
