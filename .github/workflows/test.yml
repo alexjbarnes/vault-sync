@@ -20,7 +20,9 @@ jobs:
           go-version-file: go.mod
 
       - name: Run tests with coverage
-        run: go test -race -coverprofile=coverage.out ./...
+        run: |
+          go test -race -coverprofile=coverage.raw ./...
+          grep -v -E '_templ\.go|mock_.*\.go|\.pb\.go' coverage.raw > coverage.out
 
       - name: Check coverage threshold
         id: coverage
