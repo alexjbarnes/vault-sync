@@ -5,10 +5,13 @@ on:
     - cron: "0 17 * * 5"  # Friday at 5pm UTC
   workflow_dispatch:       # allow manual trigger
 
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
+# Note: GITHUB_TOKEN cannot create PRs that trigger other workflows (CI, lint,
+# etc.) due to GitHub's anti-cascade policy. A Personal Access Token stored as
+# RENOVATE_TOKEN is required. Create a fine-grained PAT with permissions:
+#   - contents: write
+#   - pull-requests: write
+#   - workflows: write (needed to update workflow pinned actions)
+# Then add it as a repository secret named RENOVATE_TOKEN.
 
 jobs:
   renovate:
@@ -18,7 +21,7 @@ jobs:
 
       - uses: renovatebot/github-action@v46.1.0
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RENOVATE_TOKEN }}
           configurationFile: renovate.json
         env:
           RENOVATE_REPOSITORIES: ${{ github.repository }}
