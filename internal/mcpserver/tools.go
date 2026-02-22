@@ -49,6 +49,17 @@ func logToolCall(ctx context.Context, logger *slog.Logger, tool string, args ...
 	}
 }
 
+// searchDescription returns the vault_search tool description, including which
+// search engine powers content search.
+func searchDescription() string {
+	const base = "Full-text search across file names, frontmatter tags, and file content. Case-insensitive. Returns matching files with context snippets and line numbers."
+	if vault.RgPath() != "" {
+		return base + " Content search powered by ripgrep (fast literal pattern matching)."
+	}
+
+	return base + " Content search uses built-in Go implementation (literal pattern matching)."
+}
+
 // RegisterTools adds all vault tools to the given MCP server.
 func RegisterTools(server *mcp.Server, v *vault.Vault, logger *slog.Logger) {
 	mcp.AddTool(server, &mcp.Tool{
@@ -63,7 +74,7 @@ func RegisterTools(server *mcp.Server, v *vault.Vault, logger *slog.Logger) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vault_search",
-		Description: "Full-text search across file names, frontmatter tags, and file content. Case-insensitive. Returns matching files with context snippets and line numbers.",
+		Description: searchDescription(),
 	}, searchHandler(v, logger))
 
 	mcp.AddTool(server, &mcp.Tool{
