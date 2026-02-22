@@ -375,7 +375,9 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 
 	mcpServer := mcp.NewServer(
 		&mcp.Implementation{Name: "vault-sync-mcp", Version: Version},
-		nil,
+		&mcp.ServerOptions{
+			Instructions: "Provides read and write access to an Obsidian vault. All file paths are relative to the vault root.",
+		},
 	)
 	mcpserver.RegisterTools(mcpServer, v, mcpLogger)
 
