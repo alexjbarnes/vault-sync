@@ -14,19 +14,29 @@ run:
 test:
     go test -v -race ./...
 
-# Run tests with coverage report
+# Run tests with coverage report (excludes generated files)
 test-coverage:
-    go test -coverprofile=coverage.out ./...
+    go test -coverprofile=coverage.raw ./...
+    grep -v -E '_templ\.go|mock_.*\.go|\.pb\.go' coverage.raw > coverage.out
     go tool cover -func=coverage.out | tail -1
     go tool cover -html=coverage.out -o coverage.html
     @echo "Coverage report: coverage.html"
 
 # Run tests with coverage for a specific package (e.g. just test-coverage-pkg ./internal/state/...)
 test-coverage-pkg pkg:
-    go test -coverprofile=coverage.out {{pkg}}
+    go test -coverprofile=coverage.raw {{pkg}}
+    grep -v -E '_templ\.go|mock_.*\.go|\.pb\.go' coverage.raw > coverage.out
     go tool cover -func=coverage.out
     go tool cover -html=coverage.out -o coverage.html
     @echo "Coverage report: coverage.html"
+
+# Format code with gofumpt (falls back to gofmt if gofumpt is not installed)
+fmt:
+    @which gofumpt > /dev/null 2>&1 && gofumpt -w . || gofmt -w .
+
+# Tidy module dependencies
+tidy:
+    go mod tidy
 
 # Run linter
 lint:
@@ -38,7 +48,7 @@ lint-fix:
 
 # Clean build artifacts
 clean:
-    rm -rf bin/ coverage.out coverage.html
+    rm -rf bin/ coverage.raw coverage.out coverage.html
 
 # Build Docker image
 docker-build:

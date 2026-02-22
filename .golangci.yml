@@ -57,6 +57,10 @@ linters:
           - funlen
           - gocognit
           - mnd
+      # Generated files should not be linted.
+      - path: (_templ\.go|mock_.*\.go|\.pb\.go)
+        linters:
+          - all
 
 issues:
   max-issues-per-linter: 0
