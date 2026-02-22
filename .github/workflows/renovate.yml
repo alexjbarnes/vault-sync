@@ -14,9 +14,9 @@ jobs:
   renovate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: renovatebot/github-action@v46.1.0
+      - uses: renovatebot/github-action@v46.1.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           configurationFile: renovate.json
