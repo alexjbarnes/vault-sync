@@ -39,7 +39,7 @@ func init() {
 // fullSyncClient builds a SyncClient with real cipher, vault, and state.
 // No WebSocket connection is set (conn is nil). For tests that need a
 // conn (executePush), set s.conn and s.inboundCh separately.
-func fullSyncClient(t *testing.T) (*SyncClient, *Vault, *state.State, *CipherV0) {
+func fullSyncClient(t *testing.T) (*SyncClient, *Vault, *state.State, Cipher) {
 	t.Helper()
 
 	cipher := cachedCipher
@@ -84,7 +84,7 @@ func fakePullError(msg string) pullFunc {
 }
 
 // encryptContent is a test helper that encrypts content with the given cipher.
-func encryptContent(t *testing.T, cipher *CipherV0, plaintext []byte) []byte {
+func encryptContent(t *testing.T, cipher Cipher, plaintext []byte) []byte {
 	t.Helper()
 
 	enc, err := cipher.EncryptContent(plaintext)
@@ -94,7 +94,7 @@ func encryptContent(t *testing.T, cipher *CipherV0, plaintext []byte) []byte {
 }
 
 // encryptPath is a test helper that encrypts a path with the given cipher.
-func encryptPath(t *testing.T, cipher *CipherV0, path string) string {
+func encryptPath(t *testing.T, cipher Cipher, path string) string {
 	t.Helper()
 
 	enc, err := cipher.EncryptPath(path)

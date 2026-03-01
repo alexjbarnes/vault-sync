@@ -174,14 +174,14 @@ type Reconciler struct {
 	client      *SyncClient
 	state       *state.State
 	vaultID     string
-	cipher      *CipherV0
+	cipher      Cipher
 	filter      *SyncFilter
 	logger      *slog.Logger
 	serverFiles map[string]state.ServerFile
 }
 
 // NewReconciler creates a reconciler with the given dependencies.
-func NewReconciler(vault *Vault, client *SyncClient, appState *state.State, vaultID string, cipher *CipherV0, logger *slog.Logger, filter *SyncFilter) *Reconciler {
+func NewReconciler(vault *Vault, client *SyncClient, appState *state.State, vaultID string, cipher Cipher, logger *slog.Logger, filter *SyncFilter) *Reconciler {
 	return &Reconciler{
 		vault:   vault,
 		client:  client,

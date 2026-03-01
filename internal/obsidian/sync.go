@@ -135,7 +135,7 @@ type SyncClient struct {
 	version           int64
 	initial           bool
 
-	cipher     *CipherV0
+	cipher     Cipher
 	vault      *Vault
 	state      *state.State
 	filter     *SyncFilter
@@ -205,7 +205,7 @@ type SyncConfig struct {
 	EncryptionVersion int
 	Version           int64
 	Initial           bool
-	Cipher            *CipherV0
+	Cipher            Cipher
 	Vault             *Vault
 	State             *state.State
 	Filter            *SyncFilter
@@ -969,6 +969,11 @@ func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 		s.versionDirty = true
 	}
 
+	if s.cipher == nil {
+		s.logger.Warn("cipher not initialized, skipping push")
+		return
+	}
+
 	path, err := s.cipher.DecryptPath(push.Path)
 	if err != nil {
 		s.logger.Warn("decrypting push path while busy", slog.String("error", err.Error()))
@@ -1059,6 +1064,11 @@ type ServerPush struct {
 // decision tree. Called from the event loop, so pull() reads from
 // inboundCh safely.
 func (s *SyncClient) processPush(ctx context.Context, push PushMessage) error {
+	if s.cipher == nil {
+		s.logger.Warn("cipher not initialized, skipping push")
+		return nil
+	}
+
 	path, err := s.cipher.DecryptPath(push.Path)
 	if err != nil {
 		return fmt.Errorf("decrypting path: %w", err)
@@ -1556,6 +1566,10 @@ func (s *SyncClient) liveWriteContent(path string, push PushMessage, plaintext [
 
 // decryptPush decodes just the path from a PushMessage without processing it.
 func (s *SyncClient) decryptPush(push PushMessage) (ServerPush, error) {
+	if s.cipher == nil {
+		return ServerPush{}, fmt.Errorf("cipher not initialized")
+	}
+
 	path, err := s.cipher.DecryptPath(push.Path)
 	if err != nil {
 		return ServerPush{}, fmt.Errorf("decrypting path: %w", err)
@@ -2143,6 +2157,10 @@ func (s *SyncClient) reconnect(ctx context.Context) error {
 // goroutine is running. Routes through Reconcile() for consistent
 // decision-making.
 func (s *SyncClient) processPushDirect(ctx context.Context, push PushMessage) error {
+	if s.cipher == nil {
+		return fmt.Errorf("cipher not initialized")
+	}
+
 	path, err := s.cipher.DecryptPath(push.Path)
 	if err != nil {
 		return fmt.Errorf("decrypting path: %w", err)

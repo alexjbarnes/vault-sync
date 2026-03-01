@@ -18,7 +18,7 @@ import (
 // fullReconciler builds a Reconciler with real cipher, vault, state, and a
 // SyncClient backed by a MockWSConn. The mock conn is used by pullDirect
 // during Phase 1. For Phase 2+3, call fakeEventLoop to drain opCh.
-func fullReconciler(t *testing.T, ctrl *gomock.Controller) (*Reconciler, *SyncClient, *Vault, *state.State, *CipherV0, *MockWSConn) {
+func fullReconciler(t *testing.T, ctrl *gomock.Controller) (*Reconciler, *SyncClient, *Vault, *state.State, Cipher, *MockWSConn) {
 	t.Helper()
 	s, vault, appState, cipher := fullSyncClient(t)
 	mock := NewMockWSConn(ctrl)
