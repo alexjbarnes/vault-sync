@@ -402,3 +402,285 @@ func TestContentEncrypt_IVIs12Bytes(t *testing.T) {
 	// First 12 bytes are the random IV. Total is 12 + len(plaintext) + 16 (GCM tag).
 	assert.Len(t, enc, 12+4+16)
 }
+
+// =============================================================================
+// Cipher interface compliance (compile-time)
+// =============================================================================
+
+// These assignments verify at compile time that both concrete types satisfy
+// the Cipher interface. They produce no runtime overhead.
+var (
+	_ Cipher = (*CipherV0)(nil)
+	_ Cipher = (*CipherV3)(nil)
+)
+
+// =============================================================================
+// KeyHashV3 tests
+// =============================================================================
+
+// testSalt is the vault salt returned by the Obsidian API — a short random
+// string used as HKDF salt input for versions 2 and 3.
+const testSalt = "test-vault-salt"
+
+func TestKeyHashV3_Deterministic(t *testing.T) {
+	key := testKey()
+	h1, err := KeyHashV3(key, testSalt)
+	require.NoError(t, err)
+	assert.Len(t, h1, 64, "HKDF-derived hash is 32 bytes → 64 hex chars")
+
+	h2, err := KeyHashV3(key, testSalt)
+	require.NoError(t, err)
+	assert.Equal(t, h1, h2, "same inputs must produce same hash")
+}
+
+func TestKeyHashV3_DifferentSaltDifferentHash(t *testing.T) {
+	key := testKey()
+	h1, err := KeyHashV3(key, "salt-one")
+	require.NoError(t, err)
+
+	h2, err := KeyHashV3(key, "salt-two")
+	require.NoError(t, err)
+	assert.NotEqual(t, h1, h2)
+}
+
+func TestKeyHashV3_DiffersFromV0(t *testing.T) {
+	// Version 3 uses HKDF, version 0 uses plain SHA-256. They must not collide.
+	key := testKey()
+	h0 := KeyHash(key)
+	h3, err := KeyHashV3(key, testSalt)
+	require.NoError(t, err)
+	assert.NotEqual(t, h0, h3)
+}
+
+func TestKeyHashV3_NFKCSaltNormalization(t *testing.T) {
+	// The fullwidth 'A' (U+FF21) normalizes to ASCII 'A' under NFKC.
+	// The salt is NFKC-normalised in KeyHashV3, so both must produce the same hash.
+	key := testKey()
+	h1, err := KeyHashV3(key, "\uFF21")
+	require.NoError(t, err)
+
+	h2, err := KeyHashV3(key, "A")
+	require.NoError(t, err)
+	assert.Equal(t, h1, h2, "NFKC-equivalent salts must produce the same keyhash")
+}
+
+// =============================================================================
+// CipherV3 constructor tests
+// =============================================================================
+
+func testCipherV3(t *testing.T) *CipherV3 {
+	t.Helper()
+	c, err := NewCipherV3(testKey(), testSalt)
+	require.NoError(t, err)
+	return c
+}
+
+func TestNewCipherV3_ValidKey(t *testing.T) {
+	c, err := NewCipherV3(testKey(), testSalt)
+	require.NoError(t, err)
+	assert.NotNil(t, c)
+}
+
+func TestNewCipherV3_InvalidKeyLength(t *testing.T) {
+	_, err := NewCipherV3([]byte("too-short"), testSalt)
+	assert.Error(t, err)
+}
+
+// =============================================================================
+// CipherV3 path encryption tests
+// =============================================================================
+
+func TestCipherV3Path_RoundTrip(t *testing.T) {
+	c := testCipherV3(t)
+
+	paths := []string{
+		"notes/hello.md",
+		".obsidian/app.json",
+		"folder/subfolder/deep/file.txt",
+		"file with spaces.md",
+		"unicode/\u00E9\u00E0\u00FC.md",
+	}
+
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			enc, err := c.EncryptPath(path)
+			require.NoError(t, err)
+			assert.NotEmpty(t, enc)
+
+			dec, err := c.DecryptPath(enc)
+			require.NoError(t, err)
+			assert.Equal(t, path, dec)
+		})
+	}
+}
+
+func TestCipherV3Path_Deterministic(t *testing.T) {
+	// AES-SIV is inherently deterministic: no nonce, same key+plaintext → same ciphertext.
+	c := testCipherV3(t)
+
+	enc1, err := c.EncryptPath("notes/hello.md")
+	require.NoError(t, err)
+
+	enc2, err := c.EncryptPath("notes/hello.md")
+	require.NoError(t, err)
+
+	assert.Equal(t, enc1, enc2, "path encryption must be deterministic")
+}
+
+func TestCipherV3Path_DifferentPathsDifferentCiphertext(t *testing.T) {
+	c := testCipherV3(t)
+
+	enc1, err := c.EncryptPath("file1.md")
+	require.NoError(t, err)
+
+	enc2, err := c.EncryptPath("file2.md")
+	require.NoError(t, err)
+
+	assert.NotEqual(t, enc1, enc2)
+}
+
+func TestCipherV3Path_OutputIsHex(t *testing.T) {
+	c := testCipherV3(t)
+
+	enc, err := c.EncryptPath("test.md")
+	require.NoError(t, err)
+
+	_, err = hex.DecodeString(enc)
+	assert.NoError(t, err, "encrypted path must be valid hex")
+}
+
+func TestCipherV3Path_DecryptInvalidHex(t *testing.T) {
+	c := testCipherV3(t)
+
+	_, err := c.DecryptPath("not-hex!")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decoding hex")
+}
+
+func TestCipherV3Path_DecryptWrongKey(t *testing.T) {
+	c1 := testCipherV3(t)
+	enc, err := c1.EncryptPath("secret.md")
+	require.NoError(t, err)
+
+	// Different salt → entirely different SIV key → authentication failure.
+	c2, err := NewCipherV3(testKey(), "different-salt")
+	require.NoError(t, err)
+
+	_, err = c2.DecryptPath(enc)
+	assert.Error(t, err, "decryption with wrong key must fail")
+}
+
+func TestCipherV3Path_DecryptTooShort(t *testing.T) {
+	c := testCipherV3(t)
+
+	// AES-SIV tag is 16 bytes; anything shorter must be rejected.
+	_, err := c.DecryptPath(hex.EncodeToString([]byte{0x01, 0x02, 0x03}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ciphertext too short")
+}
+
+func TestCipherV3Path_EmptyPath(t *testing.T) {
+	c := testCipherV3(t)
+
+	enc, err := c.EncryptPath("")
+	require.NoError(t, err)
+
+	dec, err := c.DecryptPath(enc)
+	require.NoError(t, err)
+	assert.Empty(t, dec)
+}
+
+// =============================================================================
+// CipherV3 content encryption tests
+// =============================================================================
+
+func TestCipherV3Content_RoundTrip(t *testing.T) {
+	c := testCipherV3(t)
+
+	contents := [][]byte{
+		[]byte("Hello, world!"),
+		[]byte("# Markdown\n\nSome content with special chars: \u00E9\u00E0\u00FC"),
+		bytes.Repeat([]byte("x"), 10000),
+		{0x00, 0xFF, 0x80},
+	}
+
+	for i, content := range contents {
+		t.Run("", func(t *testing.T) {
+			enc, err := c.EncryptContent(content)
+			require.NoError(t, err)
+
+			dec, err := c.DecryptContent(enc)
+			require.NoError(t, err)
+			assert.Equal(t, content, dec, "case %d: content mismatch after round-trip", i)
+		})
+	}
+}
+
+func TestCipherV3Content_NonDeterministic(t *testing.T) {
+	// Content encryption uses a random IV, so the same plaintext must produce
+	// different ciphertext on each call.
+	c := testCipherV3(t)
+	content := []byte("same content")
+
+	enc1, err := c.EncryptContent(content)
+	require.NoError(t, err)
+
+	enc2, err := c.EncryptContent(content)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, enc1, enc2, "content encryption must use random IV")
+}
+
+func TestCipherV3Content_DecryptWrongKey(t *testing.T) {
+	c1 := testCipherV3(t)
+	enc, err := c1.EncryptContent([]byte("secret data"))
+	require.NoError(t, err)
+
+	// Use a different 32-byte scrypt key. GCM key is derived from the scrypt
+	// key (not the vault salt), so the key must differ to trigger auth failure.
+	wrongKey := make([]byte, 32)
+	wrongKey[0] = 0xFF
+	c2, err := NewCipherV3(wrongKey, testSalt)
+	require.NoError(t, err)
+
+	_, err = c2.DecryptContent(enc)
+	assert.Error(t, err)
+}
+
+func TestCipherV3Content_DecryptTooShort(t *testing.T) {
+	c := testCipherV3(t)
+	_, err := c.DecryptContent([]byte{0x01, 0x02, 0x03})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ciphertext too short")
+}
+
+func TestCipherV3Content_DecryptExactlyNonceSize(t *testing.T) {
+	// A 12-byte payload (nonce only, no ciphertext) represents empty file content.
+	// This matches the protocol's empty-file wire format.
+	c := testCipherV3(t)
+
+	nonce := make([]byte, 12)
+	dec, err := c.DecryptContent(nonce)
+	require.NoError(t, err)
+	assert.Empty(t, dec)
+}
+
+// =============================================================================
+// CipherV3 hash encryption (via EncryptPath — same algorithm)
+// =============================================================================
+
+func TestCipherV3Hash_RoundTrip(t *testing.T) {
+	// File hashes are encrypted with EncryptPath before being sent to the server.
+	c := testCipherV3(t)
+
+	content := []byte("file content")
+	h := sha256.Sum256(content)
+	plainHash := hex.EncodeToString(h[:])
+
+	enc, err := c.EncryptPath(plainHash)
+	require.NoError(t, err)
+
+	dec, err := c.DecryptPath(enc)
+	require.NoError(t, err)
+	assert.Equal(t, plainHash, dec)
+}

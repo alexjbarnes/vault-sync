@@ -222,6 +222,9 @@ type CipherV3 struct {
 // before use. All derived key material is zeroed after the cipher objects
 // are constructed.
 func NewCipherV3(key []byte, salt string) (*CipherV3, error) {
+	if len(key) != scryptKeyLen {
+		return nil, fmt.Errorf("invalid key length %d: expected %d bytes", len(key), scryptKeyLen)
+	}
 	saltBytes := []byte(norm.NFKC.String(salt))
 
 	macKey, err := hkdfDeriveKey(key, saltBytes, []byte("ObsidianAesSivMac"), 32)
