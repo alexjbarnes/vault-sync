@@ -128,7 +128,7 @@ type syncSetupResult struct {
 	token    string
 	vault    *obsidian.VaultInfo
 	keyHash  string
-	cipher   *obsidian.CipherV0
+	cipher   obsidian.Cipher
 	logger   *slog.Logger
 }
 
@@ -200,17 +200,31 @@ func setupSync(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*s
 		return nil, fmt.Errorf("deriving key: %w", err)
 	}
 
-	keyHash := obsidian.KeyHash(key)
-
-	logger.Debug("key derived")
-
-	cipher, err := obsidian.NewCipherV0(key)
+	// Versions 2 and 3 use HKDF-based key derivation for both the keyhash
+	// and the cipher. Version 0 uses plain SHA-256 of the raw scrypt key.
+	var (
+		keyHash string
+		cipher  obsidian.Cipher
+	)
+	if v.EncryptionVersion >= 2 {
+		keyHash, err = obsidian.KeyHashV3(key, v.Salt)
+		if err != nil {
+			obsidian.ZeroKey(key)
+			appState.Close()
+			return nil, fmt.Errorf("computing keyhash: %w", err)
+		}
+		cipher, err = obsidian.NewCipherV3(key, v.Salt)
+	} else {
+		keyHash = obsidian.KeyHash(key)
+		cipher, err = obsidian.NewCipherV0(key)
+	}
 	if err != nil {
 		obsidian.ZeroKey(key)
 		appState.Close()
-
 		return nil, fmt.Errorf("creating cipher: %w", err)
 	}
+
+	logger.Debug("key derived")
 
 	obsidian.ZeroKey(key)
 

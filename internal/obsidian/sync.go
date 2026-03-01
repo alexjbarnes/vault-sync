@@ -135,7 +135,7 @@ type SyncClient struct {
 	version           int64
 	initial           bool
 
-	cipher     *CipherV0
+	cipher     Cipher
 	vault      *Vault
 	state      *state.State
 	filter     *SyncFilter
@@ -205,7 +205,7 @@ type SyncConfig struct {
 	EncryptionVersion int
 	Version           int64
 	Initial           bool
-	Cipher            *CipherV0
+	Cipher            Cipher
 	Vault             *Vault
 	State             *state.State
 	Filter            *SyncFilter
