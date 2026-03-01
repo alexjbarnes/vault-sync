@@ -273,6 +273,7 @@ func NewCipherV3(key []byte, salt string) (*CipherV3, error) {
 	}
 
 	// Zero all derived key material — the cipher objects retain copies internally.
+	subtle.ConstantTimeCopy(1, sivKey, make([]byte, len(sivKey)))
 	subtle.ConstantTimeCopy(1, macKey, make([]byte, len(macKey)))
 	subtle.ConstantTimeCopy(1, encKey, make([]byte, len(encKey)))
 	subtle.ConstantTimeCopy(1, gcmKey, make([]byte, len(gcmKey)))

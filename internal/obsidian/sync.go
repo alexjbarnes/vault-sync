@@ -682,6 +682,10 @@ func (s *SyncClient) handlePushOp(ctx context.Context, op syncOp) error {
 
 // executePush does the actual push protocol sequence from the event loop.
 func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
+	if s.cipher == nil {
+		return fmt.Errorf("cipher not initialized")
+	}
+
 	// Check per-path retry backoff.
 	if backoff, ok := s.checkRetryBackoff(op.path); ok {
 		s.logger.Debug("skipping push in retry backoff",
