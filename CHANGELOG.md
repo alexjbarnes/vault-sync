@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.2.0
+
+### Added
+
+- Encryption version 2 and 3 support, fixing "Wrong vault key" for vaults using newer encryption
+- `Cipher` interface abstracting encryption version differences, with `CipherV3` implementation using AES-SIV-CMAC (RFC 5297) for path encryption and AES-256-GCM for content encryption
+- `KeyHashV3` for HKDF-SHA256 based keyhash computation used during WebSocket authentication for encryption versions 2-3
+- MCP server instructions field describing vault access capabilities
+- Dynamic `vault_search` tool description indicating whether ripgrep or the Go fallback powers content search
+
+### Changed
+
+- Replaced `secure-io/siv-go` (unmaintained, no releases) with `jedisct1/go-aes-siv` v1.0.0 for AES-SIV-CMAC
+- Migrated from Renovate to Dependabot for dependency management
+- CI dev image tags aligned with cleanup workflow expectations
+
+### Fixed
+
+- Nil cipher panic in `processPush`, `handlePushWhileBusy`, `decryptPush`, `processPushDirect`, and `executePush` when `SyncClient` constructed without a cipher
+- Composite SIV key (64 bytes) not zeroed after cipher construction, leaving key material in the heap
+
 ## v1.1.0
 
 ### Added

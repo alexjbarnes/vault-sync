@@ -247,7 +247,7 @@ This runs vault-sync as a headless sync daemon. Useful for keeping a NAS or back
 
 **"vault not found"**: Check that `OBSIDIAN_VAULT_NAME` matches exactly, or remove it to auto-detect.
 
-**"decryption failed"**: Your `OBSIDIAN_VAULT_PASSWORD` does not match the encryption password set in the Obsidian desktop app.
+**"decryption failed"** or **"Wrong vault key"**: Your `OBSIDIAN_VAULT_PASSWORD` does not match the encryption password set in the Obsidian desktop app. vault-sync supports encryption versions 0, 2, and 3. The version is auto-detected from the vault metadata.
 
 **OAuth login page not loading**: Make sure `MCP_SERVER_URL` matches the URL you are accessing. The OAuth flow validates the redirect URI against this value.
 

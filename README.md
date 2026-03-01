@@ -23,7 +23,7 @@ vault-sync is a single binary with two features that can be enabled independentl
 
 ## Features
 
-- Two-way encrypted sync via WebSocket (AES-256-GCM, scrypt key derivation)
+- Two-way encrypted sync via WebSocket supporting encryption versions 0, 2, and 3 (AES-256-GCM + AES-SIV-CMAC, scrypt key derivation)
 - Three-way merge for `.md` files, shallow JSON merge for `.obsidian/` config
 - Real-time file watching with debounce and offline queue
 - MCP server with 8 tools: list, read, search, write, edit, delete, move, copy ([docs](docs/mcp.md))
