@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alexjbarnes/vault-sync/internal/models"
+	mcpauth "github.com/alexjbarnes/mcp-auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	bolt "go.etcd.io/bbolt"
@@ -491,7 +491,7 @@ func TestLoadAt_InvalidPath(t *testing.T) {
 
 func TestSaveGetOAuthToken_RoundTrip(t *testing.T) {
 	s := testDB(t)
-	tok := models.OAuthToken{
+	tok := mcpauth.OAuthToken{
 		Token:       "tok_abc",
 		TokenHash:   "abc123hash",
 		Kind:        "access",
@@ -531,8 +531,8 @@ func TestGetOAuthToken_NotFound(t *testing.T) {
 
 func TestSaveOAuthToken_Overwrite(t *testing.T) {
 	s := testDB(t)
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "hash1", UserID: "old"}))
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "hash1", UserID: "new"}))
+	require.NoError(t, s.SaveOAuthToken(mcpauth.OAuthToken{TokenHash: "hash1", UserID: "old"}))
+	require.NoError(t, s.SaveOAuthToken(mcpauth.OAuthToken{TokenHash: "hash1", UserID: "new"}))
 
 	all, err := s.AllOAuthTokens()
 	require.NoError(t, err)
@@ -542,7 +542,7 @@ func TestSaveOAuthToken_Overwrite(t *testing.T) {
 
 func TestDeleteOAuthToken(t *testing.T) {
 	s := testDB(t)
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "hash_del", UserID: "u1"}))
+	require.NoError(t, s.SaveOAuthToken(mcpauth.OAuthToken{TokenHash: "hash_del", UserID: "u1"}))
 	require.NoError(t, s.DeleteOAuthToken("hash_del"))
 
 	all, err := s.AllOAuthTokens()
@@ -565,9 +565,9 @@ func TestAllOAuthTokens_Empty(t *testing.T) {
 
 func TestAllOAuthTokens_ReturnsAll(t *testing.T) {
 	s := testDB(t)
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "h1", UserID: "u1"}))
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "h2", UserID: "u2"}))
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "h3", UserID: "u3"}))
+	require.NoError(t, s.SaveOAuthToken(mcpauth.OAuthToken{TokenHash: "h1", UserID: "u1"}))
+	require.NoError(t, s.SaveOAuthToken(mcpauth.OAuthToken{TokenHash: "h2", UserID: "u2"}))
+	require.NoError(t, s.SaveOAuthToken(mcpauth.OAuthToken{TokenHash: "h3", UserID: "u3"}))
 
 	tokens, err := s.AllOAuthTokens()
 	require.NoError(t, err)
@@ -576,8 +576,8 @@ func TestAllOAuthTokens_ReturnsAll(t *testing.T) {
 
 func TestAllOAuthTokens_ExcludesDeleted(t *testing.T) {
 	s := testDB(t)
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "keep_hash", UserID: "u1"}))
-	require.NoError(t, s.SaveOAuthToken(models.OAuthToken{TokenHash: "remove_hash", UserID: "u2"}))
+	require.NoError(t, s.SaveOAuthToken(mcpauth.OAuthToken{TokenHash: "keep_hash", UserID: "u1"}))
+	require.NoError(t, s.SaveOAuthToken(mcpauth.OAuthToken{TokenHash: "remove_hash", UserID: "u2"}))
 	require.NoError(t, s.DeleteOAuthToken("remove_hash"))
 
 	tokens, err := s.AllOAuthTokens()
@@ -607,7 +607,7 @@ func TestGetOAuthToken_CorruptJSON(t *testing.T) {
 
 func TestSaveGetOAuthClient_RoundTrip(t *testing.T) {
 	s := testDB(t)
-	client := models.OAuthClient{
+	client := mcpauth.OAuthClient{
 		ClientID:     "client_abc",
 		ClientName:   "Test App",
 		RedirectURIs: []string{"https://example.com/callback"},
@@ -630,8 +630,8 @@ func TestGetOAuthClient_NotFound(t *testing.T) {
 
 func TestSaveOAuthClient_Overwrite(t *testing.T) {
 	s := testDB(t)
-	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c1", ClientName: "old"}))
-	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c1", ClientName: "new"}))
+	require.NoError(t, s.SaveOAuthClient(mcpauth.OAuthClient{ClientID: "c1", ClientName: "old"}))
+	require.NoError(t, s.SaveOAuthClient(mcpauth.OAuthClient{ClientID: "c1", ClientName: "new"}))
 
 	got, err := s.GetOAuthClient("c1")
 	require.NoError(t, err)
@@ -648,8 +648,8 @@ func TestAllOAuthClients_Empty(t *testing.T) {
 
 func TestAllOAuthClients_ReturnsAll(t *testing.T) {
 	s := testDB(t)
-	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c1"}))
-	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c2"}))
+	require.NoError(t, s.SaveOAuthClient(mcpauth.OAuthClient{ClientID: "c1"}))
+	require.NoError(t, s.SaveOAuthClient(mcpauth.OAuthClient{ClientID: "c2"}))
 
 	clients, err := s.AllOAuthClients()
 	require.NoError(t, err)
@@ -679,9 +679,9 @@ func TestOAuthClientCount_Zero(t *testing.T) {
 
 func TestOAuthClientCount_AfterInserts(t *testing.T) {
 	s := testDB(t)
-	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c1"}))
-	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c2"}))
-	require.NoError(t, s.SaveOAuthClient(models.OAuthClient{ClientID: "c3"}))
+	require.NoError(t, s.SaveOAuthClient(mcpauth.OAuthClient{ClientID: "c1"}))
+	require.NoError(t, s.SaveOAuthClient(mcpauth.OAuthClient{ClientID: "c2"}))
+	require.NoError(t, s.SaveOAuthClient(mcpauth.OAuthClient{ClientID: "c3"}))
 	assert.Equal(t, 3, s.OAuthClientCount())
 }
 
@@ -690,7 +690,7 @@ func TestOAuthClientCount_AfterInserts(t *testing.T) {
 func TestSaveAPIKey_RoundTrip(t *testing.T) {
 	s := testDB(t)
 
-	ak := models.APIKey{UserID: "alice"}
+	ak := mcpauth.APIKey{UserID: "alice"}
 	require.NoError(t, s.SaveAPIKey("hash1", ak))
 
 	keys, err := s.AllAPIKeys()
@@ -702,7 +702,7 @@ func TestSaveAPIKey_RoundTrip(t *testing.T) {
 func TestDeleteAPIKey(t *testing.T) {
 	s := testDB(t)
 
-	require.NoError(t, s.SaveAPIKey("hash1", models.APIKey{UserID: "alice"}))
+	require.NoError(t, s.SaveAPIKey("hash1", mcpauth.APIKey{UserID: "alice"}))
 	require.NoError(t, s.DeleteAPIKey("hash1"))
 
 	keys, err := s.AllAPIKeys()
@@ -721,8 +721,8 @@ func TestAllAPIKeys_Empty(t *testing.T) {
 func TestSaveAPIKey_Overwrite(t *testing.T) {
 	s := testDB(t)
 
-	require.NoError(t, s.SaveAPIKey("hash1", models.APIKey{UserID: "alice"}))
-	require.NoError(t, s.SaveAPIKey("hash1", models.APIKey{UserID: "bob"}))
+	require.NoError(t, s.SaveAPIKey("hash1", mcpauth.APIKey{UserID: "alice"}))
+	require.NoError(t, s.SaveAPIKey("hash1", mcpauth.APIKey{UserID: "bob"}))
 
 	keys, err := s.AllAPIKeys()
 	require.NoError(t, err)
@@ -733,8 +733,8 @@ func TestSaveAPIKey_Overwrite(t *testing.T) {
 func TestAllAPIKeys_Multiple(t *testing.T) {
 	s := testDB(t)
 
-	require.NoError(t, s.SaveAPIKey("h1", models.APIKey{UserID: "alice"}))
-	require.NoError(t, s.SaveAPIKey("h2", models.APIKey{UserID: "bob"}))
+	require.NoError(t, s.SaveAPIKey("h1", mcpauth.APIKey{UserID: "alice"}))
+	require.NoError(t, s.SaveAPIKey("h2", mcpauth.APIKey{UserID: "bob"}))
 
 	keys, err := s.AllAPIKeys()
 	require.NoError(t, err)

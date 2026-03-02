@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alexjbarnes/vault-sync/internal/auth"
+	mcpauth "github.com/alexjbarnes/mcp-auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -264,7 +264,7 @@ func TestDynamicClientRegistration_RejectsHTTP(t *testing.T) {
 
 func TestAPIKey_MCPToolCall(t *testing.T) {
 	h := newHarness(t)
-	rawKey := "vs_" + auth.RandomHex(32)
+	rawKey := "vs_" + mcpauth.RandomHex(32)
 	h.registerAPIKey(rawKey, "deploy-bot")
 
 	session := h.mcpSession(t, rawKey)
@@ -283,7 +283,7 @@ func TestAPIKey_MCPToolCall(t *testing.T) {
 
 func TestAPIKey_ReadFile(t *testing.T) {
 	h := newHarness(t)
-	rawKey := "vs_" + auth.RandomHex(32)
+	rawKey := "vs_" + mcpauth.RandomHex(32)
 	h.registerAPIKey(rawKey, "reader")
 
 	session := h.mcpSession(t, rawKey)
@@ -306,7 +306,7 @@ func TestAPIKey_InvalidKeyReturns401(t *testing.T) {
 	require.NoError(t, err)
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer vs_"+auth.RandomHex(32))
+	req.Header.Set("Authorization", "Bearer vs_"+mcpauth.RandomHex(32))
 
 	resp, err := h.Client.Do(req)
 	require.NoError(t, err)
@@ -319,7 +319,7 @@ func TestAPIKey_InvalidKeyReturns401(t *testing.T) {
 
 func TestAPIKey_WriteAndRead(t *testing.T) {
 	h := newHarness(t)
-	rawKey := "vs_" + auth.RandomHex(32)
+	rawKey := "vs_" + mcpauth.RandomHex(32)
 	h.registerAPIKey(rawKey, "writer")
 
 	session := h.mcpSession(t, rawKey)

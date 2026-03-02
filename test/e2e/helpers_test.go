@@ -2,6 +2,7 @@ package e2e_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -15,9 +16,8 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/alexjbarnes/vault-sync/internal/auth"
+	mcpauth "github.com/alexjbarnes/mcp-auth"
 	"github.com/alexjbarnes/vault-sync/internal/mcpserver"
-	"github.com/alexjbarnes/vault-sync/internal/models"
 	"github.com/alexjbarnes/vault-sync/internal/server"
 	"github.com/alexjbarnes/vault-sync/internal/vault"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -33,11 +33,30 @@ const (
 	redirectURI  = "http://127.0.0.1:19876/callback"
 )
 
+// testAuthenticator implements mcpauth.UserAuthenticator for tests.
+type testAuthenticator struct {
+	users map[string]string
+}
+
+// ValidateCredentials checks the username/password against the stored map.
+func (a *testAuthenticator) ValidateCredentials(_ context.Context, username, password string) (string, error) {
+	stored, ok := a.users[username]
+	if !ok {
+		return "", nil
+	}
+
+	if stored != password {
+		return "", nil
+	}
+
+	return username, nil
+}
+
 // harness holds the full e2e test stack: a real HTTP server backed by
 // the OAuth auth layer and MCP tool server.
 type harness struct {
 	URL      string
-	Store    *auth.Store
+	Auth     *mcpauth.Server
 	VaultDir string
 	Client   *http.Client
 }
@@ -75,29 +94,32 @@ func newHarness(t *testing.T) *harness {
 		return mcpServer
 	}, nil)
 
-	store := auth.NewStore(nil, logger)
-	t.Cleanup(store.Stop)
-
-	users := auth.UserCredentials{testUsername: testPassword}
-
 	// Use NewUnstartedServer so we can read the listener address before
 	// building the mux (the serverURL must match for audience validation).
 	ts := httptest.NewUnstartedServer(nil)
 	serverURL := "http://" + ts.Listener.Addr().String()
 
+	authSrv := mcpauth.New(mcpauth.Config{
+		ServerURL:     serverURL,
+		Users:         &testAuthenticator{users: map[string]string{testUsername: testPassword}},
+		Logger:        logger,
+		APIKeyPrefix:  "vs_",
+		LoginTitle:    "vault-sync",
+		LoginSubtitle: "Sign in to authorize access to your vault.",
+		GrantTypes:    []string{"authorization_code", "client_credentials", "refresh_token"},
+	})
+	t.Cleanup(authSrv.Stop)
+
 	ts.Config.Handler = server.NewMux(server.MuxConfig{
-		Store:      store,
-		Users:      users,
+		Auth:       authSrv,
 		MCPHandler: mcpHandler,
-		Logger:     logger,
-		ServerURL:  serverURL,
 	})
 	ts.Start()
 	t.Cleanup(ts.Close)
 
 	return &harness{
 		URL:      serverURL,
-		Store:    store,
+		Auth:     authSrv,
 		VaultDir: dir,
 		Client:   ts.Client(),
 	}
@@ -108,9 +130,9 @@ func newHarness(t *testing.T) *harness {
 // from env vars at startup). Only supports client_credentials grant,
 // matching the production registration in main.go.
 func (h *harness) registerPreConfiguredClient(clientID, secret string) {
-	h.Store.RegisterPreConfiguredClient(&models.OAuthClient{
+	h.Auth.RegisterPreConfiguredClient(&mcpauth.OAuthClient{
 		ClientID:   clientID,
-		SecretHash: auth.HashSecret(secret),
+		SecretHash: mcpauth.HashSecret(secret),
 		GrantTypes: []string{"client_credentials"},
 	})
 }
@@ -118,7 +140,7 @@ func (h *harness) registerPreConfiguredClient(clientID, secret string) {
 // registerAPIKey registers an API key directly in the store, matching
 // how main.go registers keys from MCP_API_KEYS at startup.
 func (h *harness) registerAPIKey(rawKey, userID string) {
-	h.Store.RegisterAPIKey(rawKey, userID)
+	h.Auth.RegisterAPIKey(rawKey, userID)
 }
 
 // tokenResponse is the JSON body returned by POST /oauth/token.

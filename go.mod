@@ -3,9 +3,11 @@ module github.com/alexjbarnes/vault-sync
 go 1.25.3
 
 require (
+	github.com/alexjbarnes/mcp-auth v0.0.0-20260228114134-9a47475c52ec
 	github.com/caarlos0/env/v11 v11.4.0
 	github.com/coder/websocket v1.8.14
 	github.com/fsnotify/fsnotify v1.9.0
+	github.com/jedisct1/go-aes-siv v1.0.0
 	github.com/joho/godotenv v1.5.1
 	github.com/modelcontextprotocol/go-sdk v1.4.0
 	github.com/sergi/go-diff v1.4.0
@@ -22,7 +24,6 @@ require (
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
-	github.com/jedisct1/go-aes-siv v1.0.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.3 // indirect
@@ -32,3 +33,5 @@ require (
 	golang.org/x/oauth2 v0.34.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 )
+
+replace github.com/alexjbarnes/mcp-auth => ../mcp-auth

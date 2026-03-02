@@ -14,11 +14,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alexjbarnes/vault-sync/internal/auth"
+	mcpauth "github.com/alexjbarnes/mcp-auth"
 	"github.com/alexjbarnes/vault-sync/internal/config"
 	"github.com/alexjbarnes/vault-sync/internal/logging"
 	"github.com/alexjbarnes/vault-sync/internal/mcpserver"
-	"github.com/alexjbarnes/vault-sync/internal/models"
 	"github.com/alexjbarnes/vault-sync/internal/obsidian"
 	"github.com/alexjbarnes/vault-sync/internal/server"
 	"github.com/alexjbarnes/vault-sync/internal/state"
@@ -359,6 +358,32 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, setup
 	return sg.Wait()
 }
 
+// mapAuthenticator adapts a username-to-password map to the
+// mcpauth.UserAuthenticator interface. Credential comparison uses
+// SHA-256 with constant-time comparison to prevent timing attacks.
+type mapAuthenticator struct {
+	users map[string]string
+}
+
+// ValidateCredentials checks the username/password against the stored map.
+func (m *mapAuthenticator) ValidateCredentials(_ context.Context, username, password string) (string, error) {
+	stored, ok := m.users[username]
+	if !ok {
+		// Perform a dummy hash comparison to keep timing constant.
+		mcpauth.HashSecret(password)
+		return "", nil
+	}
+
+	storedHash := mcpauth.HashSecret(stored)
+	inputHash := mcpauth.HashSecret(password)
+
+	if storedHash != inputHash {
+		return "", nil
+	}
+
+	return username, nil
+}
+
 // runMCP starts the MCP HTTP server. When appState is non-nil, OAuth
 // tokens and client registrations are persisted across restarts.
 func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appState *state.State) error {
@@ -404,20 +429,29 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		return mcpServer
 	}, nil)
 
-	store := auth.NewStore(appState, mcpLogger)
-	defer store.Stop()
+	authSrv := mcpauth.New(mcpauth.Config{
+		ServerURL:     cfg.MCPServerURL,
+		Users:         &mapAuthenticator{users: users},
+		Persist:       appState,
+		Logger:        mcpLogger,
+		APIKeyPrefix:  config.APIKeyPrefix(),
+		LoginTitle:    "vault-sync",
+		LoginSubtitle: "Sign in to authorize access to your vault.",
+		GrantTypes:    []string{"authorization_code", "client_credentials", "refresh_token"},
+	})
+	defer authSrv.Stop()
 
 	for _, cred := range clientCreds {
-		store.RegisterPreConfiguredClient(&models.OAuthClient{
+		authSrv.RegisterPreConfiguredClient(&mcpauth.OAuthClient{
 			ClientID:   cred.ClientID,
-			SecretHash: auth.HashSecret(cred.Secret),
+			SecretHash: mcpauth.HashSecret(cred.Secret),
 			GrantTypes: []string{"client_credentials"},
 		})
 		mcpLogger.Info("registered pre-configured client", slog.String("client_id", cred.ClientID))
 	}
 
 	for _, ak := range apiKeys {
-		store.RegisterAPIKey(ak.Key, ak.UserID)
+		authSrv.RegisterAPIKey(ak.Key, ak.UserID)
 		mcpLogger.Info("registered API key", slog.String("user", ak.UserID))
 	}
 
@@ -425,10 +459,10 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 	// keys deleted from MCP_API_KEYS between restarts.
 	currentKeyHashes := make(map[string]struct{}, len(apiKeys))
 	for _, ak := range apiKeys {
-		currentKeyHashes[auth.HashSecret(ak.Key)] = struct{}{}
+		currentKeyHashes[mcpauth.HashSecret(ak.Key)] = struct{}{}
 	}
 
-	if removed := store.ReconcileAPIKeys(currentKeyHashes); removed > 0 {
+	if removed := authSrv.ReconcileAPIKeys(currentKeyHashes); removed > 0 {
 		mcpLogger.Info("removed stale API keys", slog.Int("count", removed))
 	}
 
@@ -439,7 +473,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		currentClientIDs[cred.ClientID] = struct{}{}
 	}
 
-	if removed := store.ReconcileClients(currentClientIDs); removed > 0 {
+	if removed := authSrv.ReconcileClients(currentClientIDs); removed > 0 {
 		mcpLogger.Info("removed stale pre-configured clients", slog.Int("count", removed))
 	}
 
@@ -449,14 +483,11 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 	cfg.MCPAuthUsers = ""
 
 	mux := server.NewMux(server.MuxConfig{
-		Store:      store,
-		Users:      users,
+		Auth:       authSrv,
 		MCPHandler: mcpHandler,
-		Logger:     mcpLogger,
-		ServerURL:  cfg.MCPServerURL,
 	})
 
-	server := &http.Server{
+	httpSrv := &http.Server{
 		Addr:         cfg.MCPListenAddr,
 		Handler:      mux,
 		ReadTimeout:  mcpReadTimeout,
@@ -480,7 +511,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), mcpShutdownTimeout)
 		defer cancel()
 
-		_ = server.Shutdown(shutdownCtx)
+		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
 	// Run the HTTP server and vault file watcher concurrently. The
@@ -488,7 +519,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 	// daemon (or any other process) writes files to the vault.
 	mg, mctx := errgroup.WithContext(ctx)
 	mg.Go(func() error {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			return fmt.Errorf("MCP server error: %w", err)
 		}
 

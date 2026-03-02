@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/alexjbarnes/vault-sync/internal/auth"
+	mcpauth "github.com/alexjbarnes/mcp-auth"
 	"github.com/alexjbarnes/vault-sync/internal/vault"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -21,15 +21,15 @@ func logToolCall(ctx context.Context, logger *slog.Logger, tool string, args ...
 	attrs := make([]slog.Attr, 0, len(args)+4) //nolint:mnd // 4 extra attrs: tool, user, client, ip
 	attrs = append(attrs, slog.String("tool", tool))
 
-	if user := auth.RequestUserID(ctx); user != "" {
+	if user := mcpauth.RequestUserID(ctx); user != "" {
 		attrs = append(attrs, slog.String("user", user))
 	}
 
-	if client := auth.RequestClientID(ctx); client != "" {
+	if client := mcpauth.RequestClientID(ctx); client != "" {
 		attrs = append(attrs, slog.String("client", client))
 	}
 
-	if ip := auth.RequestRemoteIP(ctx); ip != "" {
+	if ip := mcpauth.RequestRemoteIP(ctx); ip != "" {
 		attrs = append(attrs, slog.String("ip", ip))
 	}
 
