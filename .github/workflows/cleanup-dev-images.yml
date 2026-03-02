@@ -2,7 +2,7 @@ name: Cleanup Dev Images
 
 on:
   schedule:
-    - cron: "0 6 * * 1" # Monday 6am UTC
+    - cron: "0 6 * * *" # Daily 6am UTC
   workflow_dispatch:
 
 permissions:
