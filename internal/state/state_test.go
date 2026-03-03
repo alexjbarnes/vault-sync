@@ -742,3 +742,18 @@ func TestAllAPIKeys_Multiple(t *testing.T) {
 	assert.Equal(t, "alice", keys["h1"].UserID)
 	assert.Equal(t, "bob", keys["h2"].UserID)
 }
+
+func TestDeleteOAuthClient(t *testing.T) {
+	s := testDB(t)
+
+	require.NoError(t, s.SaveOAuthClient(mcpauth.OAuthClient{
+		ClientID:     "client1",
+		RedirectURIs: []string{"https://example.com/callback"},
+	}))
+
+	require.NoError(t, s.DeleteOAuthClient("client1"))
+
+	clients, err := s.AllOAuthClients()
+	require.NoError(t, err)
+	assert.Empty(t, clients)
+}

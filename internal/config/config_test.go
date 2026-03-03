@@ -590,3 +590,7 @@ func hexString(n int) string {
 
 	return string(out)
 }
+
+func TestAPIKeyPrefix(t *testing.T) {
+	assert.Equal(t, "vs_", APIKeyPrefix())
+}

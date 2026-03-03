@@ -16,6 +16,12 @@ func testKey() []byte {
 	return h[:]
 }
 
+func TestZeroKey(t *testing.T) {
+	key := []byte{0x01, 0x02, 0x03, 0x04}
+	ZeroKey(key)
+	assert.Equal(t, []byte{0, 0, 0, 0}, key)
+}
+
 func testCipher(t *testing.T) *CipherV0 {
 	t.Helper()
 
