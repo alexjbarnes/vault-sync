@@ -358,32 +358,6 @@ func runSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, setup
 	return sg.Wait()
 }
 
-// mapAuthenticator adapts a username-to-password map to the
-// mcpauth.UserAuthenticator interface. Credential comparison uses
-// SHA-256 with constant-time comparison to prevent timing attacks.
-type mapAuthenticator struct {
-	users map[string]string
-}
-
-// ValidateCredentials checks the username/password against the stored map.
-func (m *mapAuthenticator) ValidateCredentials(_ context.Context, username, password string) (string, error) {
-	stored, ok := m.users[username]
-	if !ok {
-		// Perform a dummy hash comparison to keep timing constant.
-		mcpauth.HashSecret(password)
-		return "", nil
-	}
-
-	storedHash := mcpauth.HashSecret(stored)
-	inputHash := mcpauth.HashSecret(password)
-
-	if storedHash != inputHash {
-		return "", nil
-	}
-
-	return username, nil
-}
-
 // runMCP starts the MCP HTTP server. When appState is non-nil, OAuth
 // tokens and client registrations are persisted across restarts.
 func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appState *state.State) error {
@@ -429,9 +403,10 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		return mcpServer
 	}, nil)
 
+	auth := mcpauth.NewMapAuthenticator(users)
 	authSrv := mcpauth.New(mcpauth.Config{
 		ServerURL:     cfg.MCPServerURL,
-		Users:         &mapAuthenticator{users: users},
+		Users:         auth,
 		Persist:       appState,
 		Logger:        mcpLogger,
 		APIKeyPrefix:  config.APIKeyPrefix(),
@@ -442,11 +417,13 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 	defer authSrv.Stop()
 
 	for _, cred := range clientCreds {
-		authSrv.RegisterPreConfiguredClient(&mcpauth.OAuthClient{
+		if err := authSrv.RegisterPreConfiguredClient(&mcpauth.OAuthClient{
 			ClientID:   cred.ClientID,
 			SecretHash: mcpauth.HashSecret(cred.Secret),
 			GrantTypes: []string{"client_credentials"},
-		})
+		}); err != nil {
+			return fmt.Errorf("registering client %s: %w", cred.ClientID, err)
+		}
 		mcpLogger.Info("registered pre-configured client", slog.String("client_id", cred.ClientID))
 	}
 
