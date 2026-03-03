@@ -404,6 +404,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 	}, nil)
 
 	auth := mcpauth.NewMapAuthenticator(users)
+
 	authSrv := mcpauth.New(mcpauth.Config{
 		ServerURL:     cfg.MCPServerURL,
 		Users:         auth,
@@ -424,6 +425,7 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		}); err != nil {
 			return fmt.Errorf("registering client %s: %w", cred.ClientID, err)
 		}
+
 		mcpLogger.Info("registered pre-configured client", slog.String("client_id", cred.ClientID))
 	}
 

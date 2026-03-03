@@ -17,7 +17,7 @@ import (
 
 func TestClientCredentials_MCPToolCall(t *testing.T) {
 	h := newHarness(t)
-	h.registerPreConfiguredClient(testClientID, testSecret)
+	h.registerPreConfiguredClient(t, testClientID, testSecret)
 
 	tr := h.clientCredentialsToken(t, testClientID, testSecret)
 	assert.Equal(t, "Bearer", tr.TokenType)
@@ -39,7 +39,7 @@ func TestClientCredentials_MCPToolCall(t *testing.T) {
 
 func TestClientCredentials_ReadFile(t *testing.T) {
 	h := newHarness(t)
-	h.registerPreConfiguredClient(testClientID, testSecret)
+	h.registerPreConfiguredClient(t, testClientID, testSecret)
 
 	tr := h.clientCredentialsToken(t, testClientID, testSecret)
 	session := h.mcpSession(t, tr.AccessToken)
@@ -57,7 +57,7 @@ func TestClientCredentials_ReadFile(t *testing.T) {
 
 func TestClientCredentials_WrongSecret(t *testing.T) {
 	h := newHarness(t)
-	h.registerPreConfiguredClient(testClientID, testSecret)
+	h.registerPreConfiguredClient(t, testClientID, testSecret)
 
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
