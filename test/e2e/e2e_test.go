@@ -236,7 +236,7 @@ func TestOAuthMetadata_AuthorizationServer(t *testing.T) {
 func TestDynamicClientRegistration(t *testing.T) {
 	h := newHarness(t)
 
-	resp := h.doPostJSON(t, "/oauth/register", []byte(`{"redirect_uris": ["http://127.0.0.1:9999/callback"]}`))
+	resp := h.doPostJSON(t, "/oauth/register", []byte(`{"redirect_uris": ["http://127.0.0.1:9999/callback"], "token_endpoint_auth_method": "none"}`))
 	defer resp.Body.Close()
 
 	require.Equal(t, http.StatusCreated, resp.StatusCode)

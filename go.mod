@@ -3,7 +3,7 @@ module github.com/alexjbarnes/vault-sync
 go 1.25.3
 
 require (
-	github.com/alexjbarnes/mcp-auth v0.1.0
+	github.com/alexjbarnes/mcp-auth v0.2.0
 	github.com/caarlos0/env/v11 v11.4.0
 	github.com/coder/websocket v1.8.14
 	github.com/fsnotify/fsnotify v1.9.0

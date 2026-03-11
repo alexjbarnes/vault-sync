@@ -182,7 +182,11 @@ func (h *harness) clientCredentialsToken(t *testing.T, clientID, secret string) 
 func (h *harness) registerDynamicClient(t *testing.T, redirectURIs []string) string {
 	t.Helper()
 
-	body := map[string][]string{"redirect_uris": redirectURIs}
+	body := map[string]any{
+		"redirect_uris":               redirectURIs,
+		"grant_types":                 []string{"authorization_code", "refresh_token"},
+		"token_endpoint_auth_method": "none",
+	}
 	b, err := json.Marshal(body)
 	require.NoError(t, err)
 

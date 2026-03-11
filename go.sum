@@ -1,5 +1,5 @@
-github.com/alexjbarnes/mcp-auth v0.1.0 h1:0eews1vBs9S+tR06qpXtYTdhG2yucXbUJtgsypntne4=
-github.com/alexjbarnes/mcp-auth v0.1.0/go.mod h1:X28n1epJOApNLf5B9BbR5Abqyj3G3YzaBAitC4wuKdw=
+github.com/alexjbarnes/mcp-auth v0.2.0 h1:8r9hV3w4+i4dqajKYvyGeLSyMHyNpis21/jXmV7Sn70=
+github.com/alexjbarnes/mcp-auth v0.2.0/go.mod h1:X28n1epJOApNLf5B9BbR5Abqyj3G3YzaBAitC4wuKdw=
 github.com/caarlos0/env/v11 v11.4.0 h1:Kcb6t5kIIr4XkoQC9AF2j+8E1Jsrl3Wz/hhm1LtoGAc=
 github.com/caarlos0/env/v11 v11.4.0/go.mod h1:qupehSf/Y0TUTsxKywqRt/vJjN5nz6vauiYEUUr8P4U=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
