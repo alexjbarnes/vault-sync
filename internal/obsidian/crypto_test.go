@@ -325,20 +325,21 @@ func TestContentDecrypt_EmptyInput(t *testing.T) {
 	// call DecryptContent on empty input, but test the boundary anyway.
 	c := testCipher(t)
 
-	// Empty input is less than nonce size -- should error.
 	_, err := c.DecryptContent([]byte{})
 	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ciphertext too short")
 }
 
 func TestContentDecrypt_ExactlyNonceSize(t *testing.T) {
-	// If data.length == 12 (nonce size), return empty. Empty files are
-	// transmitted as nonce-only payloads.
+	// A 12-byte payload has no GCM auth tag and must be rejected.
+	// Empty files are handled at the transport layer (pieces=0),
+	// not by accepting unauthenticated nonce-only payloads.
 	c := testCipher(t)
 
 	nonce := make([]byte, 12)
-	dec, err := c.DecryptContent(nonce)
-	require.NoError(t, err)
-	assert.Empty(t, dec)
+	_, err := c.DecryptContent(nonce)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ciphertext too short")
 }
 
 // --- Hash encryption round-trip test ---
@@ -663,14 +664,14 @@ func TestCipherV3Content_DecryptTooShort(t *testing.T) {
 }
 
 func TestCipherV3Content_DecryptExactlyNonceSize(t *testing.T) {
-	// A 12-byte payload (nonce only, no ciphertext) represents empty file content.
-	// This matches the protocol's empty-file wire format.
+	// A 12-byte payload has no GCM auth tag and must be rejected.
+	// Empty files are handled at the transport layer (pieces=0).
 	c := testCipherV3(t)
 
 	nonce := make([]byte, 12)
-	dec, err := c.DecryptContent(nonce)
-	require.NoError(t, err)
-	assert.Empty(t, dec)
+	_, err := c.DecryptContent(nonce)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ciphertext too short")
 }
 
 // =============================================================================
