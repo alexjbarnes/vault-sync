@@ -296,40 +296,44 @@ func (v *Vault) resolve(relPath string) (string, error) {
 
 	// Resolve symlinks and verify the real path stays within the vault.
 	// This prevents a symlink at any path component from escaping the vault.
-	realPath, err := filepath.EvalSymlinks(absPath)
+	// We resolve the longest existing prefix so this works for paths where
+	// trailing components don't exist yet (e.g. WriteFile creating a new file).
+	realPath, err := evalExistingPrefix(absPath)
 	if err != nil {
-		// If the file does not exist yet (WriteFile for a new file), check
-		// the parent directory instead. If the parent is a symlink pointing
-		// outside, that is still a traversal.
-		if os.IsNotExist(err) {
-			parentReal, pErr := filepath.EvalSymlinks(filepath.Dir(absPath))
-			if pErr != nil {
-				// Parent doesn't exist either. MkdirAll will create it.
-				// The prefix check above already passed, so we allow it.
-				return absPath, nil //nolint:nilerr // intentional: parent will be created by MkdirAll
-			}
-
-			parentExpected := filepath.Dir(absPath)
-
-			vaultPrefix := v.dir + string(os.PathSeparator)
-			if !strings.HasPrefix(parentReal+string(os.PathSeparator), vaultPrefix) && parentReal != v.dir {
-				// Check if parentExpected is the vault dir itself (single-level file).
-				if parentExpected != v.dir {
-					return "", fmt.Errorf("symlink traversal blocked: parent of %q resolves to %q outside vault", relPath, parentReal)
-				}
-			}
-
-			return absPath, nil
-		}
-
 		return "", fmt.Errorf("resolving symlinks for %q: %w", relPath, err)
 	}
 
-	if !strings.HasPrefix(realPath, v.dir+string(os.PathSeparator)) && realPath != v.dir {
+	vaultPrefix := v.dir + string(os.PathSeparator)
+	if !strings.HasPrefix(realPath, vaultPrefix) && realPath != v.dir {
 		return "", fmt.Errorf("symlink traversal blocked: %q resolves to %q outside vault dir", relPath, realPath)
 	}
 
 	return absPath, nil
+}
+
+// evalExistingPrefix resolves symlinks for the longest existing prefix of
+// the path. For a path like /vault/newdir/newfile.md where newdir doesn't
+// exist, it evaluates /vault (which does exist) and appends the remaining
+// components. This lets us detect symlink escape even for not-yet-created
+// paths.
+func evalExistingPrefix(abs string) (string, error) {
+	real, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return real, nil
+	}
+
+	dir := filepath.Dir(abs)
+	base := filepath.Base(abs)
+	if dir == abs {
+		return abs, nil
+	}
+
+	parentReal, err := evalExistingPrefix(dir)
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(parentReal, base), nil
 }
 
 // clampMtime restricts a timestamp to the range [2000, 2100) to prevent
