@@ -67,6 +67,13 @@ func New(root string) (*Vault, error) {
 		return nil, fmt.Errorf("resolving vault path: %w", err)
 	}
 
+	// Canonicalize the root so that symlink-resolved paths from
+	// evalExistingPrefix can be compared with a simple prefix check.
+	abs, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		return nil, fmt.Errorf("resolving vault symlinks: %w", err)
+	}
+
 	info, err := os.Stat(abs)
 	if err != nil {
 		return nil, fmt.Errorf("accessing vault path: %w", err)
@@ -117,10 +124,22 @@ func (v *Vault) resolve(relPath string) (string, error) {
 		return "", fmt.Errorf("evaluating path: %w", err)
 	}
 
-	if !strings.HasPrefix(real, v.root+string(filepath.Separator)) && real != v.root {
+	rootPrefix := v.root + string(filepath.Separator)
+	if !strings.HasPrefix(real, rootPrefix) && real != v.root {
 		return "", &Error{
 			Code:    ErrCodePathNotAllowed,
 			Message: fmt.Sprintf("path escapes vault root via symlink: %s", relPath),
+		}
+	}
+
+	// Re-check protected paths against the resolved path so that a
+	// symlink like "bypass -> .obsidian" cannot circumvent the check
+	// that callers perform on the original relative path.
+	realRel := strings.TrimPrefix(real, rootPrefix)
+	if realRel != real && isProtectedPath(realRel) {
+		return "", &Error{
+			Code:    ErrCodePathNotAllowed,
+			Message: fmt.Sprintf("path resolves to protected directory via symlink: %s", relPath),
 		}
 	}
 

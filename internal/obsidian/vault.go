@@ -51,7 +51,14 @@ func NewVault(dir string) (*Vault, error) {
 		return nil, fmt.Errorf("creating vault directory %s: %w", dir, err)
 	}
 
-	return &Vault{dir: dir}, nil
+	// Canonicalize the root so that symlink-resolved paths from
+	// evalExistingPrefix can be compared with a simple prefix check.
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving vault symlinks: %w", err)
+	}
+
+	return &Vault{dir: real}, nil
 }
 
 // Dir returns the root directory of the vault.
