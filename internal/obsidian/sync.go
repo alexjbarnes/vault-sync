@@ -836,11 +836,12 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	}
 
 	// Server error -- abort before sending any binary data.
-	if resp.Err != "" {
+	// The server signals errors with res="err" and the detail in msg.
+	if resp.Res == "err" || resp.Msg != "" {
 		s.recordRetryBackoff(op.path)
 		s.removeHashCache(op.path)
 
-		return fmt.Errorf("server rejected push for %s: %s", op.path, resp.Err)
+		return fmt.Errorf("server rejected push for %s: %s", op.path, resp.Msg)
 	}
 
 	// "ok" means file is unchanged on server, skip upload.
@@ -876,11 +877,11 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 		}
 
 		var ack GenericMessage
-		if err := json.Unmarshal(ackResp, &ack); err == nil && ack.Err != "" {
+		if err := json.Unmarshal(ackResp, &ack); err == nil && (ack.Res == "err" || ack.Msg != "") {
 			s.recordRetryBackoff(op.path)
 			s.removeHashCache(op.path)
 
-			return fmt.Errorf("server rejected push for %s: chunk %d/%d: %s", op.path, i+1, pieces, ack.Err)
+			return fmt.Errorf("server rejected push for %s: chunk %d/%d: %s", op.path, i+1, pieces, ack.Msg)
 		}
 	}
 

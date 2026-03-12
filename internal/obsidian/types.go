@@ -125,8 +125,10 @@ type ClientPushMessage struct {
 }
 
 // GenericMessage is used to decode the "op" field before dispatching.
+// The server signals errors with Res="err" and the detail in Msg,
+// consistent with InitResponse and other message types.
 type GenericMessage struct {
 	Op  string `json:"op"`
 	Res string `json:"res"`
-	Err string `json:"err"`
+	Msg string `json:"msg"`
 }
