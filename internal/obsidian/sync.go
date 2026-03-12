@@ -867,11 +867,20 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 			return fmt.Errorf("sending chunk %d/%d: %w", i+1, pieces, err)
 		}
 
-		if _, err := s.readResponse(ctx); err != nil {
+		ackResp, err := s.readResponse(ctx)
+		if err != nil {
 			s.recordRetryBackoff(op.path)
 			s.removeHashCache(op.path)
 
 			return err
+		}
+
+		var ack GenericMessage
+		if err := json.Unmarshal(ackResp, &ack); err == nil && ack.Err != "" {
+			s.recordRetryBackoff(op.path)
+			s.removeHashCache(op.path)
+
+			return fmt.Errorf("server rejected push for %s: chunk %d/%d: %s", op.path, i+1, pieces, ack.Err)
 		}
 	}
 
@@ -2063,13 +2072,15 @@ func (s *SyncClient) Connected() bool {
 }
 
 // isOperationError returns true for errors that are specific to a single
-// push operation (encryption failure, etc.) rather than connection-level.
+// push operation (encryption failure, server rejection, etc.) rather than
+// connection-level errors that require a reconnect.
 func (s *SyncClient) isOperationError(err error) bool {
 	msg := err.Error()
 
 	return strings.Contains(msg, "encrypting path") ||
 		strings.Contains(msg, "encrypting content") ||
-		strings.Contains(msg, "encrypting hash")
+		strings.Contains(msg, "encrypting hash") ||
+		strings.Contains(msg, "server rejected push")
 }
 
 // Close cleanly shuts down the WebSocket connection.
