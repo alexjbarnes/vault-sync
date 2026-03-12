@@ -85,7 +85,7 @@ func (w *Watcher) Watch(ctx context.Context) error {
 		return fmt.Errorf("creating sync dir: %w", err)
 	}
 
-	if err := w.addRecursive(syncDir); err != nil {
+	if _, err := w.addRecursive(syncDir); err != nil {
 		return fmt.Errorf("watching sync dir: %w", err)
 	}
 
@@ -120,7 +120,11 @@ func (w *Watcher) Watch(ctx context.Context) error {
 				if event.Has(fsnotify.Create) {
 					info, err := os.Lstat(event.Name)
 					if err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-						_ = w.addRecursive(event.Name)
+						files, _ := w.addRecursive(event.Name)
+						now := time.Now()
+						for _, f := range files {
+							pending[f] = now
+						}
 					}
 				}
 			}
@@ -312,18 +316,29 @@ func (w *Watcher) drainQueue(ctx context.Context) {
 	}
 }
 
-func (w *Watcher) addRecursive(dir string) error {
-	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+// addRecursive adds dir and all subdirectories to the fsnotify watcher.
+// It returns the absolute paths of any regular files encountered so the
+// caller can queue them for push (e.g. after a folder rename where
+// fsnotify does not emit per-file events).
+func (w *Watcher) addRecursive(dir string) ([]string, error) {
+	var files []string
+
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if !d.IsDir() {
+		if w.shouldIgnore(path) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+
 			return nil
 		}
 
-		if w.shouldIgnore(path) {
-			return filepath.SkipDir
+		if !d.IsDir() {
+			files = append(files, path)
+			return nil
 		}
 
 		// Skip symlinked directories to prevent watching outside the
@@ -336,6 +351,8 @@ func (w *Watcher) addRecursive(dir string) error {
 
 		return w.watcher.Add(path)
 	})
+
+	return files, err
 }
 
 func (w *Watcher) shouldIgnore(path string) bool {
