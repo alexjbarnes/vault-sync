@@ -148,15 +148,10 @@ func (c *CipherV0) EncryptContent(data []byte) ([]byte, error) {
 
 func (c *CipherV0) decrypt(data []byte) ([]byte, error) {
 	nonceSize := c.gcm.NonceSize()
-	if len(data) < nonceSize {
-		return nil, fmt.Errorf("ciphertext too short: %d bytes", len(data))
-	}
-	// Empty content is transmitted as nonce-only payloads (12 bytes) with
-	// no ciphertext or auth tag. Valid GCM-encrypted empty content would
-	// be 28 bytes (12 nonce + 16 auth tag), so 12 bytes has no tag to
-	// verify. Return empty for compatibility.
-	if len(data) == nonceSize {
-		return []byte{}, nil
+
+	minLen := nonceSize + c.gcm.Overhead()
+	if len(data) < minLen {
+		return nil, fmt.Errorf("ciphertext too short: %d bytes (minimum %d)", len(data), minLen)
 	}
 
 	nonce := data[:nonceSize]
@@ -339,16 +334,15 @@ func (c *CipherV3) EncryptContent(data []byte) ([]byte, error) {
 
 // DecryptContent decrypts AES-GCM encrypted file content.
 // Format: [12-byte IV][ciphertext+GCM tag].
-// A payload of exactly 12 bytes (nonce only, no ciphertext) is treated as
-// empty content, consistent with the protocol's empty-file wire format.
+// The minimum valid payload is 28 bytes (12 nonce + 16 GCM tag for empty
+// plaintext). Empty files are handled at the transport layer (pieces=0)
+// and never reach this function.
 func (c *CipherV3) DecryptContent(data []byte) ([]byte, error) {
 	nonceSize := c.gcm.NonceSize()
-	if len(data) < nonceSize {
-		return nil, fmt.Errorf("ciphertext too short: %d bytes", len(data))
-	}
 
-	if len(data) == nonceSize {
-		return []byte{}, nil
+	minLen := nonceSize + c.gcm.Overhead()
+	if len(data) < minLen {
+		return nil, fmt.Errorf("ciphertext too short: %d bytes (minimum %d)", len(data), minLen)
 	}
 
 	plain, err := c.gcm.Open(nil, data[:nonceSize], data[nonceSize:], nil)

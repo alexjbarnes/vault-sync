@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/alexjbarnes/vault-sync/internal/auth"
 	"github.com/caarlos0/env/v11"
 	"github.com/joho/godotenv"
 )
@@ -202,12 +201,26 @@ type ClientCredential struct {
 }
 
 const (
+	// apiKeyPrefix is the required prefix for all API key values.
+	// The middleware uses this to distinguish API keys from OAuth tokens.
+	apiKeyPrefix = "vs_"
+
+	// apiKeyMinLen is the minimum valid API key length:
+	// 3-char prefix + 64 hex chars (32 bytes of entropy).
+	apiKeyMinLen = 67
+
 	// clientSecretMinLen is the minimum length for client credential secrets.
 	// Shorter secrets do not provide enough entropy for SHA-256 hash-based
 	// authentication. 16 characters is a conservative floor that allows
 	// a range of secret formats (hex, base64, passphrase).
 	clientSecretMinLen = 16
 )
+
+// APIKeyPrefix returns the required prefix for API key values.
+// Exported so main.go can pass it to mcpauth.Config.
+func APIKeyPrefix() string {
+	return apiKeyPrefix
+}
 
 // ParseMCPClientCredentials parses the MCP_CLIENT_CREDENTIALS string.
 // Format: "client1:secret1,client2:secret2"
@@ -290,17 +303,17 @@ func (c *Config) ParseMCPAPIKeys() ([]APIKeyEntry, error) {
 			return nil, fmt.Errorf("empty user or key in entry %d", len(entries)+1)
 		}
 
-		if !strings.HasPrefix(key, auth.APIKeyPrefix) {
-			return nil, fmt.Errorf("API key must start with %q prefix in entry %d", auth.APIKeyPrefix, len(entries)+1)
+		if !strings.HasPrefix(key, apiKeyPrefix) {
+			return nil, fmt.Errorf("API key must start with %q prefix in entry %d", apiKeyPrefix, len(entries)+1)
 		}
 
-		if len(key) < auth.APIKeyMinLen {
-			return nil, fmt.Errorf("API key too short in entry %d (minimum %d characters)", len(entries)+1, auth.APIKeyMinLen)
+		if len(key) < apiKeyMinLen {
+			return nil, fmt.Errorf("API key too short in entry %d (minimum %d characters)", len(entries)+1, apiKeyMinLen)
 		}
 
-		suffix := key[len(auth.APIKeyPrefix):]
+		suffix := key[len(apiKeyPrefix):]
 		if _, err := hex.DecodeString(suffix); err != nil {
-			return nil, fmt.Errorf("API key contains non-hex characters after %q prefix in entry %d", auth.APIKeyPrefix, len(entries)+1)
+			return nil, fmt.Errorf("API key contains non-hex characters after %q prefix in entry %d", apiKeyPrefix, len(entries)+1)
 		}
 
 		if _, dup := seenUsers[userID]; dup {
@@ -314,10 +327,10 @@ func (c *Config) ParseMCPAPIKeys() ([]APIKeyEntry, error) {
 	return entries, nil
 }
 
-// ParseMCPUsers parses the MCP_AUTH_USERS string into a UserCredentials map.
+// ParseMCPUsers parses the MCP_AUTH_USERS string into a username-to-password map.
 // Format: "user1:password1,user2:password2"
-func (c *Config) ParseMCPUsers() (auth.UserCredentials, error) {
-	users := make(auth.UserCredentials)
+func (c *Config) ParseMCPUsers() (map[string]string, error) {
+	users := make(map[string]string)
 	if c.MCPAuthUsers == "" {
 		return users, nil
 	}

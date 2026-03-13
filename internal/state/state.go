@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/alexjbarnes/vault-sync/internal/models"
+	mcpauth "github.com/alexjbarnes/mcp-auth"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -378,7 +378,7 @@ func (s *State) AllServerFiles(vaultID string) (map[string]ServerFile, error) {
 // SaveOAuthToken persists an OAuth token. The TokenHash field must
 // be set by the caller. Raw secrets (Token, RefreshToken) are cleared
 // before writing so they never reach disk.
-func (s *State) SaveOAuthToken(t models.OAuthToken) error {
+func (s *State) SaveOAuthToken(t mcpauth.OAuthToken) error {
 	if t.TokenHash == "" {
 		return fmt.Errorf("token hash is required for persistence")
 	}
@@ -400,8 +400,8 @@ func (s *State) SaveOAuthToken(t models.OAuthToken) error {
 }
 
 // GetOAuthToken returns an OAuth token by its value, or nil if not found.
-func (s *State) GetOAuthToken(token string) (*models.OAuthToken, error) {
-	var t *models.OAuthToken
+func (s *State) GetOAuthToken(token string) (*mcpauth.OAuthToken, error) {
+	var t *mcpauth.OAuthToken
 
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(oauthTokensBucket)
@@ -411,7 +411,7 @@ func (s *State) GetOAuthToken(token string) (*models.OAuthToken, error) {
 			return nil
 		}
 
-		t = &models.OAuthToken{}
+		t = &mcpauth.OAuthToken{}
 
 		return json.Unmarshal(v, t)
 	})
@@ -427,14 +427,14 @@ func (s *State) DeleteOAuthToken(tokenHash string) error {
 }
 
 // AllOAuthTokens returns all stored OAuth tokens.
-func (s *State) AllOAuthTokens() ([]models.OAuthToken, error) {
-	var tokens []models.OAuthToken
+func (s *State) AllOAuthTokens() ([]mcpauth.OAuthToken, error) {
+	var tokens []mcpauth.OAuthToken
 
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(oauthTokensBucket)
 
 		return b.ForEach(func(k, v []byte) error {
-			var t models.OAuthToken
+			var t mcpauth.OAuthToken
 			if err := json.Unmarshal(v, &t); err != nil {
 				return err
 			}
@@ -449,7 +449,7 @@ func (s *State) AllOAuthTokens() ([]models.OAuthToken, error) {
 }
 
 // SaveOAuthClient persists a registered OAuth client.
-func (s *State) SaveOAuthClient(c models.OAuthClient) error {
+func (s *State) SaveOAuthClient(c mcpauth.OAuthClient) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(oauthClientBucket)
 
@@ -463,8 +463,8 @@ func (s *State) SaveOAuthClient(c models.OAuthClient) error {
 }
 
 // GetOAuthClient returns a registered client by ID, or nil if not found.
-func (s *State) GetOAuthClient(clientID string) (*models.OAuthClient, error) {
-	var c *models.OAuthClient
+func (s *State) GetOAuthClient(clientID string) (*mcpauth.OAuthClient, error) {
+	var c *mcpauth.OAuthClient
 
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(oauthClientBucket)
@@ -474,7 +474,7 @@ func (s *State) GetOAuthClient(clientID string) (*models.OAuthClient, error) {
 			return nil
 		}
 
-		c = &models.OAuthClient{}
+		c = &mcpauth.OAuthClient{}
 
 		return json.Unmarshal(v, c)
 	})
@@ -490,14 +490,14 @@ func (s *State) DeleteOAuthClient(clientID string) error {
 }
 
 // AllOAuthClients returns all registered OAuth clients.
-func (s *State) AllOAuthClients() ([]models.OAuthClient, error) {
-	var clients []models.OAuthClient
+func (s *State) AllOAuthClients() ([]mcpauth.OAuthClient, error) {
+	var clients []mcpauth.OAuthClient
 
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(oauthClientBucket)
 
 		return b.ForEach(func(k, v []byte) error {
-			var c models.OAuthClient
+			var c mcpauth.OAuthClient
 			if err := json.Unmarshal(v, &c); err != nil {
 				return err
 			}
@@ -512,7 +512,7 @@ func (s *State) AllOAuthClients() ([]models.OAuthClient, error) {
 }
 
 // SaveAPIKey persists an API key, keyed by its hash.
-func (s *State) SaveAPIKey(keyHash string, ak models.APIKey) error {
+func (s *State) SaveAPIKey(keyHash string, ak mcpauth.APIKey) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(apiKeysBucket)
 
@@ -533,14 +533,14 @@ func (s *State) DeleteAPIKey(keyHash string) error {
 }
 
 // AllAPIKeys returns all stored API keys, keyed by hash.
-func (s *State) AllAPIKeys() (map[string]models.APIKey, error) {
-	result := make(map[string]models.APIKey)
+func (s *State) AllAPIKeys() (map[string]mcpauth.APIKey, error) {
+	result := make(map[string]mcpauth.APIKey)
 
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(apiKeysBucket)
 
 		return b.ForEach(func(k, v []byte) error {
-			var ak models.APIKey
+			var ak mcpauth.APIKey
 			if err := json.Unmarshal(v, &ak); err != nil {
 				return err
 			}
