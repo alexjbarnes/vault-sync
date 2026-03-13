@@ -183,8 +183,8 @@ func (h *harness) registerDynamicClient(t *testing.T, redirectURIs []string) str
 	t.Helper()
 
 	body := map[string]any{
-		"redirect_uris":               redirectURIs,
-		"grant_types":                 []string{"authorization_code", "refresh_token"},
+		"redirect_uris":              redirectURIs,
+		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"token_endpoint_auth_method": "none",
 	}
 	b, err := json.Marshal(body)

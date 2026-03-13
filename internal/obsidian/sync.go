@@ -852,37 +852,11 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 		return nil
 	}
 
-	// Send binary chunks, waiting for ack after each.
-	for i := 0; i < pieces; i++ {
-		start := i * chunkSize
+	if err := s.sendChunks(ctx, op.path, encContent, pieces); err != nil {
+		s.recordRetryBackoff(op.path)
+		s.removeHashCache(op.path)
 
-		end := start + chunkSize
-		if end > len(encContent) {
-			end = len(encContent)
-		}
-
-		if err := s.conn.Write(ctx, websocket.MessageBinary, encContent[start:end]); err != nil {
-			s.recordRetryBackoff(op.path)
-			s.removeHashCache(op.path)
-
-			return fmt.Errorf("sending chunk %d/%d: %w", i+1, pieces, err)
-		}
-
-		ackResp, err := s.readResponse(ctx)
-		if err != nil {
-			s.recordRetryBackoff(op.path)
-			s.removeHashCache(op.path)
-
-			return err
-		}
-
-		var ack GenericMessage
-		if err := json.Unmarshal(ackResp, &ack); err == nil && (ack.Res == "err" || ack.Msg != "") {
-			s.recordRetryBackoff(op.path)
-			s.removeHashCache(op.path)
-
-			return fmt.Errorf("server rejected push for %s: chunk %d/%d: %s", op.path, i+1, pieces, ack.Msg)
-		}
+		return err
 	}
 
 	s.persistPushedFile(op.path, op.content, encHash, op.mtime, op.ctime)
@@ -892,6 +866,36 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 		slog.Int("bytes", len(op.content)),
 	)
 	s.clearRetryBackoff(op.path)
+
+	return nil
+}
+
+// sendChunks sends binary content chunks to the server, waiting for an
+// ack after each. Returns an error if a write fails or the server rejects
+// a chunk.
+func (s *SyncClient) sendChunks(ctx context.Context, path string, encContent []byte, pieces int) error {
+	for i := 0; i < pieces; i++ {
+		start := i * chunkSize
+
+		end := start + chunkSize
+		if end > len(encContent) {
+			end = len(encContent)
+		}
+
+		if err := s.conn.Write(ctx, websocket.MessageBinary, encContent[start:end]); err != nil {
+			return fmt.Errorf("sending chunk %d/%d: %w", i+1, pieces, err)
+		}
+
+		ackResp, err := s.readResponse(ctx)
+		if err != nil {
+			return err
+		}
+
+		var ack GenericMessage
+		if err := json.Unmarshal(ackResp, &ack); err == nil && (ack.Res == "err" || ack.Msg != "") {
+			return fmt.Errorf("server rejected push for %s: chunk %d/%d: %s", path, i+1, pieces, ack.Msg)
+		}
+	}
 
 	return nil
 }

@@ -330,6 +330,7 @@ func evalExistingPrefix(abs string) (string, error) {
 	}
 
 	dir := filepath.Dir(abs)
+
 	base := filepath.Base(abs)
 	if dir == abs {
 		return abs, nil

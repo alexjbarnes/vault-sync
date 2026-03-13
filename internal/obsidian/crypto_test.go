@@ -326,7 +326,7 @@ func TestContentDecrypt_EmptyInput(t *testing.T) {
 	c := testCipher(t)
 
 	_, err := c.DecryptContent([]byte{})
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ciphertext too short")
 }
 
@@ -338,7 +338,7 @@ func TestContentDecrypt_ExactlyNonceSize(t *testing.T) {
 
 	nonce := make([]byte, 12)
 	_, err := c.DecryptContent(nonce)
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ciphertext too short")
 }
 
@@ -670,7 +670,7 @@ func TestCipherV3Content_DecryptExactlyNonceSize(t *testing.T) {
 
 	nonce := make([]byte, 12)
 	_, err := c.DecryptContent(nonce)
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ciphertext too short")
 }
 

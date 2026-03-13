@@ -148,6 +148,7 @@ func (c *CipherV0) EncryptContent(data []byte) ([]byte, error) {
 
 func (c *CipherV0) decrypt(data []byte) ([]byte, error) {
 	nonceSize := c.gcm.NonceSize()
+
 	minLen := nonceSize + c.gcm.Overhead()
 	if len(data) < minLen {
 		return nil, fmt.Errorf("ciphertext too short: %d bytes (minimum %d)", len(data), minLen)
@@ -338,6 +339,7 @@ func (c *CipherV3) EncryptContent(data []byte) ([]byte, error) {
 // and never reach this function.
 func (c *CipherV3) DecryptContent(data []byte) ([]byte, error) {
 	nonceSize := c.gcm.NonceSize()
+
 	minLen := nonceSize + c.gcm.Overhead()
 	if len(data) < minLen {
 		return nil, fmt.Errorf("ciphertext too short: %d bytes (minimum %d)", len(data), minLen)

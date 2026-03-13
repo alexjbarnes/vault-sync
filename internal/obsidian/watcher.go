@@ -121,6 +121,7 @@ func (w *Watcher) Watch(ctx context.Context) error {
 					info, err := os.Lstat(event.Name)
 					if err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 						files, _ := w.addRecursive(event.Name)
+
 						now := time.Now()
 						for _, f := range files {
 							pending[f] = now
