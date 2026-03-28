@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.3.0
+
+### Changed
+
+- Migrated OAuth/PKCE authentication from internal implementation to external `mcp-auth` v0.2.0 library
+- Simplified `MuxConfig` from four fields to two (`Auth` and `MCPHandler`), with all OAuth endpoint registration handled by the library
+- `RegisterPreConfiguredClient` errors now checked and surfaced at startup (was fire-and-forget)
+- Retry (up to 3 attempts) added to Socket Security CI scan for transient API failures
+
+### Fixed
+
+- Server push rejections treated as operation errors instead of connection failures
+- Files inside renamed folders now pushed to server correctly
+- `GenericMessage` uses correct server error field name
+- Ripgrep search cancelled immediately when `maxResults` reached, preventing timeout blocking
+
+### Security
+
+- GCM decryption rejects unauthenticated nonce-only payloads (empty ciphertext with no authentication tag)
+- Vault root canonicalized to block `.obsidian` symlink bypass
+- Symlink escape resolved at all path depths, not just the final component
+
+### Removed
+
+- `internal/auth` package (7 files, ~6,800 lines) replaced by `mcp-auth` library
+- `internal/models/oauth.go` (types now provided by library)
+
 ## v1.2.0
 
 ### Added
