@@ -182,7 +182,7 @@ func TestExecutePush_ServerError(t *testing.T) {
 
 	mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil)
 
-	feedResponse(s, `{"err":"file too large"}`)
+	feedResponse(s, `{"res":"err","msg":"file too large"}`)
 
 	op := syncOp{
 		path:    "rejected.md",

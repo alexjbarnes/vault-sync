@@ -190,6 +190,8 @@ func searchContentRg(vaultRoot, query string, seen map[string]bool, maxResults i
 
 	for scanner.Scan() {
 		if len(matches) >= maxResults {
+			cancel()
+
 			break
 		}
 
