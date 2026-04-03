@@ -37,7 +37,7 @@ jobs:
 
       - name: Update coverage badge
         if: inputs.update-badge
-        uses: schneegans/dynamic-badges-action@v1.7.0
+        uses: schneegans/dynamic-badges-action@v1.8.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: 81bb8ec507bc7d99a603143e2c7e40a5
