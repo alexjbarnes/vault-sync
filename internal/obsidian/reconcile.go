@@ -325,6 +325,8 @@ func (r *Reconciler) executeDecision(ctx context.Context, decision ReconcileDeci
 	switch decision {
 	case DecisionSkip:
 		r.persistServerPush(path, push, push.Deleted)
+		r.client.persistLocalAgreement(path, push, local)
+
 		return nil
 
 	case DecisionDownload:
@@ -877,6 +879,7 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 		sf, hasSF := serverFiles[path]
 		if hasSF && sf.Folder {
 			// Already exists as folder on server -- skip.
+			r.client.persistLocalFolder(path)
 			continue
 		}
 
@@ -901,6 +904,7 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 		if hasSF && !sf.Folder && lf.Hash != "" {
 			encHash, err := r.cipher.EncryptPath(lf.Hash)
 			if err == nil && encHash == sf.Hash {
+				r.client.persistAdoptedLocalFile(lf)
 				continue
 			}
 		}

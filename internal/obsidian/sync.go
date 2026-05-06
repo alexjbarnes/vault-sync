@@ -847,6 +847,16 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	// "ok" means file is unchanged on server, skip upload.
 	if resp.Res == "ok" || resp.Op == "ok" {
 		s.logger.Debug("push skipped, unchanged", slog.String("path", op.path))
+		// Persist from the op snapshot, not a fresh stat, so a concurrent
+		// disk edit between op capture and reply is detected by the next scan.
+		s.persistAdoptedLocalFile(state.LocalFile{
+			Path:  op.path,
+			Hash:  hashHex,
+			MTime: op.mtime,
+			CTime: op.ctime,
+			Size:  int64(len(op.content)),
+		})
+		s.persistSyntheticServerFile(op.path, encHash, op.mtime, op.ctime, int64(len(encContent)))
 		s.clearRetryBackoff(op.path)
 
 		return nil
@@ -1007,6 +1017,7 @@ func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 	switch decision {
 	case DecisionSkip:
 		s.persistServerFile(path, push, push.Deleted)
+		s.persistLocalAgreement(path, push, local)
 
 	case DecisionDeleteLocal:
 		s.logger.Info("server deleted file, removing local copy (while busy)",
@@ -1119,6 +1130,8 @@ func (s *SyncClient) executeLiveDecision(ctx context.Context, decision Reconcile
 	switch decision {
 	case DecisionSkip:
 		s.persistServerFile(path, push, push.Deleted)
+		s.persistLocalAgreement(path, push, local)
+
 		return nil
 
 	case DecisionDownload:
@@ -1670,8 +1683,56 @@ func (s *SyncClient) persistLocalFileAfterWrite(path, contentHash string) {
 	}
 }
 
-// persistLocalFolder records the local state for a directory.
+// persistLocalAgreement adopts local on DecisionSkip, gated on type match
+// and EncryptPath(local.Hash) == push.Hash to filter initial-sync mtime wins.
+func (s *SyncClient) persistLocalAgreement(path string, push PushMessage, local *state.LocalFile) {
+	if local == nil || push.Deleted {
+		return
+	}
+
+	if local.Folder && push.Folder {
+		s.persistLocalFolder(path)
+		return
+	}
+
+	if !local.Folder && !push.Folder && local.Hash != "" {
+		if encLocal, err := s.cipher.EncryptPath(local.Hash); err == nil && encLocal == push.Hash {
+			s.persistAdoptedLocalFile(*local)
+		}
+	}
+}
+
+// persistAdoptedLocalFile writes local state from the caller's snapshot
+// (file-only, no re-stat: keeps MTime/Size/Hash coherent so disk drift
+// surfaces on the next scan). No-ops when the existing record already matches.
+func (s *SyncClient) persistAdoptedLocalFile(lf state.LocalFile) {
+	lf.SyncHash = lf.Hash
+	if existing, err := s.state.GetLocalFile(s.vaultID, lf.Path); err == nil && existing != nil &&
+		!existing.Folder &&
+		existing.Hash == lf.Hash &&
+		existing.SyncHash == lf.SyncHash &&
+		existing.MTime == lf.MTime &&
+		existing.Size == lf.Size {
+		return
+	}
+
+	lf.SyncTime = time.Now().UnixMilli()
+	if err := s.state.SetLocalFile(s.vaultID, lf); err != nil {
+		s.logger.Warn("failed to persist adopted local file state",
+			slog.String("path", lf.Path),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+// persistLocalFolder records the local state for a directory. Skips the
+// bbolt write when the existing record is already a folder for this
+// path -- otherwise every agreement-path skip would rewrite the record.
 func (s *SyncClient) persistLocalFolder(path string) {
+	if existing, err := s.state.GetLocalFile(s.vaultID, path); err == nil && existing != nil && existing.Folder {
+		return
+	}
+
 	now := time.Now().UnixMilli()
 
 	lf := state.LocalFile{
@@ -1775,6 +1836,31 @@ func (s *SyncClient) persistPushedDelete(path string) {
 	}
 
 	s.deleteLocalState(path)
+}
+
+// persistSyntheticServerFile writes a UID=0 placeholder so handleDelete sees
+// the file as server-known after a "ok" reply. Skips when an existing record
+// has the same encrypted hash, preserving any real UID for later merge pulls.
+func (s *SyncClient) persistSyntheticServerFile(path, encHash string, mtime, ctime, size int64) {
+	if existing, err := s.state.GetServerFile(s.vaultID, path); err == nil && existing != nil && existing.Hash == encHash {
+		return
+	}
+
+	sf := state.ServerFile{
+		Path:   path,
+		Hash:   encHash,
+		UID:    0,
+		MTime:  mtime,
+		CTime:  ctime,
+		Size:   size,
+		Folder: false,
+	}
+	if err := s.state.SetServerFile(s.vaultID, sf); err != nil {
+		s.logger.Warn("failed to persist synthetic server file state",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
 // deleteLocalState removes the local file tracking entry from bbolt.
