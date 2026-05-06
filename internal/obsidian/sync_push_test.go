@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alexjbarnes/vault-sync/internal/state"
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -482,6 +483,148 @@ func TestExecutePush_EmptyContentFile(t *testing.T) {
 	}
 	err := s.executePush(ctx, op)
 	require.NoError(t, err)
+}
+
+// --- executePush: server "ok" persists local + synthetic server state ---
+
+func TestExecutePush_OkResponsePersistsState(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	s, _, appState, cipher := fullSyncClient(t)
+	mock := NewMockWSConn(ctrl)
+	s.conn = mock
+	s.inboundCh = make(chan inboundMsg, 16)
+	ctx := context.Background()
+
+	content := []byte("ok-branch content")
+	require.NoError(t, s.vault.WriteFile("ok.md", content, time.Time{}))
+
+	mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil)
+	feedResponse(s, `{"res":"ok"}`)
+
+	const (
+		opMtime = int64(1_700_000_000_000)
+		opCtime = int64(1_700_000_000_000)
+	)
+
+	op := syncOp{
+		path:    "ok.md",
+		content: content,
+		mtime:   opMtime,
+		ctime:   opCtime,
+	}
+	err := s.executePush(ctx, op)
+	require.NoError(t, err)
+
+	expectedHash := sha256Hex(content)
+	encExpectedHash, err := cipher.EncryptPath(expectedHash)
+	require.NoError(t, err)
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "ok.md")
+	require.NoError(t, err)
+	require.NotNil(t, lf)
+	assert.Equal(t, expectedHash, lf.Hash)
+	assert.Equal(t, expectedHash, lf.SyncHash)
+	// Persisted snapshot must come from the op, not a fresh stat.
+	assert.Equal(t, opMtime, lf.MTime)
+	assert.Equal(t, opCtime, lf.CTime)
+	assert.Equal(t, int64(len(content)), lf.Size)
+	assert.Positive(t, lf.SyncTime)
+	assert.False(t, lf.Folder)
+
+	sf, err := appState.GetServerFile(testSyncVaultID, "ok.md")
+	require.NoError(t, err)
+	require.NotNil(t, sf)
+	assert.Equal(t, int64(0), sf.UID)
+	assert.Equal(t, encExpectedHash, sf.Hash)
+	assert.False(t, sf.Folder)
+}
+
+func TestExecutePush_OkResponseSnapshotSurvivesDiskChange(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	s, _, appState, _ := fullSyncClient(t)
+	mock := NewMockWSConn(ctrl)
+	s.conn = mock
+	s.inboundCh = make(chan inboundMsg, 16)
+	ctx := context.Background()
+
+	// Op captures old content + a known old mtime.
+	const oldMtime = int64(1_600_000_000_000)
+
+	oldContent := []byte("old captured content")
+	require.NoError(t, s.vault.WriteFile("racey.md", oldContent, time.UnixMilli(oldMtime)))
+
+	op := syncOp{
+		path:    "racey.md",
+		content: oldContent,
+		mtime:   oldMtime,
+		ctime:   oldMtime,
+	}
+
+	// Simulate a concurrent local edit *before* the server replies "ok".
+	newContent := []byte("local just edited this much later, with a different size entirely")
+	require.NoError(t, s.vault.WriteFile("racey.md", newContent, time.Time{}))
+
+	mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil)
+	feedResponse(s, `{"res":"ok"}`)
+
+	require.NoError(t, s.executePush(ctx, op))
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "racey.md")
+	require.NoError(t, err)
+	require.NotNil(t, lf)
+	// Persisted state must reflect the OP snapshot, not the post-edit disk.
+	assert.Equal(t, oldMtime, lf.MTime, "must persist op.mtime, not the post-edit disk mtime")
+	assert.Equal(t, int64(len(oldContent)), lf.Size, "must persist op size, not the post-edit disk size")
+	assert.Equal(t, sha256Hex(oldContent), lf.Hash)
+
+	// The next scan must still flag this path as Changed because the
+	// disk's (mtime, size) now diverges from the persisted snapshot.
+	scan, err := ScanLocal(s.vault, appState, testSyncVaultID, quietLogger, nil)
+	require.NoError(t, err)
+	assert.Contains(t, scan.Changed, "racey.md", "next scan must re-flag concurrently-edited file")
+}
+
+func TestExecutePush_OkResponsePreservesRealServerUID(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	s, _, appState, cipher := fullSyncClient(t)
+	mock := NewMockWSConn(ctrl)
+	s.conn = mock
+	s.inboundCh = make(chan inboundMsg, 16)
+	ctx := context.Background()
+
+	content := []byte("preserve-uid content")
+	require.NoError(t, s.vault.WriteFile("preserve.md", content, time.Time{}))
+
+	contentHash := sha256Hex(content)
+	encHash, err := cipher.EncryptPath(contentHash)
+	require.NoError(t, err)
+
+	// Pre-populate a real server record with a non-zero UID and a Device.
+	require.NoError(t, appState.SetServerFile(testSyncVaultID, state.ServerFile{
+		Path:   "preserve.md",
+		Hash:   encHash,
+		UID:    123,
+		MTime:  9000,
+		Device: "other-device",
+	}))
+
+	mock.EXPECT().Write(gomock.Any(), websocket.MessageText, gomock.Any()).Return(nil)
+	feedResponse(s, `{"res":"ok"}`)
+
+	op := syncOp{
+		path:    "preserve.md",
+		content: content,
+		mtime:   time.Now().UnixMilli(),
+		ctime:   time.Now().UnixMilli(),
+	}
+	require.NoError(t, s.executePush(ctx, op))
+
+	sf, err := appState.GetServerFile(testSyncVaultID, "preserve.md")
+	require.NoError(t, err)
+	require.NotNil(t, sf)
+	assert.Equal(t, int64(123), sf.UID, "must preserve real UID, not overwrite with synthetic 0")
+	assert.Equal(t, "other-device", sf.Device, "must preserve existing Device")
+	assert.Equal(t, int64(9000), sf.MTime, "must preserve existing server MTime")
 }
 
 // --- executePush: extension extraction ---

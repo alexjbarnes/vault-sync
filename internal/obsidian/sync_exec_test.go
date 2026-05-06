@@ -2,6 +2,7 @@ package obsidian
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -118,6 +119,90 @@ func TestExecuteLiveDecision_Skip(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, sf)
 	assert.Equal(t, int64(1), sf.UID)
+}
+
+func TestExecuteLiveDecision_SkipAdoptsLocal_OnHashMatch(t *testing.T) {
+	s, _, appState, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	hash := "live-hash"
+	encHash := encryptPath(t, cipher, hash)
+	local := &state.LocalFile{Path: "live-skip.md", Hash: hash, MTime: 2000, Size: 11}
+	push := PushMessage{UID: 2, Hash: encHash, MTime: 2000}
+
+	err := s.executeLiveDecision(ctx, DecisionSkip, "live-skip.md", push, local, nil, nil)
+	require.NoError(t, err)
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "live-skip.md")
+	require.NoError(t, err)
+	require.NotNil(t, lf)
+	assert.Equal(t, hash, lf.Hash)
+	assert.Equal(t, hash, lf.SyncHash)
+	assert.Positive(t, lf.SyncTime)
+	assert.Equal(t, int64(2000), lf.MTime)
+	assert.Equal(t, int64(11), lf.Size)
+}
+
+func TestExecuteLiveDecision_SkipInitialLocalWinsDoesNotAdoptLocal(t *testing.T) {
+	s, _, appState, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	differentHash := encryptPath(t, cipher, "server-different")
+	local := &state.LocalFile{Path: "live-init.md", Hash: "local-hash", MTime: 5000}
+	push := PushMessage{UID: 3, Hash: differentHash, MTime: 1000}
+
+	// Sanity: with initial=true and local.MTime >= push.MTime, Reconcile returns Skip.
+	s.initial = true
+
+	defer func() { s.initial = false }()
+
+	decision := Reconcile(local, nil, push, encryptPath(t, cipher, "local-hash"), s.initial)
+	require.Equal(t, DecisionSkip, decision)
+
+	err := s.executeLiveDecision(ctx, decision, "live-init.md", push, local, nil, nil)
+	require.NoError(t, err)
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "live-init.md")
+	require.NoError(t, err)
+	assert.Nil(t, lf, "must not adopt when local hash does not match server hash")
+}
+
+func TestHandlePushWhileBusy_SkipAdoptsLocal_OnHashMatch(t *testing.T) {
+	s, vault, appState, cipher := fullSyncClient(t)
+	ctx := context.Background()
+
+	content := []byte("busy-skip content")
+	require.NoError(t, vault.WriteFile("busy-agree.md", content, time.Time{}))
+	hash := sha256Hex(content)
+	encHash := encryptPath(t, cipher, hash)
+
+	info, _ := vault.Stat("busy-agree.md")
+	require.NoError(t, appState.SetLocalFile(testSyncVaultID, state.LocalFile{
+		Path:  "busy-agree.md",
+		Hash:  hash,
+		MTime: info.ModTime().UnixMilli(),
+		Size:  info.Size(),
+	}))
+
+	encPath := encryptPath(t, cipher, "busy-agree.md")
+	push := PushMessage{
+		Op:    "push",
+		UID:   900,
+		Path:  encPath,
+		Hash:  encHash,
+		MTime: info.ModTime().UnixMilli(),
+	}
+	data, err := json.Marshal(push)
+	require.NoError(t, err)
+
+	s.handlePushWhileBusy(ctx, data)
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "busy-agree.md")
+	require.NoError(t, err)
+	require.NotNil(t, lf)
+	assert.Equal(t, hash, lf.Hash)
+	assert.Equal(t, hash, lf.SyncHash)
+	assert.Positive(t, lf.SyncTime)
 }
 
 func TestExecuteLiveDecision_DownloadFile(t *testing.T) {

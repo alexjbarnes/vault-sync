@@ -1835,6 +1835,283 @@ func TestUploadLocalChanges_ChangedPathNotInCurrent(t *testing.T) {
 	require.NoError(t, err) // skipped silently
 }
 
+// --- uploadLocalChanges: agreement-path adoption ---
+
+func TestUploadLocalChanges_FolderAlreadyOnServer_AdoptsLocal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, _, appState, _, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	pushed := false
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+
+	go func() {
+		for {
+			select {
+			case op := <-s.opCh:
+				pushed = true
+
+				op.result <- nil
+			case <-loopCtx.Done():
+				return
+			}
+		}
+	}()
+
+	t.Cleanup(loopCancel)
+
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{
+			"folder1": {Path: "folder1", Folder: true},
+		},
+		Changed: []string{"folder1"},
+	}
+	serverFiles := map[string]state.ServerFile{
+		"folder1": {Path: "folder1", Folder: true},
+	}
+
+	err := r.uploadLocalChanges(ctx, scan, serverFiles)
+	require.NoError(t, err)
+
+	// No push for an already-known folder.
+	assert.False(t, pushed, "should not push folder that is already on server")
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "folder1")
+	require.NoError(t, err)
+	require.NotNil(t, lf)
+	assert.True(t, lf.Folder)
+	assert.Positive(t, lf.SyncTime)
+}
+
+func TestUploadLocalChanges_ScannedHashMatchesServer_AdoptsScanSnapshot(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, vault, appState, cipher, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	content := []byte("synced content")
+	require.NoError(t, vault.WriteFile("synced.md", content, time.Time{}))
+
+	hash := sha256Hex(content)
+	encHash := encryptPath(t, cipher, hash)
+
+	const (
+		t1 = int64(1234567890)
+		s1 = int64(99) // arbitrary; not the real disk size, to prove no re-stat happens
+	)
+
+	pushed := false
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+
+	go func() {
+		for {
+			select {
+			case op := <-s.opCh:
+				pushed = true
+
+				op.result <- nil
+			case <-loopCtx.Done():
+				return
+			}
+		}
+	}()
+
+	t.Cleanup(loopCancel)
+
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{
+			"synced.md": {
+				Path:  "synced.md",
+				Hash:  hash,
+				MTime: t1,
+				Size:  s1,
+			},
+		},
+		Changed: []string{"synced.md"},
+	}
+	serverFiles := map[string]state.ServerFile{
+		"synced.md": {Path: "synced.md", Hash: encHash},
+	}
+
+	err := r.uploadLocalChanges(ctx, scan, serverFiles)
+	require.NoError(t, err)
+
+	assert.False(t, pushed, "should not push file already on server with matching hash")
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "synced.md")
+	require.NoError(t, err)
+	require.NotNil(t, lf)
+	assert.Equal(t, hash, lf.Hash)
+	assert.Equal(t, hash, lf.SyncHash)
+	assert.Equal(t, t1, lf.MTime, "MTime should come from the scan snapshot, not a re-stat")
+	assert.Equal(t, s1, lf.Size, "Size should come from the scan snapshot, not a re-stat")
+	assert.Positive(t, lf.SyncTime)
+	assert.False(t, lf.Folder)
+}
+
+func TestUploadLocalChanges_RecomputedHashSkipDoesNotAdopt(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, vault, appState, cipher, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	content := []byte("recomputed-only")
+	require.NoError(t, vault.WriteFile("recomp.md", content, time.Time{}))
+
+	hash := sha256Hex(content)
+	encHash := encryptPath(t, cipher, hash)
+
+	pushed := false
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+
+	go func() {
+		for {
+			select {
+			case op := <-s.opCh:
+				pushed = true
+
+				op.result <- nil
+			case <-loopCtx.Done():
+				return
+			}
+		}
+	}()
+
+	t.Cleanup(loopCancel)
+
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{
+			// Empty Hash on the scan snapshot forces the recomputed-hash path.
+			"recomp.md": {Path: "recomp.md", Hash: "", Size: int64(len(content))},
+		},
+		Changed: []string{"recomp.md"},
+	}
+	serverFiles := map[string]state.ServerFile{
+		"recomp.md": {Path: "recomp.md", Hash: encHash},
+	}
+
+	err := r.uploadLocalChanges(ctx, scan, serverFiles)
+	require.NoError(t, err)
+
+	assert.False(t, pushed, "should not push when recomputed hash matches server")
+
+	// Deliberately not adopted: the scan-time tuple is incoherent
+	// (scan Hash is empty), so we don't write a local record here.
+	lf, err := appState.GetLocalFile(testSyncVaultID, "recomp.md")
+	require.NoError(t, err)
+	assert.Nil(t, lf, "recomputed-hash skip should not write local state")
+}
+
+// --- executeDecision DecisionSkip: agreement-path adoption ---
+
+func TestExecuteDecision_SkipAdoptsLocal_OnHashMatch(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, appState, cipher, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	hash := "content-hash"
+	encHash := encryptPath(t, cipher, hash)
+	local := &state.LocalFile{
+		Path:  "agree.md",
+		Hash:  hash,
+		MTime: 1000,
+		Size:  42,
+	}
+	push := PushMessage{UID: 7, Hash: encHash, MTime: 1000}
+
+	err := r.executeDecision(ctx, DecisionSkip, "agree.md", push, local, nil)
+	require.NoError(t, err)
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "agree.md")
+	require.NoError(t, err)
+	require.NotNil(t, lf)
+	assert.Equal(t, hash, lf.Hash)
+	assert.Equal(t, hash, lf.SyncHash)
+	assert.Positive(t, lf.SyncTime)
+	assert.Equal(t, int64(1000), lf.MTime)
+	assert.Equal(t, int64(42), lf.Size)
+}
+
+func TestExecuteDecision_SkipInitialLocalWinsDoesNotAdoptLocal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, appState, cipher, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Local hash differs from server: encryption of "different" != push.Hash.
+	differentHash := encryptPath(t, cipher, "different-server-content")
+	local := &state.LocalFile{
+		Path:  "initwins.md",
+		Hash:  "local-hash",
+		MTime: 5000,
+	}
+	push := PushMessage{UID: 8, Hash: differentHash, MTime: 1000}
+
+	// Sanity: with initial=true and local.MTime >= push.MTime, Reconcile returns Skip.
+	decision := Reconcile(local, nil, push, encryptPath(t, cipher, "local-hash"), true)
+	require.Equal(t, DecisionSkip, decision)
+
+	err := r.executeDecision(ctx, decision, "initwins.md", push, local, nil)
+	require.NoError(t, err)
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "initwins.md")
+	require.NoError(t, err)
+	// No persisted local record because hashes did not match.
+	assert.Nil(t, lf, "must not adopt when local hash differs from server hash")
+}
+
+func TestExecuteDecision_SkipDoesNotAdoptOnDelete(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, appState, cipher, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	hash := "h-del"
+	encHash := encryptPath(t, cipher, hash)
+	local := &state.LocalFile{Path: "del.md", Hash: hash, MTime: 1000}
+	push := PushMessage{UID: 9, Hash: encHash, Deleted: true}
+
+	err := r.executeDecision(ctx, DecisionSkip, "del.md", push, local, nil)
+	require.NoError(t, err)
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "del.md")
+	require.NoError(t, err)
+	assert.Nil(t, lf, "should not adopt local when push is a delete")
+}
+
+// --- end-to-end regression: scan after agreement adoption sees no changes ---
+
+func TestUploadLocalChanges_RegressionNoSecondScanChange(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, s, vault, appState, cipher, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	content := []byte("server already has this")
+	require.NoError(t, vault.WriteFile("steady.md", content, time.Time{}))
+
+	hash := sha256Hex(content)
+	encHash := encryptPath(t, cipher, hash)
+	require.NoError(t, appState.SetServerFile(testSyncVaultID, state.ServerFile{
+		Path: "steady.md",
+		Hash: encHash,
+	}))
+
+	cancel := fakeEventLoop(s)
+	t.Cleanup(cancel)
+
+	// First scan: file is "Changed" because no local entry exists yet.
+	scan1, err := ScanLocal(vault, appState, testSyncVaultID, quietLogger, nil)
+	require.NoError(t, err)
+	require.Contains(t, scan1.Changed, "steady.md")
+
+	serverFiles := map[string]state.ServerFile{
+		"steady.md": {Path: "steady.md", Hash: encHash},
+	}
+	err = r.uploadLocalChanges(ctx, scan1, serverFiles)
+	require.NoError(t, err)
+
+	// Second scan: agreement was persisted, file should not appear as changed.
+	scan2, err := ScanLocal(vault, appState, testSyncVaultID, quietLogger, nil)
+	require.NoError(t, err)
+	assert.NotContains(t, scan2.Changed, "steady.md", "previously-looping file should not re-appear as changed")
+}
+
 // mustJSON marshals v to JSON bytes, panicking on error.
 func mustJSON(v PullResponse) []byte {
 	data, err := json.Marshal(v)
