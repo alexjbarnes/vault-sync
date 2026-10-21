@@ -68,7 +68,18 @@ const (
 	// folder at the same path. The caller should rename the local entry
 	// to a conflict copy and then apply the server version.
 	DecisionTypeConflict
+
+	// DecisionInSync means local and server already agree: both are
+	// folders, or the file hashes match. No disk I/O is needed. The caller
+	// should persist the server push record and record the local copy as
+	// synced, so the next scan does not treat it as changed.
+	DecisionInSync
 )
+
+// adoptBatchSize caps how many local records adoptInSyncFiles writes per
+// bbolt transaction, so a large first run does not hold the write lock
+// for long.
+const adoptBatchSize = 500
 
 // Reconcile decides what to do with an incoming server push by comparing
 // it against the local file state and previous server record. This is a
@@ -103,13 +114,13 @@ func Reconcile(local *state.LocalFile, prev *state.ServerFile, push PushMessage,
 			return DecisionDeleteLocal
 		}
 
-		return DecisionSkip
+		return DecisionInSync
 	}
 
 	// Step 3: hashes match -- files are identical.
 	if !local.Folder && !push.Folder && !push.Deleted && encLocalHash != "" {
 		if encLocalHash == push.Hash {
-			return DecisionSkip
+			return DecisionInSync
 		}
 	}
 
@@ -178,6 +189,11 @@ type Reconciler struct {
 	filter      *SyncFilter
 	logger      *slog.Logger
 	serverFiles map[string]state.ServerFile
+
+	// handled records paths Phase 1 has already acted on. Later pushes for
+	// the same path read current state instead of the scan snapshot, and
+	// adoptInSyncFiles leaves their records alone.
+	handled map[string]bool
 }
 
 // NewReconciler creates a reconciler with the given dependencies.
@@ -190,11 +206,13 @@ func NewReconciler(vault *Vault, client *SyncClient, appState *state.State, vaul
 		cipher:  cipher,
 		filter:  filter,
 		logger:  logger,
+		handled: make(map[string]bool),
 	}
 }
 
 // Phase1 executes the full reconciliation sequence:
-//  1. Process new server files (download, merge, or skip)
+//  1. Process new server files (download, merge, or skip), then record
+//     local files that already match the server
 //  2. Delete remote files that were deleted locally
 //  3. Upload local files that changed offline
 //
@@ -220,6 +238,8 @@ func (r *Reconciler) Phase1(ctx context.Context, serverPushes []ServerPush, scan
 	if err := r.processServerPushes(ctx, serverPushes, scan, serverFiles); err != nil {
 		return fmt.Errorf("phase 1 (server pushes): %w", err)
 	}
+
+	r.adoptInSyncFiles(scan)
 
 	// Store serverFiles for phases 2 and 3.
 	r.serverFiles = serverFiles
@@ -284,23 +304,89 @@ func (r *Reconciler) processOneServerPush(ctx context.Context, sp ServerPush, sc
 		return nil
 	}
 
-	local, hasLocal := scan.Current[path]
-	prev, hasPrev := serverFiles[path]
+	localPtr, prevPtr, encLocalHash := r.currentState(path, scan, serverFiles)
+	r.handled[path] = true
+
+	decision := Reconcile(localPtr, prevPtr, push, encLocalHash, r.client.initial)
+
+	return r.executeDecision(ctx, decision, path, push, localPtr, prevPtr)
+}
+
+// currentState returns the local file, the previous server record and the
+// encrypted local hash for path. The scan snapshot and serverFiles only
+// hold until Phase 1 acts on a path. After that, an earlier push in this
+// batch may have deleted or rewritten the file, so state is read from
+// disk and bbolt instead.
+func (r *Reconciler) currentState(path string, scan *ScanResult, serverFiles map[string]state.ServerFile) (*state.LocalFile, *state.ServerFile, string) {
+	if r.handled[path] {
+		local, encLocalHash := r.client.resolveLocalState(path)
+		return local, r.client.ServerFileState(path), encLocalHash
+	}
 
 	var localPtr *state.LocalFile
-	if hasLocal {
+	if local, ok := scan.Current[path]; ok {
 		localPtr = &local
 	}
 
 	var prevPtr *state.ServerFile
-	if hasPrev {
+	if prev, ok := serverFiles[path]; ok {
 		prevPtr = &prev
 	}
 
-	encLocalHash := r.encryptLocalHash(localPtr)
-	decision := Reconcile(localPtr, prevPtr, push, encLocalHash, r.client.initial)
+	return localPtr, prevPtr, r.encryptLocalHash(localPtr)
+}
 
-	return r.executeDecision(ctx, decision, path, push, localPtr, prevPtr)
+// adoptInSyncFiles records scanned paths that changed offline, or have no
+// local record yet, but already match the server, so the next scan does
+// not flag them again. It runs at the end of Phase 1, before the read loop
+// starts, so no live push can change these paths in the meantime. Paths a
+// server push touched in this batch are skipped, because executing that
+// push already wrote their records from current state.
+func (r *Reconciler) adoptInSyncFiles(scan *ScanResult) {
+	serverFiles, err := r.state.AllServerFiles(r.vaultID)
+	if err != nil {
+		r.logger.Warn("reconcile: loading server files for adoption", slog.String("error", err.Error()))
+		return
+	}
+
+	var adopted []state.LocalFile
+
+	for _, path := range scan.Changed {
+		if r.handled[path] || (r.filter != nil && !r.filter.AllowPath(path)) {
+			continue
+		}
+
+		lf, ok := scan.Current[path]
+		sf, hasSF := serverFiles[path]
+
+		if !ok || !hasSF || lf.Folder != sf.Folder {
+			continue
+		}
+
+		if !lf.Folder {
+			if lf.Hash == "" {
+				continue
+			}
+
+			encHash, err := r.cipher.EncryptPath(lf.Hash)
+			if err != nil || encHash != sf.Hash {
+				continue
+			}
+		}
+
+		adopted = append(adopted, markSynced(lf))
+	}
+
+	for start := 0; start < len(adopted); start += adoptBatchSize {
+		batch := adopted[start:min(start+adoptBatchSize, len(adopted))]
+		if err := r.state.SetFileStates(r.vaultID, nil, batch); err != nil {
+			r.logger.Warn("reconcile: recording in-sync local files", slog.String("error", err.Error()))
+		}
+	}
+
+	if len(adopted) > 0 {
+		r.logger.Info("reconcile: recorded in-sync local files", slog.Int("count", len(adopted)))
+	}
 }
 
 // encryptLocalHash returns the encrypted form of the local file's hash,
@@ -325,8 +411,10 @@ func (r *Reconciler) executeDecision(ctx context.Context, decision ReconcileDeci
 	switch decision {
 	case DecisionSkip:
 		r.persistServerPush(path, push, push.Deleted)
-		r.client.persistLocalAgreement(path, push, local)
+		return nil
 
+	case DecisionInSync:
+		r.client.persistInSync(path, push, local)
 		return nil
 
 	case DecisionDownload:
@@ -879,7 +967,6 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 		sf, hasSF := serverFiles[path]
 		if hasSF && sf.Folder {
 			// Already exists as folder on server -- skip.
-			r.client.persistLocalFolder(path)
 			continue
 		}
 
@@ -904,10 +991,14 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 		if hasSF && !sf.Folder && lf.Hash != "" {
 			encHash, err := r.cipher.EncryptPath(lf.Hash)
 			if err == nil && encHash == sf.Hash {
-				r.client.persistAdoptedLocalFile(lf)
 				continue
 			}
 		}
+
+		// Stat before reading so the pushed mtime is never newer than the
+		// content. An edit after the stat then changes mtime on disk and
+		// the next scan re-hashes, even if this push is recorded as synced.
+		info, statErr := r.vault.Stat(path)
 
 		content, err := r.vault.ReadFile(path)
 		if err != nil {
@@ -930,14 +1021,12 @@ func (r *Reconciler) uploadLocalChanges(ctx context.Context, scan *ScanResult, s
 			}
 		}
 
-		info, err := r.vault.Stat(path)
-
 		var (
 			mtime int64
 			ctime int64
 		)
 
-		if err == nil {
+		if statErr == nil {
 			mtime = info.ModTime().UnixMilli()
 			ctime = fileCtime(info)
 		}

@@ -489,10 +489,8 @@ func TestExecutePush_EmptyContentFile(t *testing.T) {
 
 func TestExecutePush_OkResponsePersistsState(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	s, _, appState, cipher := fullSyncClient(t)
-	mock := NewMockWSConn(ctrl)
-	s.conn = mock
-	s.inboundCh = make(chan inboundMsg, 16)
+	s, mock := withMockConn(t, ctrl)
+	appState, cipher := s.state, s.cipher
 	ctx := context.Background()
 
 	content := []byte("ok-branch content")
@@ -541,10 +539,8 @@ func TestExecutePush_OkResponsePersistsState(t *testing.T) {
 
 func TestExecutePush_OkResponseSnapshotSurvivesDiskChange(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	s, _, appState, _ := fullSyncClient(t)
-	mock := NewMockWSConn(ctrl)
-	s.conn = mock
-	s.inboundCh = make(chan inboundMsg, 16)
+	s, mock := withMockConn(t, ctrl)
+	appState := s.state
 	ctx := context.Background()
 
 	// Op captures old content + a known old mtime.
@@ -586,10 +582,8 @@ func TestExecutePush_OkResponseSnapshotSurvivesDiskChange(t *testing.T) {
 
 func TestExecutePush_OkResponsePreservesRealServerUID(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	s, _, appState, cipher := fullSyncClient(t)
-	mock := NewMockWSConn(ctrl)
-	s.conn = mock
-	s.inboundCh = make(chan inboundMsg, 16)
+	s, mock := withMockConn(t, ctrl)
+	appState, cipher := s.state, s.cipher
 	ctx := context.Background()
 
 	content := []byte("preserve-uid content")

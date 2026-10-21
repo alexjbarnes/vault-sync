@@ -325,6 +325,43 @@ func TestSetServerFile_Overwrite(t *testing.T) {
 	assert.Equal(t, int64(99), sf.UID)
 }
 
+func TestSetFileStates_WritesServerAndLocal(t *testing.T) {
+	s := testDB(t)
+	require.NoError(t, s.InitVaultBuckets(testVault))
+
+	servers := []ServerFile{{Path: "a.md", UID: 1}, {Path: "dir", Folder: true}}
+	locals := []LocalFile{{Path: "a.md", Hash: "h", SyncHash: "h"}}
+	require.NoError(t, s.SetFileStates(testVault, servers, locals))
+
+	allServer, err := s.AllServerFiles(testVault)
+	require.NoError(t, err)
+	assert.Len(t, allServer, 2)
+	assert.True(t, allServer["dir"].Folder)
+
+	lf, err := s.GetLocalFile(testVault, "a.md")
+	require.NoError(t, err)
+	require.NotNil(t, lf)
+	assert.Equal(t, "h", lf.SyncHash)
+}
+
+func TestSetFileStates_EmptyIsNoOp(t *testing.T) {
+	s := testDB(t)
+	// No buckets: an empty call must not open a transaction that fails.
+	require.NoError(t, s.SetFileStates(testVault, nil, nil))
+}
+
+func TestSetFileStates_ErrorBeforeInit(t *testing.T) {
+	s := testDB(t)
+
+	err := s.SetFileStates(testVault, nil, []LocalFile{{Path: "a.md"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not initialized")
+
+	err = s.SetFileStates(testVault, []ServerFile{{Path: "a.md"}}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not initialized")
+}
+
 func TestDeleteServerFile(t *testing.T) {
 	s := testDB(t)
 	require.NoError(t, s.InitVaultBuckets(testVault))

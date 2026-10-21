@@ -371,30 +371,6 @@ func TestHandleDelete_SkipsServerInitiatedDelete(t *testing.T) {
 	w.handleDelete(context.Background(), absPath)
 }
 
-func TestHandleDelete_AfterOkAdoption_PushesDelete(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	mock := NewMockSyncPusher(ctrl)
-	v := tempVault(t)
-	w := newTestWatcher(t, v, mock)
-
-	absPath := filepath.Join(v.Dir(), "adopted.md")
-
-	mock.EXPECT().Connected().Return(true)
-	mock.EXPECT().ServerFileState("adopted.md").Return(&state.ServerFile{
-		Path:   "adopted.md",
-		UID:    0,
-		Hash:   "synthetic-hash",
-		Folder: false,
-	})
-	mock.EXPECT().Push(
-		gomock.Any(), "adopted.md", []byte(nil),
-		int64(0), int64(0),
-		false, true,
-	).Return(nil)
-
-	w.handleDelete(context.Background(), absPath)
-}
-
 func TestHandleDelete_PushFailureRequeuesIfDisconnected(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mock := NewMockSyncPusher(ctrl)

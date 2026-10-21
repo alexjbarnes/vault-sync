@@ -339,6 +339,55 @@ func (s *State) SetServerFile(vaultID string, sf ServerFile) error {
 	})
 }
 
+// SetFileStates persists server and local file states in a single
+// transaction, so related writes share one commit. Does nothing when
+// both slices are empty.
+func (s *State) SetFileStates(vaultID string, servers []ServerFile, locals []LocalFile) error {
+	if len(servers) == 0 && len(locals) == 0 {
+		return nil
+	}
+
+	return s.db.Update(func(tx *bolt.Tx) error {
+		if len(servers) > 0 {
+			b := tx.Bucket(vaultServerBucket(vaultID))
+			if b == nil {
+				return fmt.Errorf("server bucket not initialized for vault %s", vaultID)
+			}
+
+			for _, sf := range servers {
+				data, err := json.Marshal(sf)
+				if err != nil {
+					return err
+				}
+
+				if err := b.Put([]byte(sf.Path), data); err != nil {
+					return err
+				}
+			}
+		}
+
+		if len(locals) > 0 {
+			b := tx.Bucket(vaultLocalBucket(vaultID))
+			if b == nil {
+				return fmt.Errorf("local bucket not initialized for vault %s", vaultID)
+			}
+
+			for _, lf := range locals {
+				data, err := json.Marshal(lf)
+				if err != nil {
+					return err
+				}
+
+				if err := b.Put([]byte(lf.Path), data); err != nil {
+					return err
+				}
+			}
+		}
+
+		return nil
+	})
+}
+
 // DeleteServerFile removes the server file state for a path.
 func (s *State) DeleteServerFile(vaultID, path string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {

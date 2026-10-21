@@ -121,7 +121,7 @@ func TestExecuteLiveDecision_Skip(t *testing.T) {
 	assert.Equal(t, int64(1), sf.UID)
 }
 
-func TestExecuteLiveDecision_SkipAdoptsLocal_OnHashMatch(t *testing.T) {
+func TestExecuteLiveDecision_InSyncAdoptsLocal(t *testing.T) {
 	s, _, appState, cipher := fullSyncClient(t)
 	ctx := context.Background()
 
@@ -130,7 +130,7 @@ func TestExecuteLiveDecision_SkipAdoptsLocal_OnHashMatch(t *testing.T) {
 	local := &state.LocalFile{Path: "live-skip.md", Hash: hash, MTime: 2000, Size: 11}
 	push := PushMessage{UID: 2, Hash: encHash, MTime: 2000}
 
-	err := s.executeLiveDecision(ctx, DecisionSkip, "live-skip.md", push, local, nil, nil)
+	err := s.executeLiveDecision(ctx, DecisionInSync, "live-skip.md", push, local, nil, nil)
 	require.NoError(t, err)
 
 	lf, err := appState.GetLocalFile(testSyncVaultID, "live-skip.md")
@@ -141,6 +141,61 @@ func TestExecuteLiveDecision_SkipAdoptsLocal_OnHashMatch(t *testing.T) {
 	assert.Positive(t, lf.SyncTime)
 	assert.Equal(t, int64(2000), lf.MTime)
 	assert.Equal(t, int64(11), lf.Size)
+
+	sf, err := appState.GetServerFile(testSyncVaultID, "live-skip.md")
+	require.NoError(t, err)
+	require.NotNil(t, sf)
+	assert.Equal(t, int64(2), sf.UID)
+}
+
+func TestPersistInSync_KeepsMatchingLocalRecord(t *testing.T) {
+	s, _, appState, _ := fullSyncClient(t)
+
+	local := &state.LocalFile{Path: "steady.md", Hash: "h", MTime: 3000, Size: 5}
+	s.persistInSync("steady.md", PushMessage{UID: 1, Hash: "enc-h"}, local)
+
+	first, err := appState.GetLocalFile(testSyncVaultID, "steady.md")
+	require.NoError(t, err)
+	require.NotNil(t, first)
+
+	// Make the stored record distinguishable from a rewrite.
+	first.SyncTime = 1
+	require.NoError(t, appState.SetLocalFile(testSyncVaultID, *first))
+
+	s.persistInSync("steady.md", PushMessage{UID: 2, Hash: "enc-h"}, local)
+
+	second, err := appState.GetLocalFile(testSyncVaultID, "steady.md")
+	require.NoError(t, err)
+	require.NotNil(t, second)
+	assert.Equal(t, int64(1), second.SyncTime, "an identical local record must not be rewritten")
+
+	sf, err := appState.GetServerFile(testSyncVaultID, "steady.md")
+	require.NoError(t, err)
+	require.NotNil(t, sf)
+	assert.Equal(t, int64(2), sf.UID, "the server record always follows the latest push")
+}
+
+func TestPersistInSync_Folder(t *testing.T) {
+	s, _, appState, _ := fullSyncClient(t)
+
+	local := &state.LocalFile{Path: "dir", Folder: true, MTime: 4000}
+	s.persistInSync("dir", PushMessage{UID: 3, Folder: true}, local)
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "dir")
+	require.NoError(t, err)
+	require.NotNil(t, lf)
+	assert.True(t, lf.Folder)
+	assert.Empty(t, lf.SyncHash)
+
+	lf.SyncTime = 1
+	require.NoError(t, appState.SetLocalFile(testSyncVaultID, *lf))
+
+	s.persistInSync("dir", PushMessage{UID: 4, Folder: true}, &state.LocalFile{Path: "dir", Folder: true, MTime: 5000})
+
+	again, err := appState.GetLocalFile(testSyncVaultID, "dir")
+	require.NoError(t, err)
+	require.NotNil(t, again)
+	assert.Equal(t, int64(1), again.SyncTime, "an existing folder record must not be rewritten")
 }
 
 func TestExecuteLiveDecision_SkipInitialLocalWinsDoesNotAdoptLocal(t *testing.T) {
@@ -167,7 +222,7 @@ func TestExecuteLiveDecision_SkipInitialLocalWinsDoesNotAdoptLocal(t *testing.T)
 	assert.Nil(t, lf, "must not adopt when local hash does not match server hash")
 }
 
-func TestHandlePushWhileBusy_SkipAdoptsLocal_OnHashMatch(t *testing.T) {
+func TestHandlePushWhileBusy_InSyncAdoptsLocal(t *testing.T) {
 	s, vault, appState, cipher := fullSyncClient(t)
 	ctx := context.Background()
 
@@ -176,7 +231,8 @@ func TestHandlePushWhileBusy_SkipAdoptsLocal_OnHashMatch(t *testing.T) {
 	hash := sha256Hex(content)
 	encHash := encryptPath(t, cipher, hash)
 
-	info, _ := vault.Stat("busy-agree.md")
+	info, err := vault.Stat("busy-agree.md")
+	require.NoError(t, err)
 	require.NoError(t, appState.SetLocalFile(testSyncVaultID, state.LocalFile{
 		Path:  "busy-agree.md",
 		Hash:  hash,
@@ -203,6 +259,74 @@ func TestHandlePushWhileBusy_SkipAdoptsLocal_OnHashMatch(t *testing.T) {
 	assert.Equal(t, hash, lf.Hash)
 	assert.Equal(t, hash, lf.SyncHash)
 	assert.Positive(t, lf.SyncTime)
+}
+
+// testPluginPath is excluded by an empty SyncFilter (plugin sync is off).
+const testPluginPath = ".obsidian/plugins/x/main.js"
+
+func TestHandlePushWhileBusy_FilteredPathWritesNoState(t *testing.T) {
+	s, vault, appState, cipher := fullSyncClient(t)
+	s.filter = &SyncFilter{}
+
+	content := []byte("plugin code")
+	require.NoError(t, vault.WriteFile(testPluginPath, content, time.Time{}))
+
+	push := PushMessage{
+		Op:   "push",
+		UID:  901,
+		Path: encryptPath(t, cipher, testPluginPath),
+		Hash: encryptPath(t, cipher, sha256Hex(content)),
+	}
+	data, err := json.Marshal(push)
+	require.NoError(t, err)
+
+	s.handlePushWhileBusy(context.Background(), data)
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, testPluginPath)
+	require.NoError(t, err)
+	assert.Nil(t, lf, "excluded path must not get a local record")
+
+	sf, err := appState.GetServerFile(testSyncVaultID, testPluginPath)
+	require.NoError(t, err)
+	assert.Nil(t, sf, "excluded path must not get a server record")
+	assert.Equal(t, int64(901), s.version, "the version cursor still advances")
+}
+
+func TestHandlePushWhileBusy_FilteredPathNotDeleted(t *testing.T) {
+	s, vault, appState, cipher := fullSyncClient(t)
+	s.filter = &SyncFilter{}
+
+	content := []byte("plugin code")
+	require.NoError(t, vault.WriteFile(testPluginPath, content, time.Time{}))
+
+	info, err := vault.Stat(testPluginPath)
+	require.NoError(t, err)
+
+	hash := sha256Hex(content)
+	require.NoError(t, appState.SetLocalFile(testSyncVaultID, state.LocalFile{
+		Path:  testPluginPath,
+		Hash:  hash,
+		MTime: info.ModTime().UnixMilli(),
+		Size:  info.Size(),
+	}))
+	require.NoError(t, appState.SetServerFile(testSyncVaultID, state.ServerFile{
+		Path: testPluginPath,
+		Hash: encryptPath(t, cipher, hash),
+		UID:  5,
+	}))
+
+	push := PushMessage{Op: "push", UID: 902, Path: encryptPath(t, cipher, testPluginPath), Deleted: true}
+	data, err := json.Marshal(push)
+	require.NoError(t, err)
+
+	s.handlePushWhileBusy(context.Background(), data)
+
+	_, err = vault.ReadFile(testPluginPath)
+	require.NoError(t, err, "excluded path must not be deleted locally")
+
+	sf, err := appState.GetServerFile(testSyncVaultID, testPluginPath)
+	require.NoError(t, err)
+	assert.NotNil(t, sf, "server record for an excluded path must be left alone")
 }
 
 func TestExecuteLiveDecision_DownloadFile(t *testing.T) {
