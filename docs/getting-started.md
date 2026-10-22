@@ -83,7 +83,7 @@ Place the binary somewhere on your `PATH` if you want to run it from anywhere.
 
 ## 4. Build from source (alternative)
 
-Requires Go 1.25+ and [just](https://github.com/casey/just).
+Requires Go 1.27+ and [just](https://github.com/casey/just).
 
 ```bash
 git clone https://github.com/alexjbarnes/vault-sync.git

@@ -89,7 +89,7 @@ These control which `.obsidian/` files are synced. All default to `false`.
 
 ## Development
 
-Requires Go 1.25+ and [just](https://github.com/casey/just).
+Requires Go 1.27+ and [just](https://github.com/casey/just).
 
 ```bash
 just build              # build binary to bin/vault-sync

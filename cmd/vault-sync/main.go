@@ -487,7 +487,8 @@ func runMCP(ctx context.Context, cfg *config.Config, logger *slog.Logger, appSta
 		<-ctx.Done()
 		mcpLogger.Info("shutting down MCP server")
 
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), mcpShutdownTimeout)
+		// ctx is already cancelled, so detach from it for the grace period.
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mcpShutdownTimeout)
 		defer cancel()
 
 		_ = httpSrv.Shutdown(shutdownCtx)

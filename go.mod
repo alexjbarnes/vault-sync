@@ -1,6 +1,6 @@
 module github.com/alexjbarnes/vault-sync
 
-go 1.26.0
+go 1.27.3
 
 require (
 	github.com/alexjbarnes/mcp-auth v0.2.1
