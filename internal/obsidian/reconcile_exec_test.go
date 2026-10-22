@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,6 +47,32 @@ func fakeEventLoop(s *SyncClient) context.CancelFunc {
 	}()
 
 	return cancel
+}
+
+// countingEventLoop drains opCh like fakeEventLoop and counts the push
+// operations it receives. The loop stops when the test ends.
+func countingEventLoop(t *testing.T, s *SyncClient) *atomic.Int32 {
+	t.Helper()
+
+	var pushes atomic.Int32
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go func() {
+		for {
+			select {
+			case op := <-s.opCh:
+				pushes.Add(1)
+
+				op.result <- nil
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return &pushes
 }
 
 // mockPullDirect sets up mock expectations for a pullDirect call that
@@ -1124,8 +1151,7 @@ func TestUploadLocalChanges_RecomputeHash_MatchesServer(t *testing.T) {
 		Hash: encHash,
 	}))
 
-	cancel := fakeEventLoop(s)
-	defer cancel()
+	pushes := countingEventLoop(t, s)
 
 	scan := &ScanResult{
 		Current: map[string]state.LocalFile{
@@ -1139,7 +1165,13 @@ func TestUploadLocalChanges_RecomputeHash_MatchesServer(t *testing.T) {
 
 	err := r.uploadLocalChanges(ctx, scan, serverFiles)
 	require.NoError(t, err)
-	// No push should happen since recomputed hash matches.
+	assert.Zero(t, pushes.Load(), "no push should happen since recomputed hash matches")
+
+	// Phase 3 never records agreement; that happens in Phase 1 from a
+	// coherent scan snapshot.
+	lf, err := appState.GetLocalFile(testSyncVaultID, "recheck.md")
+	require.NoError(t, err)
+	assert.Nil(t, lf)
 }
 
 func TestUploadLocalChanges_ReadError_Continues(t *testing.T) {
@@ -1833,6 +1865,319 @@ func TestUploadLocalChanges_ChangedPathNotInCurrent(t *testing.T) {
 
 	err := r.uploadLocalChanges(ctx, scan, map[string]state.ServerFile{})
 	require.NoError(t, err) // skipped silently
+}
+
+// --- Phase1: recording files that already match the server ---
+
+func TestPhase1_AdoptsFolderAlreadyOnServer(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, appState, _, _ := fullReconciler(t, ctrl)
+
+	require.NoError(t, appState.SetServerFile(testSyncVaultID, state.ServerFile{Path: "folder1", Folder: true}))
+
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{
+			"folder1": {Path: "folder1", Folder: true},
+		},
+		Changed: []string{"folder1"},
+	}
+
+	require.NoError(t, r.Phase1(context.Background(), nil, scan))
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "folder1")
+	require.NoError(t, err)
+	require.NotNil(t, lf)
+	assert.True(t, lf.Folder)
+	assert.Positive(t, lf.SyncTime)
+}
+
+func TestPhase1_AdoptsScanSnapshotMatchingServer(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, appState, cipher, _ := fullReconciler(t, ctrl)
+
+	hash := sha256Hex([]byte("synced content"))
+	require.NoError(t, appState.SetServerFile(testSyncVaultID, state.ServerFile{
+		Path: "synced.md",
+		Hash: encryptPath(t, cipher, hash),
+	}))
+
+	const (
+		t1 = int64(1234567890)
+		s1 = int64(99) // arbitrary; not a real disk size, to prove no re-stat happens
+	)
+
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{
+			"synced.md": {Path: "synced.md", Hash: hash, MTime: t1, Size: s1},
+		},
+		Changed: []string{"synced.md"},
+	}
+
+	require.NoError(t, r.Phase1(context.Background(), nil, scan))
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "synced.md")
+	require.NoError(t, err)
+	require.NotNil(t, lf)
+	assert.Equal(t, hash, lf.Hash)
+	assert.Equal(t, hash, lf.SyncHash)
+	assert.Equal(t, t1, lf.MTime, "MTime should come from the scan snapshot, not a re-stat")
+	assert.Equal(t, s1, lf.Size, "Size should come from the scan snapshot, not a re-stat")
+	assert.Positive(t, lf.SyncTime)
+	assert.False(t, lf.Folder)
+}
+
+func TestPhase1_DoesNotAdoptWhenServerDiffers(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, appState, cipher, _ := fullReconciler(t, ctrl)
+
+	require.NoError(t, appState.SetServerFile(testSyncVaultID, state.ServerFile{
+		Path: "differs.md",
+		Hash: encryptPath(t, cipher, sha256Hex([]byte("server version"))),
+	}))
+	require.NoError(t, appState.SetServerFile(testSyncVaultID, state.ServerFile{Path: "now-a-file", Folder: true}))
+
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{
+			"differs.md": {Path: "differs.md", Hash: sha256Hex([]byte("local version"))},
+			"now-a-file": {Path: "now-a-file", Hash: sha256Hex([]byte("file content"))},
+		},
+		Changed: []string{"differs.md", "now-a-file"},
+	}
+
+	require.NoError(t, r.Phase1(context.Background(), nil, scan))
+
+	for _, path := range scan.Changed {
+		lf, err := appState.GetLocalFile(testSyncVaultID, path)
+		require.NoError(t, err)
+		assert.Nil(t, lf, "%s does not match the server and must stay unrecorded", path)
+	}
+}
+
+func TestPhase1_AdoptsInBatches(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, appState, cipher, _ := fullReconciler(t, ctrl)
+
+	count := adoptBatchSize + 1
+	scan := &ScanResult{Current: make(map[string]state.LocalFile, count)}
+	servers := make([]state.ServerFile, 0, count)
+
+	for i := range count {
+		path := fmt.Sprintf("note-%d.md", i)
+		hash := sha256Hex([]byte(path))
+		scan.Current[path] = state.LocalFile{Path: path, Hash: hash}
+		scan.Changed = append(scan.Changed, path)
+		servers = append(servers, state.ServerFile{Path: path, Hash: encryptPath(t, cipher, hash)})
+	}
+
+	require.NoError(t, appState.SetFileStates(testSyncVaultID, servers, nil))
+	require.NoError(t, r.Phase1(context.Background(), nil, scan))
+
+	locals, err := appState.AllLocalFiles(testSyncVaultID)
+	require.NoError(t, err)
+	assert.Len(t, locals, count)
+}
+
+// A push batch can hold several records for one path. Here the scan saw
+// an untracked file matching the server, then the batch deleted it and
+// added it back. The re-add must be judged against the now empty disk,
+// so it is downloaded, and the scan snapshot must not overwrite the
+// record the download wrote.
+func TestPhase1_RepeatedPathReadsCurrentState(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, appState, cipher, mock := fullReconciler(t, ctrl)
+
+	content := []byte("restored by another device")
+	hash := sha256Hex(content)
+	encHash := encryptPath(t, cipher, hash)
+	encPath := encryptPath(t, cipher, "p.md")
+
+	require.NoError(t, vault.WriteFile("p.md", content, time.Time{}))
+	require.NoError(t, appState.SetServerFile(testSyncVaultID, state.ServerFile{Path: "p.md", Hash: encHash, UID: 10}))
+
+	mockPullDirect(mock, encryptContent(t, cipher, content))
+
+	pushes := []ServerPush{
+		{Msg: PushMessage{UID: 11, Path: encPath, Deleted: true}, Path: "p.md"},
+		{Msg: PushMessage{UID: 12, Path: encPath, Hash: encHash, MTime: time.Now().UnixMilli()}, Path: "p.md"},
+	}
+	scan := &ScanResult{
+		Current: map[string]state.LocalFile{
+			"p.md": {Path: "p.md", Hash: hash, MTime: 1, Size: 1},
+		},
+		Changed: []string{"p.md"},
+	}
+
+	require.NoError(t, r.Phase1(context.Background(), pushes, scan))
+
+	data, err := vault.ReadFile("p.md")
+	require.NoError(t, err, "re-added file must be downloaded again")
+	assert.Equal(t, content, data)
+
+	sf, err := appState.GetServerFile(testSyncVaultID, "p.md")
+	require.NoError(t, err)
+	require.NotNil(t, sf)
+	assert.Equal(t, int64(12), sf.UID)
+
+	info, err := vault.Stat("p.md")
+	require.NoError(t, err)
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "p.md")
+	require.NoError(t, err)
+	require.NotNil(t, lf)
+	assert.Equal(t, info.ModTime().UnixMilli(), lf.MTime, "local record must describe the file on disk, not the scan snapshot")
+	assert.Equal(t, info.Size(), lf.Size)
+}
+
+// P is synced at A, and another device edits it to B and back to A. After
+// the first record downloads B, the second must compare against B, which
+// is what disk and the server record now hold, and download A.
+func TestPhase1_RepeatedPathUsesCurrentServerRecord(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, appState, cipher, mock := fullReconciler(t, ctrl)
+
+	contentA := []byte("version A")
+	contentB := []byte("version B, which is longer")
+	hashA := sha256Hex(contentA)
+	encPath := encryptPath(t, cipher, "p.md")
+
+	require.NoError(t, vault.WriteFile("p.md", contentA, time.Time{}))
+	info, err := vault.Stat("p.md")
+	require.NoError(t, err)
+
+	synced := state.LocalFile{
+		Path:     "p.md",
+		Hash:     hashA,
+		SyncHash: hashA,
+		MTime:    info.ModTime().UnixMilli(),
+		Size:     info.Size(),
+	}
+	require.NoError(t, appState.SetLocalFile(testSyncVaultID, synced))
+	require.NoError(t, appState.SetServerFile(testSyncVaultID, state.ServerFile{
+		Path: "p.md",
+		Hash: encryptPath(t, cipher, hashA),
+		UID:  10,
+	}))
+
+	mockPullDirect(mock, encryptContent(t, cipher, contentB))
+	mockPullDirect(mock, encryptContent(t, cipher, contentA))
+
+	now := time.Now().UnixMilli()
+	pushes := []ServerPush{
+		{Msg: PushMessage{UID: 11, Path: encPath, Hash: encryptPath(t, cipher, sha256Hex(contentB)), MTime: now}, Path: "p.md"},
+		{Msg: PushMessage{UID: 12, Path: encPath, Hash: encryptPath(t, cipher, hashA), MTime: now}, Path: "p.md"},
+	}
+	scan := &ScanResult{Current: map[string]state.LocalFile{"p.md": synced}}
+
+	require.NoError(t, r.Phase1(context.Background(), pushes, scan))
+
+	data, err := vault.ReadFile("p.md")
+	require.NoError(t, err)
+	assert.Equal(t, contentA, data, "the revert to A must win, not the intermediate B")
+}
+
+func TestPhase1_RegressionNoSecondScanChange(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, vault, appState, cipher, _ := fullReconciler(t, ctrl)
+
+	content := []byte("server already has this")
+	require.NoError(t, vault.WriteFile("steady.md", content, time.Time{}))
+	require.NoError(t, appState.SetServerFile(testSyncVaultID, state.ServerFile{
+		Path: "steady.md",
+		Hash: encryptPath(t, cipher, sha256Hex(content)),
+	}))
+
+	// First scan: file is "Changed" because no local entry exists yet.
+	scan1, err := ScanLocal(vault, appState, testSyncVaultID, quietLogger, nil)
+	require.NoError(t, err)
+	require.Contains(t, scan1.Changed, "steady.md")
+
+	require.NoError(t, r.Phase1(context.Background(), nil, scan1))
+
+	// Second scan: agreement was persisted, file should not appear as changed.
+	scan2, err := ScanLocal(vault, appState, testSyncVaultID, quietLogger, nil)
+	require.NoError(t, err)
+	assert.NotContains(t, scan2.Changed, "steady.md", "previously-looping file should not re-appear as changed")
+}
+
+// --- executeDecision: DecisionSkip and DecisionInSync ---
+
+func TestExecuteDecision_InSyncAdoptsLocal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, appState, cipher, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	hash := "content-hash"
+	encHash := encryptPath(t, cipher, hash)
+	local := &state.LocalFile{
+		Path:  "agree.md",
+		Hash:  hash,
+		MTime: 1000,
+		Size:  42,
+	}
+	push := PushMessage{UID: 7, Hash: encHash, MTime: 1000}
+
+	err := r.executeDecision(ctx, DecisionInSync, "agree.md", push, local, nil)
+	require.NoError(t, err)
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "agree.md")
+	require.NoError(t, err)
+	require.NotNil(t, lf)
+	assert.Equal(t, hash, lf.Hash)
+	assert.Equal(t, hash, lf.SyncHash)
+	assert.Positive(t, lf.SyncTime)
+	assert.Equal(t, int64(1000), lf.MTime)
+	assert.Equal(t, int64(42), lf.Size)
+
+	sf, err := appState.GetServerFile(testSyncVaultID, "agree.md")
+	require.NoError(t, err)
+	require.NotNil(t, sf)
+	assert.Equal(t, int64(7), sf.UID)
+	assert.Equal(t, encHash, sf.Hash)
+}
+
+func TestExecuteDecision_SkipInitialLocalWinsDoesNotAdoptLocal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, appState, cipher, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	// Local hash differs from server: encryption of "different" != push.Hash.
+	differentHash := encryptPath(t, cipher, "different-server-content")
+	local := &state.LocalFile{
+		Path:  "initwins.md",
+		Hash:  "local-hash",
+		MTime: 5000,
+	}
+	push := PushMessage{UID: 8, Hash: differentHash, MTime: 1000}
+
+	// Sanity: with initial=true and local.MTime >= push.MTime, Reconcile returns Skip.
+	decision := Reconcile(local, nil, push, encryptPath(t, cipher, "local-hash"), true)
+	require.Equal(t, DecisionSkip, decision)
+
+	err := r.executeDecision(ctx, decision, "initwins.md", push, local, nil)
+	require.NoError(t, err)
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "initwins.md")
+	require.NoError(t, err)
+	// No persisted local record because hashes did not match.
+	assert.Nil(t, lf, "must not adopt when local hash differs from server hash")
+}
+
+func TestExecuteDecision_SkipDoesNotAdoptOnDelete(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r, _, _, appState, cipher, _ := fullReconciler(t, ctrl)
+	ctx := context.Background()
+
+	hash := "h-del"
+	encHash := encryptPath(t, cipher, hash)
+	local := &state.LocalFile{Path: "del.md", Hash: hash, MTime: 1000}
+	push := PushMessage{UID: 9, Hash: encHash, Deleted: true}
+
+	err := r.executeDecision(ctx, DecisionSkip, "del.md", push, local, nil)
+	require.NoError(t, err)
+
+	lf, err := appState.GetLocalFile(testSyncVaultID, "del.md")
+	require.NoError(t, err)
+	assert.Nil(t, lf, "should not adopt local when push is a delete")
 }
 
 // mustJSON marshals v to JSON bytes, panicking on error.

@@ -847,6 +847,7 @@ func (s *SyncClient) executePush(ctx context.Context, op syncOp) error {
 	// "ok" means file is unchanged on server, skip upload.
 	if resp.Res == "ok" || resp.Op == "ok" {
 		s.logger.Debug("push skipped, unchanged", slog.String("path", op.path))
+		s.persistUnchangedPush(op, hashHex, encHash, int64(len(encContent)))
 		s.clearRetryBackoff(op.path)
 
 		return nil
@@ -1000,6 +1001,11 @@ func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 
 	path = normalizePath(path)
 
+	if s.filter != nil && !s.filter.AllowPath(path) {
+		s.logger.Debug("skipping filtered path while busy", slog.String("path", path))
+		return
+	}
+
 	local, encLocalHash := s.resolveLocalState(path)
 	prev := s.ServerFileState(path)
 	decision := Reconcile(local, prev, push, encLocalHash, s.initial)
@@ -1007,6 +1013,9 @@ func (s *SyncClient) handlePushWhileBusy(ctx context.Context, data []byte) {
 	switch decision {
 	case DecisionSkip:
 		s.persistServerFile(path, push, push.Deleted)
+
+	case DecisionInSync:
+		s.persistInSync(path, push, local)
 
 	case DecisionDeleteLocal:
 		s.logger.Info("server deleted file, removing local copy (while busy)",
@@ -1119,6 +1128,10 @@ func (s *SyncClient) executeLiveDecision(ctx context.Context, decision Reconcile
 	switch decision {
 	case DecisionSkip:
 		s.persistServerFile(path, push, push.Deleted)
+		return nil
+
+	case DecisionInSync:
+		s.persistInSync(path, push, local)
 		return nil
 
 	case DecisionDownload:
@@ -1618,7 +1631,17 @@ func (s *SyncClient) persistServerFile(path string, push PushMessage, deleted bo
 		return
 	}
 
-	sf := state.ServerFile{
+	if err := s.state.SetServerFile(s.vaultID, serverFileFromPush(path, push)); err != nil {
+		s.logger.Warn("failed to persist server file state",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+// serverFileFromPush builds the server record for path from a push.
+func serverFileFromPush(path string, push PushMessage) state.ServerFile {
+	return state.ServerFile{
 		Path:   path,
 		Hash:   push.Hash,
 		UID:    push.UID,
@@ -1627,12 +1650,6 @@ func (s *SyncClient) persistServerFile(path string, push PushMessage, deleted bo
 		Size:   push.Size,
 		Folder: push.Folder,
 		Device: push.Device,
-	}
-	if err := s.state.SetServerFile(s.vaultID, sf); err != nil {
-		s.logger.Warn("failed to persist server file state",
-			slog.String("path", path),
-			slog.String("error", err.Error()),
-		)
 	}
 }
 
@@ -1668,6 +1685,94 @@ func (s *SyncClient) persistLocalFileAfterWrite(path, contentHash string) {
 			slog.String("error", err.Error()),
 		)
 	}
+}
+
+// persistInSync records a DecisionInSync: the server record from push and,
+// unless an identical one is already stored, a local record marking local
+// as synced. Both writes share one transaction.
+func (s *SyncClient) persistInSync(path string, push PushMessage, local *state.LocalFile) {
+	var locals []state.LocalFile
+
+	if local != nil {
+		lf := *local
+		lf.Path = path
+
+		if synced := s.syncedLocalFile(lf); synced != nil {
+			locals = append(locals, *synced)
+		}
+	}
+
+	servers := []state.ServerFile{serverFileFromPush(path, push)}
+	if err := s.state.SetFileStates(s.vaultID, servers, locals); err != nil {
+		s.logger.Warn("failed to persist in-sync file state",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+// persistUnchangedPush records an "ok" reply, which means the server
+// already has this content. The local record comes from the op snapshot,
+// not a fresh stat, so an edit made after the snapshot still changes
+// mtime or size and shows up on the next scan. A UID 0 server record lets
+// handleDelete treat the file as server-known. An existing server record
+// with the same hash is kept instead, preserving its real UID for merges.
+func (s *SyncClient) persistUnchangedPush(op syncOp, contentHash, encHash string, encSize int64) {
+	var servers []state.ServerFile
+
+	if existing := s.ServerFileState(op.path); existing == nil || existing.Hash != encHash {
+		servers = append(servers, serverFileFromPush(op.path, PushMessage{
+			Hash:  encHash,
+			MTime: op.mtime,
+			CTime: op.ctime,
+			Size:  encSize,
+		}))
+	}
+
+	var locals []state.LocalFile
+
+	if synced := s.syncedLocalFile(state.LocalFile{
+		Path:  op.path,
+		Hash:  contentHash,
+		MTime: op.mtime,
+		CTime: op.ctime,
+		Size:  int64(len(op.content)),
+	}); synced != nil {
+		locals = append(locals, *synced)
+	}
+
+	if err := s.state.SetFileStates(s.vaultID, servers, locals); err != nil {
+		s.logger.Warn("failed to persist unchanged push state",
+			slog.String("path", op.path),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+// syncedLocalFile returns lf marked as synced, or nil when the stored
+// record already says the same, so steady-state agreement costs no write.
+func (s *SyncClient) syncedLocalFile(lf state.LocalFile) *state.LocalFile {
+	synced := markSynced(lf)
+
+	existing, err := s.state.GetLocalFile(s.vaultID, lf.Path)
+	if err == nil && existing != nil && existing.Folder == synced.Folder &&
+		(synced.Folder || (existing.Hash == synced.Hash && existing.SyncHash == synced.SyncHash &&
+			existing.MTime == synced.MTime && existing.Size == synced.Size)) {
+		return nil
+	}
+
+	return &synced
+}
+
+// markSynced returns lf recorded as synced at its current hash.
+func markSynced(lf state.LocalFile) state.LocalFile {
+	if !lf.Folder {
+		lf.SyncHash = lf.Hash
+	}
+
+	lf.SyncTime = time.Now().UnixMilli()
+
+	return lf
 }
 
 // persistLocalFolder records the local state for a directory.

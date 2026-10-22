@@ -104,11 +104,11 @@ func TestReconcile(t *testing.T) {
 
 		// --- Step 2: both folders ---
 		{
-			name:  "both folders, not deleted -> skip",
+			name:  "both folders, not deleted -> in sync",
 			local: localFile("dir", "", 100, true),
 			prev:  nil,
 			push:  push("", 10, 200, true, false),
-			want:  DecisionSkip,
+			want:  DecisionInSync,
 		},
 		{
 			name:  "both folders, push deleted -> delete local",
@@ -120,12 +120,12 @@ func TestReconcile(t *testing.T) {
 
 		// --- Step 3: hashes match ---
 		{
-			name:         "hashes match -> skip",
+			name:         "hashes match -> in sync",
 			local:        localFile("a.md", "h1", 100, false),
 			prev:         nil,
 			push:         push("enc_h1", 10, 200, false, false),
 			encLocalHash: "enc_h1",
-			want:         DecisionSkip,
+			want:         DecisionInSync,
 		},
 		{
 			name:         "hashes match but push is folder -> step 5 type conflict",
