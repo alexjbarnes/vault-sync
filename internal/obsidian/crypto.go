@@ -292,7 +292,7 @@ func hkdfDeriveKey(ikm, salt, info []byte, keyLen int) ([]byte, error) {
 // EncryptPath encrypts a path using AES-SIV-CMAC (deterministic, no nonce).
 // Returns hex-encoded [16-byte SIV tag][ciphertext].
 func (c *CipherV3) EncryptPath(path string) (string, error) {
-	ct := c.sivCipher.Seal(nil, nil, []byte(path), nil)
+	ct := c.sivCipher.Seal(nil, nil, []byte(path), nil) //nolint:gosec // G407: AES-SIV is deterministic by design, so equal paths encrypt equally for lookups
 	return hex.EncodeToString(ct), nil
 }
 

@@ -26,11 +26,11 @@ func TestNewMux_RoutesRegistered(t *testing.T) {
 
 	// OAuth metadata endpoint should be wired.
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/.well-known/oauth-protected-resource", nil))
+	mux.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/.well-known/oauth-protected-resource", nil))
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	// MCP endpoint should require auth (401 without token).
 	rec = httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/mcp", nil))
+	mux.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/mcp", nil))
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }

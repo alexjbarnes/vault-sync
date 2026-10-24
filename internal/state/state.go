@@ -439,7 +439,7 @@ func (s *State) SaveOAuthToken(t mcpauth.OAuthToken) error {
 		t.Token = ""
 		t.RefreshToken = ""
 
-		data, err := json.Marshal(t)
+		data, err := json.Marshal(t) //nolint:gosec // G117: Token and RefreshToken are cleared above, only the hash is stored
 		if err != nil {
 			return err
 		}
