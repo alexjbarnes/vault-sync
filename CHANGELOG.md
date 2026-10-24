@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.3.1
+
+### Fixed
+
+- Files already on the server but missing from local state no longer re-pushed on every startup, as local/server agreement is now recorded
+- Startup reconciliation re-reads current state when one batch holds several server records for the same path, so a file deleted and restored elsewhere is downloaded again instead of left missing
+- Sync filter applied to server pushes that arrive while another operation is in flight, so excluded `.obsidian` paths are no longer deleted locally or tracked
+
+### Changed
+
+- Built with Go 1.27.3; building from source now needs Go 1.27+
+- Go dependencies updated, including `modelcontextprotocol/go-sdk` v1.8.0, `go.etcd.io/bbolt` v1.5.0, `coder/websocket` v1.8.15 and `golang.org/x/crypto` v0.58.0
+- CI updated to golangci-lint v2.15.0, TruffleHog v3.99.3 and v7 of `actions/checkout` and `actions/setup-go`
+
 ## v1.3.0
 
 ### Changed
