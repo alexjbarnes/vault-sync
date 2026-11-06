@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/alexjbarnes/mcp-auth v0.2.1
-	github.com/caarlos0/env/v11 v11.4.1
+	github.com/caarlos0/env/v11 v11.4.2
 	github.com/coder/websocket v1.8.15
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/jedisct1/go-aes-siv v1.0.0
